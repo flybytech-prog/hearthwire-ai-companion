@@ -2131,4 +2131,186 @@ TestCase {
     function test_typedPersonaIsSentWithTheFolderLocked() {
         typedPersonaIsSent(true)
     }
+
+    // --- R4: chat bubbles ------------------------------------------------------
+
+    // Like wrapperComponent, laid out right to left.
+    Component {
+        id: mirroredComponent
+        FocusScope {
+            id: mirrored
+            property alias view: chat
+            property bool shown: false
+            anchors.fill: parent
+            LayoutMirroring.enabled: true
+            LayoutMirroring.childrenInherit: true
+
+            OllamaChatView {
+                id: chat
+                anchors.fill: parent
+                focus: true
+                current: mirrored.shown
+                siteEnabled: true
+                appletId: 7
+                renderInterval: 0
+                createRequest: function () { return testCase.newFake() }
+                runOwnerCheck: function (command) { testCase.ownerAsked(chat, command) }
+            }
+        }
+    }
+
+    // Every item with this objectName, shown or not.
+    function allNamed(view, name) {
+        var items = []
+        collect(view, items)
+        return items.filter(function (item) { return item.objectName === name })
+    }
+
+    // The shown text item showing exactly text.
+    function textItem(view, text) {
+        var items = []
+        collect(view, items)
+        for (var index = 0; index < items.length; index++) {
+            if (items[index].visible && items[index].textFormat !== undefined && items[index].text === text)
+                return items[index]
+        }
+        return null
+    }
+
+    // item's rectangle in outer's coordinates.
+    function rectIn(item, outer) {
+        var at = item.mapToItem(outer, 0, 0)
+        return { x: at.x, y: at.y, right: at.x + item.width, bottom: at.y + item.height }
+    }
+
+    function verifyInside(item, outer, what) {
+        var rect = rectIn(item, outer)
+        verify(rect.x >= -1 && rect.y >= -1 && rect.right <= outer.width + 1 && rect.bottom <= outer.height + 1,
+            what + " " + JSON.stringify(rect) + " outside " + outer.width + "x" + outer.height)
+    }
+
+    function test_bubblesAlign_data() {
+        return [
+            { tag: "left to right", mirrored: false },
+            { tag: "right to left", mirrored: true }
+        ]
+    }
+
+    function test_bubblesAlign(data) {
+        var view = ready(undefined, data.mirrored ? mirroredComponent : undefined).view
+        reply(sendText(view, "Hi there"), "Hello")
+        wait(50)
+        var user = named(view, "userBubble")
+        var answer = named(view, "replyBubble")
+        verify(user !== null && answer !== null)
+        // The bubble's parent is its message: the transcript's content width.
+        var userRight = user.x + user.width
+        var answerRight = answer.x + answer.width
+        if (data.mirrored) {
+            verify(Math.abs(user.x) <= 1, "user bubble at " + user.x)
+            verify(Math.abs(answerRight - answer.parent.width) <= 1,
+                "reply bubble ends at " + answerRight + " of " + answer.parent.width)
+        } else {
+            verify(Math.abs(userRight - user.parent.width) <= 1,
+                "user bubble ends at " + userRight + " of " + user.parent.width)
+            verify(Math.abs(answer.x) <= 1, "reply bubble at " + answer.x)
+        }
+        // A short reply's bubble fits its text, well under the cap.
+        verify(answer.width < answer.parent.width * 0.5, "reply bubble " + answer.width)
+        verifyInside(textItem(view, "Hello"), answer, "reply text")
+        verifyInside(textItem(view, "Hi there"), user, "user text")
+    }
+
+    function test_userBubbleIsTheHighlight() {
+        var view = ready().view
+        reply(sendText(view, "Plain <b>me</b>"), "Ok")
+        wait(50)
+        var bubble = named(view, "userBubble")
+        verify(bubble !== null)
+        verify(Qt.colorEqual(bubble.color, bubble.Kirigami.Theme.highlightColor), String(bubble.color))
+        compare(bubble.radius, Kirigami.Units.cornerRadius * 2)
+        var text = textItem(view, "Plain <b>me</b>")
+        verify(text !== null && text.parent === bubble)
+        verify(text.readOnly)
+        compare(text.textFormat, TextEdit.PlainText)
+        verify(Qt.colorEqual(text.color, text.Kirigami.Theme.highlightedTextColor), String(text.color))
+        // The Edit button stays below the bubble, at the right.
+        var edit = named(view, "editButton")
+        verify(edit !== null)
+        verify(edit.y >= bubble.y + bubble.height)
+        verify(Math.abs(edit.x + edit.width - edit.parent.width) <= 1)
+    }
+
+    function test_replyBubbleOnlyForAnswers() {
+        var view = ready().view
+        var request = sendText(view, "Hi")
+        // Thinking: no reply bubble yet, only the state row.
+        request.chunk(line({ message: { role: "assistant", content: "", thinking: "plan" }, done: false }))
+        wait(30)
+        var bubbles = allNamed(view, "replyBubble")
+        compare(bubbles.length, 2)
+        verify(bubbles.every(function (bubble) { return !bubble.visible }))
+        verify(shownTexts(view).indexOf("Thinking…") >= 0)
+        request.chunk(piece("Answer"))
+        request.chunk(line({ done: true }))
+        wait(30)
+        bubbles = allNamed(view, "replyBubble").filter(function (bubble) { return bubble.visible })
+        compare(bubbles.length, 1)
+        var bubble = bubbles[0]
+        verify(Qt.colorEqual(bubble.color, Qt.alpha(bubble.Kirigami.Theme.textColor, 0.06)), String(bubble.color))
+        compare(bubble.radius, Kirigami.Units.cornerRadius * 2)
+        verify(textItem(view, "Answer").parent !== null)
+        verifyInside(textItem(view, "Answer"), bubble, "answer")
+        // The user's row has no shown reply bubble; the reply's has no user bubble.
+        compare(allNamed(view, "userBubble").filter(function (b) { return b.visible }).length, 1)
+        // The copy row stays below the bubble.
+        var items = []
+        collect(view, items)
+        var copy = items.filter(function (item) { return item.visible && item.text === "Copy reply" })
+        compare(copy.length, 1)
+        verify(copy[0].mapToItem(bubble, 0, 0).y >= bubble.height)
+    }
+
+    function test_longWordWrapsInsideTheBubble() {
+        var view = ready().view
+        var word = new Array(301).join("w")
+        reply(sendText(view, "Long"), word)
+        wait(50)
+        var bubble = named(view, "replyBubble")
+        verify(bubble !== null)
+        var pane = bubble.parent.width
+        verify(bubble.width <= pane * 0.92 + 1, bubble.width + " > 92% of " + pane)
+        var text = textItem(view, word)
+        verify(text !== null)
+        verify(text.lineCount > 1, "not wrapped: " + text.lineCount)
+        verify(text.contentWidth <= text.width + 1)
+        verifyInside(text, bubble, "long word")
+    }
+
+    function test_codeBlockFitsInsideTheBubble() {
+        var view = ready().view
+        reply(sendText(view, "Code"), "Short.\n```js\nx = 1\n```\nAfter")
+        wait(50)
+        var bubble = named(view, "replyBubble")
+        verify(bubble !== null)
+        verify(bubble.width <= bubble.parent.width * 0.92 + 1)
+        var code = textItem(view, "x = 1")
+        verify(code !== null)
+        // The code block: its alternate-background box.
+        var box = code.parent
+        verify(Qt.colorEqual(box.color, box.Kirigami.Theme.alternateBackgroundColor), String(box.color))
+        verifyInside(box, bubble, "code block")
+        verifyInside(textItem(view, "Short."), bubble, "paragraph")
+        verifyInside(textItem(view, "After"), bubble, "paragraph")
+    }
+
+    function test_hiddenCharsNoteIsInsideTheBubble() {
+        var view = ready().view
+        reply(sendText(view, "Hi"), "Hid​den")
+        wait(50)
+        var bubble = named(view, "replyBubble")
+        var note = named(view, "hiddenCharsNote")
+        verify(bubble !== null && note !== null)
+        verifyInside(note, bubble, "note")
+    }
 }

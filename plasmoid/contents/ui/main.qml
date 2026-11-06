@@ -1314,7 +1314,8 @@ PlasmoidItem {
         return ""
     }
     // AI Provider Settings → Hover popup: each provider in bold with one
-    // reading per line; no bars or reset times, to keep it short.
+    // reading per line, a dot in its level colour (percentages only); no bars
+    // or reset times, to keep it short.
     readonly property var tooltipSections: {
         if (!root.usageShown || !root.tooltipShowsUsage || !root.hasData)
             return []
@@ -1327,9 +1328,12 @@ PlasmoidItem {
                 var metric = Catalog.metric(group.provider_id, metricId)
                 if (!metric)
                     continue
+                var reading = root.metricReading(group.provider, metricId)
                 items.push({
                     title: metric.title,
-                    value: root.tooltipValue(root.metricReading(group.provider, metricId))
+                    value: root.tooltipValue(reading),
+                    level: reading && reading.type === "percentage"
+                        ? UsageLogic.usageLevel(reading.raw_used, root.usageThresholds) : ""
                 })
             }
             groups.push({name: group.descriptor.display_name, items: items})
@@ -1339,6 +1343,9 @@ PlasmoidItem {
     property Item usageTooltip: UsageTooltip {
         title: i18n("Hearthside")
         sections: root.tooltipSections
+        normalColor: root.normalUsageColor
+        warningColor: root.warnUsageColor
+        criticalColor: root.criticalUsageColor
     }
     toolTipItem: root.tooltipSections.length > 0 ? root.usageTooltip : null
 

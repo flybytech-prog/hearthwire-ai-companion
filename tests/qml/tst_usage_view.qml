@@ -1,6 +1,8 @@
 import QtQuick
 import QtTest
+import org.kde.kirigami as Kirigami
 import "../../plasmoid/contents/ui"
+import "../../plasmoid/contents/ui/ProviderAccent.js" as ProviderAccent
 
 // UsageView with provider text that tries to be markup: every name, plan,
 // caption, error and amount from the helper is shown literally, as plain
@@ -336,6 +338,115 @@ TestCase {
         root.lastError = long
         wait(20)
         verify(shownTexts().indexOf(cut) >= 0)
+    }
+
+    function findAllNamed(name) {
+        var items = []
+        collect(usage, items)
+        return items.filter(function (item) { return item.objectName === name })
+    }
+
+    function shownIn(item) {
+        var shown = item.visible
+        for (var parent = item.parent; shown && parent && parent !== usage; parent = parent.parent)
+            shown = parent.visible
+        return shown
+    }
+
+    function resetSnapshot(now) {
+        var iso = function (ms) { return new Date(now + ms).toISOString() }
+        return {
+            installed_provider_ids: ["claude", "codex", "cursor"],
+            providers: [{
+                provider_id: "claude", display_name: testCase.marker, plan: "Max", status: "ok",
+                windows: [
+                    { kind: "session", caption: testCase.marker, used_percent: 10,
+                      resets_at: iso(2 * 3600000 + 10 * 60000 + 5000) },
+                    { kind: "weekly", caption: "7-day window", used_percent: 70, resets_at: iso(3 * 86400000) }
+                ]
+            }, {
+                provider_id: "codex", display_name: "Codex", status: "ok",
+                windows: [
+                    { kind: "weekly", caption: "Codex week", used_percent: 5, resets_at: iso(5 * 3600000) },
+                    { kind: "session", caption: "gone", used_percent: 5, resets_at: iso(-60000) }
+                ]
+            }, {
+                // Unknown kinds and providers never name the next reset.
+                provider_id: "cursor", display_name: "Cursor", status: "ok",
+                windows: [{ kind: testCase.marker, caption: testCase.marker, used_percent: 5, resets_at: iso(60000) }]
+            }, {
+                provider_id: "nope", display_name: "Nope", status: "ok",
+                windows: [{ kind: "weekly", caption: "x", used_percent: 5, resets_at: iso(60000) }]
+            }]
+        }
+    }
+
+    // U1: "Next reset" names the soonest reset of the readings shown, with
+    // catalog names only, as plain text; hidden when none lies ahead.
+    function test_nextResetLine() {
+        var now = Date.now()
+        usage.nowMs = now
+        root.snapshot = resetSnapshot(now)
+        wait(20)
+        var label = findNamed("usageNextResetLabel")
+        verify(label !== null)
+        compare(label.textFormat, Text.PlainText)
+        compare(label.elide, Text.ElideRight)
+        verify(shownIn(label))
+        compare(label.text, "Next reset: Claude Code Session in 2h 10m")
+        // Below the "Updated" line.
+        verify(label.mapToItem(usage, 0, 0).y > findNamed("usageUpdatedLabel").mapToItem(usage, 0, 0).y)
+        // Only the readings the tab shows count.
+        root.metricChoice = {claude: ["weekly"]}
+        wait(20)
+        compare(label.text, "Next reset: Codex Weekly in 5h 0m")
+        // The 30 s clock moves it on.
+        usage.nowMs = now + 6 * 3600000
+        wait(20)
+        compare(label.text, "Next reset: Claude Code Weekly in 2d 18h")
+        usage.nowMs = now + 4 * 86400000
+        wait(20)
+        compare(label.text, "")
+        verify(!label.visible)
+        root.hasData = false
+        usage.nowMs = now
+        wait(20)
+        verify(!label.visible)
+    }
+
+    // U1: a decorative accent strip on the leading edge of every catalog
+    // provider's section, in both layouts.
+    function test_accentStrips() {
+        var layouts = [false, true]
+        for (var layout = 0; layout < layouts.length; layout++) {
+            root.usageCompact = layouts[layout]
+            root.snapshot = claudeSnapshot()
+            wait(20)
+            var strips = findAllNamed("providerAccent").filter(shownIn)
+            compare(strips.length, 2, "compact " + layouts[layout])
+            var background = Kirigami.Theme.backgroundColor
+            var ids = ["claude", "codex"]
+            for (var index = 0; index < strips.length; index++) {
+                var strip = strips[index]
+                verify(Qt.colorEqual(strip.color, ProviderAccent.accentFor(
+                    ids[index], background.r, background.g, background.b)), ids[index])
+                verify(strip.width > 0 && strip.width < strip.height)
+                // Leading edge: left of everything else in the section.
+                var section = strip.parent.parent
+                var left = strip.mapToItem(usage, strip.width, 0).x
+                verify(left <= section.mapToItem(usage, 0, 0).x, "strip inside its section")
+                verify(strip.mapToItem(usage, 0, 0).x >= 0)
+                fuzzyCompare(strip.height, section.height, 0.5)
+                fuzzyCompare(strip.mapToItem(usage, 0, 0).y, section.mapToItem(usage, 0, 0).y, 0.5)
+            }
+        }
+        // A provider the catalog doesn't know gets no strip.
+        root.usageCompact = false
+        root.snapshot = {installed_provider_ids: ["nope"], providers: [{
+            provider_id: "nope", display_name: "Nope", status: "ok",
+            windows: [{ kind: "weekly", caption: "x", used_percent: 5, resets_at: null }]}]}
+        wait(20)
+        compare(findAllNamed("providerAccent").filter(shownIn).length, 0)
     }
 
     // A helper error without data: shown in a plain label, not the

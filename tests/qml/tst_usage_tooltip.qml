@@ -99,6 +99,42 @@ TestCase {
         verify(!findAll(small, "tooltipProvider")[0].truncated)
     }
 
+    // T1: a dot per reading in the level's colour; money and credits get a
+    // clear one, so every title starts in the same column.
+    function test_levelDots() {
+        var tip = createTemporaryObject(tooltipComponent, this, {
+            normalColor: "#00ff00", warningColor: "#ffaa00", criticalColor: "#ff0000",
+            sections: [
+                {name: "Claude Code", items: [
+                    {title: "Session", value: "5% left", level: "critical"},
+                    {title: "Weekly", value: "30% left", level: "warning"},
+                    {title: "Sonnet", value: "90% left", level: "normal"},
+                    {title: "Extra Usage", value: "$4.00", level: ""}
+                ]},
+                {name: "Codex", items: [{title: "Credits", value: "12"}]}
+            ]
+        })
+        verify(tip)
+        tryVerify(function () { return tip.implicitWidth > 0 })
+        var dots = findAll(tip, "tooltipReadingDot")
+        var titles = findAll(tip, "tooltipReadingTitle")
+        compare(dots.length, 5)
+        verify(Qt.colorEqual(dots[0].color, "#ff0000"))
+        verify(Qt.colorEqual(dots[1].color, "#ffaa00"))
+        verify(Qt.colorEqual(dots[2].color, "#00ff00"))
+        compare(dots[3].color.a, 0)
+        compare(dots[4].color.a, 0)
+        for (var index = 0; index < dots.length; index++) {
+            verify(dots[index].width > 0 && dots[index].width === dots[index].height)
+            fuzzyCompare(titles[index].mapToItem(tip, 0, 0).x, titles[0].mapToItem(tip, 0, 0).x, 0.5)
+            // The dot comes before its title (after it in right-to-left).
+            verify(dots[index].mapToItem(tip, dots[index].width, 0).x <= titles[index].mapToItem(tip, 0, 0).x)
+        }
+        // The user changing a colour repaints the dots.
+        tip.criticalColor = "#0000ff"
+        verify(Qt.colorEqual(dots[0].color, "#0000ff"))
+    }
+
     function test_empty() {
         var tip = createTemporaryObject(tooltipComponent, this, {sections: []})
         compare(findAll(tip, "tooltipProvider").length, 0)

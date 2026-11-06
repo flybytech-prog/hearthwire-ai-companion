@@ -84,12 +84,30 @@ TestCase {
             null
         ]
         compare(TooltipLogic.tooltipSections(groups), [{name: "Claude Code", items: [
-            {title: "Session", value: "38% used"},
-            {title: "Weekly", value: "20% used"}
+            {title: "Session", value: "38% used", level: ""},
+            {title: "Weekly", value: "20% used", level: ""}
         ]}])
         compare(TooltipLogic.tooltipSections(undefined), [])
         // Everything comes back as plain strings.
         compare(TooltipLogic.tooltipSections([{name: 5, items: [{title: null, value: 7}]}]),
-                [{name: "5", items: [{title: "", value: "7"}]}])
+                [{name: "5", items: [{title: "", value: "7", level: ""}]}])
+    }
+
+    // T1: each reading keeps its level for the dot; anything else is ""
+    // (money, credits, missing readings), a clear dot.
+    function test_sectionLevels() {
+        var sections = TooltipLogic.tooltipSections([{name: "Claude Code", items: [
+            {title: "Session", value: "90% used", level: "critical"},
+            {title: "Weekly", value: "70% used", level: "warning"},
+            {title: "Sonnet", value: "10% used", level: "normal"},
+            {title: "Extra Usage", value: "$1.00", level: ""},
+            {title: "Fable", value: "x", level: "CRITICAL"},
+            {title: "Odd", value: "x", level: {toString: function () { return "warning" }}},
+            {title: "Number", value: "x", level: 3}
+        ]}])
+        compare(sections[0].items.map(function (item) { return item.level }),
+                ["critical", "warning", "normal", "", "", "", ""])
+        compare(TooltipLogic.readingLevel(undefined), "")
+        compare(TooltipLogic.readingLevel("normal"), "normal")
     }
 }

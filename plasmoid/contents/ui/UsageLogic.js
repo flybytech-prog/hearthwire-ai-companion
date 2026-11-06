@@ -311,6 +311,27 @@ function shortCountdown(resetsAtMs, nowMs) {
     return {days: Math.floor(minutes / 1440), hours: Math.floor(minutes / 60) % 24, minutes: minutes % 60}
 }
 
+// The Usage tab's "Next reset" line: of entries ({resetsAtMs, ...}, one per
+// reading it shows), the one whose reset comes soonest after nowMs, the
+// first of equals; null when none lies ahead. Returns the entry itself; the
+// caller builds the text from the catalog.
+function nextReset(entries, nowMs) {
+    var now = Number(nowMs)
+    if (nowMs === null || nowMs === undefined || nowMs === "" || !isFinite(now))
+        return null
+    var list = toArray(entries)
+    var best = null
+    for (var index = 0; index < list.length; index++) {
+        var entry = list[index]
+        if (!entry || typeof entry !== "object" || typeof entry.resetsAtMs !== "number"
+                || !isFinite(entry.resetsAtMs) || entry.resetsAtMs <= now)
+            continue
+        if (best === null || entry.resetsAtMs < best.resetsAtMs)
+            best = entry
+    }
+    return best
+}
+
 // Settings schema 2 -> 3: providerMetrics used to choose only the hover
 // popup's readings (and the alerts'), and now filters the Usage tab. Returns
 // the strings to store: providerMetrics becomes "{}" (show every reading),

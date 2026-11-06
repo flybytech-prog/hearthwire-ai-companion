@@ -117,8 +117,15 @@ function applyChoice(groups, choice) {
     return result
 }
 
-// groups: [{name, items: [{title, value}]}], already translated text. The
-// hover popup shows each provider's name with one reading per line; this
+// A reading's level for the hover popup's dot: "normal", "warning" or
+// "critical" as UsageLogic.usageLevel gives it, else "" (money, credits and
+// missing readings: an empty dot that only keeps the columns aligned).
+function readingLevel(level) {
+    return level === "normal" || level === "warning" || level === "critical" ? level : ""
+}
+
+// groups: [{name, items: [{title, value, level}]}], already translated text.
+// The hover popup shows each provider's name with one reading per line; this
 // keeps the providers that have readings, as plain strings.
 function tooltipSections(groups) {
     var list = Array.isArray(groups) ? groups : []
@@ -132,7 +139,11 @@ function tooltipSections(groups) {
         sections.push({
             name: String(group.name || ""),
             items: items.map(function (entry) {
-                return {title: String(entry.title || ""), value: String(entry.value || "")}
+                return {
+                    title: String(entry.title || ""),
+                    value: String(entry.value || ""),
+                    level: readingLevel(entry.level)
+                }
             })
         })
     }

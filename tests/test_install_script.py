@@ -243,19 +243,39 @@ ICON_NAMES = ("hearthside.svg", "hearthside-settings-general.svg", "hearthside-s
               "hearthside-settings-chat.svg")
 
 
-def run_uninstall(tmp_path, reply_text):
-    """--uninstall-web-data with a python3 stub that prints ``reply_text`` as the helper's reply."""
+HISTORY_CLEARED = '{"ok":true}'
+
+
+def run_uninstall(tmp_path, reply_text, history_reply=HISTORY_CLEARED, *, extra_env=None):
+    """--uninstall-web-data with a python3 stub: ``reply_text`` answers --web-data purge,
+    ``history_reply`` answers --usage-history clear; every call is logged to tmp_path/helper-calls."""
     project = _copied_project(tmp_path)
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     stubs = tmp_path / "stub-bin"
     stubs.mkdir(exist_ok=True)
-    _stub(stubs, "python3", f"#!/bin/sh\nprintf '%s\\n' '{reply_text}'\n")
+    log = tmp_path / "helper-calls"
+    _stub(stubs, "python3", (
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> '{log}'\n"
+        'case "$*" in\n'
+        f"    '-P -m hearthside --web-data purge') printf '%s\\n' '{reply_text}' ;;\n"
+        f"    '-P -m hearthside --usage-history clear') printf '%s\\n' '{history_reply}' ;;\n"
+        "    *) exit 97 ;;\n"
+        "esac\n"
+    ))
+    env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home)}
+    env.update(extra_env or {})
     return subprocess.run(
         ["sh", str(project / "scripts" / "install.sh"), "--uninstall-web-data"],
         stdin=subprocess.DEVNULL, capture_output=True, text=True,
-        env={"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home)}, timeout=60, check=False,
+        env=env, timeout=60, check=False,
     )
+
+
+def helper_calls(tmp_path):
+    log = tmp_path / "helper-calls"
+    return log.read_text().splitlines() if log.exists() else []
 
 
 def _icon_directory(tmp_path):
@@ -298,3 +318,61 @@ def test_uninstall_web_data_keeps_the_icons_when_nothing_was_deleted(tmp_path):
     completed = run_uninstall(tmp_path, '{"ok":false,"error":"not-locked"}')
     assert completed.returncode == 1
     assert sorted(os.listdir(directory)) == sorted(ICON_NAMES)
+
+
+# --- --uninstall-web-data: the usage history ----------------------------------------------------
+
+
+@pytest.mark.parametrize("reply_text", ['{"ok":true,"removed":[]}', '{"ok":true,"removed":["vault"]}'])
+def test_uninstall_web_data_clears_the_usage_history_after_the_purge(tmp_path, reply_text):
+    completed = run_uninstall(tmp_path, reply_text)
+    assert (completed.returncode, completed.stderr) == (0, "")
+    assert helper_calls(tmp_path) == ["-P -m hearthside --web-data purge", "-P -m hearthside --usage-history clear"]
+
+
+@pytest.mark.parametrize("reply_text", ['{"ok":false,"error":"not-locked"}', '{"ok":false,"error":"busy"}',
+                                        '{"ok":false,"error":"symlink"}', "garbage"])
+def test_uninstall_web_data_keeps_the_history_when_the_purge_failed(tmp_path, reply_text):
+    completed = run_uninstall(tmp_path, reply_text)
+    assert completed.returncode == 1
+    assert helper_calls(tmp_path) == ["-P -m hearthside --web-data purge"]
+
+
+@pytest.mark.parametrize("history_reply", ['{"ok":false,"error":"busy"}', '{"ok":false,"error":"symlink"}',
+                                           '{"ok":true,"x":1}', ""])
+def test_uninstall_web_data_fails_and_keeps_the_icons_when_the_history_stays(tmp_path, history_reply):
+    directory = _icon_directory(tmp_path)
+    for name in ICON_NAMES:
+        (directory / name).write_text("<svg/>")
+    completed = run_uninstall(tmp_path, '{"ok":true,"removed":[]}', history_reply)
+    assert completed.returncode == 1
+    assert "usage history" in completed.stderr
+    assert sorted(os.listdir(directory)) == sorted(ICON_NAMES)
+
+
+def test_uninstall_web_data_really_deletes_the_history_folder(tmp_path):
+    """The real helper from the copied checkout clears it; only the purge is stubbed."""
+    project = _copied_project(tmp_path)
+    shutil.copytree(ROOT / "src", project / "src", ignore=shutil.ignore_patterns("__pycache__"))
+    home = tmp_path / "home"
+    data = tmp_path / "data"
+    history = data / "hearthside" / "usage-history"
+    history.mkdir(parents=True)
+    (history / "history.json").write_text('{"history_version":1,"series":[]}')
+    (history / "history.lock").write_text("")
+    home.mkdir()
+    stubs = tmp_path / "stub-bin"
+    stubs.mkdir()
+    _stub(stubs, "python3", (
+        "#!/bin/sh\n"
+        'if [ "$*" = "-P -m hearthside --web-data purge" ]; then echo \'{"ok":true,"removed":[]}\'; exit 0; fi\n'
+        f"exec '{sys.executable}' \"$@\"\n"
+    ))
+    completed = subprocess.run(
+        ["sh", str(project / "scripts" / "install.sh"), "--uninstall-web-data"],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False,
+        env={"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home), "XDG_DATA_HOME": str(data)},
+    )
+    assert (completed.returncode, completed.stderr) == (0, "")
+    assert not history.exists()
+    assert (data / "hearthside").is_dir()

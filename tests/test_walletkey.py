@@ -534,10 +534,15 @@ def test_purge_reports_a_remaining_entry(stubs, capsys, monkeypatch, tmp_path):
 
 
 def _install_purge(tmp_path, stubs, reply_text):
-    """Run install.sh --uninstall-web-data with a python3 that prints ``reply_text``."""
+    """Run install.sh --uninstall-web-data with a python3 that prints ``reply_text`` for the purge
+    (and {"ok":true} for the --usage-history clear that follows a successful one)."""
     shim = tmp_path / "shim"
     shim.mkdir()
-    (shim / "python3").write_text(f"#!/bin/sh\nprintf '%s\\n' '{reply_text}'\n")
+    (shim / "python3").write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in *'--usage-history clear') echo '{\"ok\":true}'; exit 0 ;; esac\n"
+        f"printf '%s\\n' '{reply_text}'\n"
+    )
     (shim / "python3").chmod(0o755)
     script = Path(__file__).resolve().parent.parent / "scripts" / "install.sh"
     return subprocess.run(["sh", str(script), "--uninstall-web-data"], capture_output=True, text=True,

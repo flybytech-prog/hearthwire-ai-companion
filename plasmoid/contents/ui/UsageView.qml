@@ -7,6 +7,7 @@ import org.kde.kirigami as Kirigami
 import "SnapshotLogic.js" as SnapshotLogic
 import "UsageLogic.js" as UsageLogic
 import "ProviderCatalog.js" as Catalog
+import "ProviderAccent.js" as ProviderAccent
 
 // Usage tab body, moved verbatim from FullRepresentation.qml.
 // Names, plans, captions, errors and amounts come from the helper (and so
@@ -20,9 +21,12 @@ ColumnLayout {
 
     spacing: Kirigami.Units.smallSpacing
 
-    // Wall clock for the reset and retry countdowns and "Updated N min
-    // ago"; ticks only while open.
+    // Wall clock for the reset and retry countdowns, "Updated N min ago"
+    // and "Next reset"; ticks only while open.
     property double nowMs: Date.now()
+    // The leading accent strip of each provider section, and its gap.
+    readonly property real accentWidth: Math.max(2, Math.round(Kirigami.Units.smallSpacing * 0.75))
+    readonly property real accentGap: Kirigami.Units.smallSpacing
 
     Timer {
         interval: 30000
@@ -58,6 +62,18 @@ ColumnLayout {
             enabled: !root.refreshInFlight
             onClicked: root.refresh()
         }
+    }
+
+    // The soonest reset among the readings shown below; catalog names only.
+    PlasmaComponents.Label {
+        objectName: "usageNextResetLabel"
+        Layout.fillWidth: true
+        visible: root.hasData && text !== ""
+        textFormat: Text.PlainText
+        text: UsageLogic.shownText(usage.nextResetText(root.shownProviders, usage.nowMs))
+        opacity: 0.6
+        font: Kirigami.Theme.smallFont
+        elide: Text.ElideRight
     }
 
     PlasmaExtras.PlaceholderMessage {
@@ -136,7 +152,13 @@ ColumnLayout {
                         providerSection.modelData.windows, providerSection.chosen)
                     readonly property bool billingShown: UsageLogic.showsBilling(
                         providerSection.modelData.billing_usage, providerSection.chosen)
+                    // Decorative; "" (no strip) for a provider the catalog doesn't know.
+                    readonly property string accent: ProviderAccent.accentFor(
+                        providerSection.modelData.provider_id, Kirigami.Theme.backgroundColor.r,
+                        Kirigami.Theme.backgroundColor.g, Kirigami.Theme.backgroundColor.b)
                     Layout.fillWidth: true
+                    // Room for the accent strip on the leading edge.
+                    Layout.leftMargin: usage.accentWidth + usage.accentGap
                     spacing: root.usageCompact ? 0 : Kirigami.Units.smallSpacing
 
                     RowLayout {
@@ -504,10 +526,33 @@ ColumnLayout {
                         }
                     }
 
-                    Kirigami.Separator {
+                    // The separator, and the accent strip next to the whole
+                    // section: a child of this Item, so the layout leaves it alone.
+                    Item {
+                        id: sectionEnd
                         Layout.fillWidth: true
                         Layout.topMargin: root.usageCompact ? Kirigami.Units.smallSpacing : 0
-                        opacity: 0.45
+                        implicitHeight: sectionSeparator.implicitHeight
+
+                        Kirigami.Separator {
+                            id: sectionSeparator
+                            anchors.fill: parent
+                            opacity: 0.45
+                        }
+
+                        Rectangle {
+                            objectName: "providerAccent"
+                            anchors {
+                                right: parent.left
+                                rightMargin: usage.accentGap
+                                bottom: parent.bottom
+                            }
+                            width: usage.accentWidth
+                            height: providerSection.height
+                            radius: width / 2
+                            visible: providerSection.accent !== ""
+                            color: providerSection.accent !== "" ? providerSection.accent : "transparent"
+                        }
                     }
                 }
             }
@@ -560,10 +605,43 @@ ColumnLayout {
         return metric ? metric.title : UsageLogic.shownText(window && window.caption ? window.caption : "")
     }
 
+    // "Next reset: Claude Code Session in 2h 10m" for the soonest reset of
+    // the readings the tab shows, or "" when none lies ahead. The names are
+    // the catalog's, never the helper's captions.
+    function nextResetText(providers, nowMs) {
+        var entries = []
+        var list = UsageLogic.toArray(providers)
+        for (var index = 0; index < list.length; index++) {
+            var providerData = list[index]
+            var descriptor = providerData ? Catalog.byId(providerData.provider_id) : null
+            if (!descriptor)
+                continue
+            var windows = UsageLogic.shownWindows(
+                providerData.windows, root.selectedMetrics(descriptor.provider_id))
+            for (var windowIndex = 0; windowIndex < windows.length; windowIndex++) {
+                var metric = Catalog.metric(descriptor.provider_id, windows[windowIndex].kind)
+                var resetsAt = windows[windowIndex].resets_at
+                var target = typeof resetsAt === "string" ? new Date(resetsAt).getTime() : NaN
+                if (metric && isFinite(target))
+                    entries.push({resetsAtMs: target, provider: descriptor.display_name, metric: metric.title})
+            }
+        }
+        var next = UsageLogic.nextReset(entries, nowMs)
+        if (!next)
+            return ""
+        return i18nc("@label soonest reset: provider, reading, time left", "Next reset: %1 %2 in %3",
+                     next.provider, next.metric,
+                     usage.countdownText(UsageLogic.shortCountdown(next.resetsAtMs, nowMs)))
+    }
+
     // Compact: "2d 4h", "3h 5m", "12m", or "" when unknown.
     function shortReset(iso, nowMs) {
         var target = iso ? new Date(iso).getTime() : NaN
-        var parts = UsageLogic.shortCountdown(isFinite(target) ? target : null, nowMs)
+        return usage.countdownText(UsageLogic.shortCountdown(isFinite(target) ? target : null, nowMs))
+    }
+
+    // shortCountdown parts as "2d 4h", "3h 5m", "12m" or "now"; "" for null.
+    function countdownText(parts) {
         if (!parts)
             return ""
         if (parts.days > 0)

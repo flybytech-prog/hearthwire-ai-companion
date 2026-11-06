@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 
 from . import __version__
-from .core import droppedfile, portowner, promptstore, vault, webdata
+from .core import droppedfile, portowner, promptstore, settingsbackup, usagehistory, vault, webdata
 from .core.catalog import PROVIDER_IDS
 from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
 
@@ -117,6 +117,27 @@ def parser() -> argparse.ArgumentParser:
         help="Say whether you, a trusted system account, another user, or nobody listens on "
         "this loopback port (reads /proc/net only; no network, no credentials).",
     )
+    result.add_argument(
+        "--usage-history",
+        choices=usagehistory.OPERATIONS,
+        help="Opt-in usage history: read the last 7 days, record one sample, or clear it "
+        "(no network, no credentials).",
+    )
+    result.add_argument(
+        "--sample",
+        metavar="PAIRS",
+        help="provider.metric=PERCENT_USED,... for --usage-history record.",
+    )
+    result.add_argument(
+        "--settings-backup",
+        choices=settingsbackup.OPERATIONS,
+        help="Settings backup file: status, export or import (no network, no credentials).",
+    )
+    result.add_argument(
+        "--data",
+        metavar="HEX",
+        help="Settings as lowercase hex of a UTF-8 JSON object, for --settings-backup export.",
+    )
     result.add_argument("--version", action="version", version=__version__)
     return result
 
@@ -145,8 +166,19 @@ def _check_prompt_arguments(args: argparse.Namespace, argument_parser: argparse.
         argument_parser.error("--prompts set-persona needs exactly one of --id and --none")
 
 
+def _check_history_and_backup_arguments(args: argparse.Namespace, argument_parser: argparse.ArgumentParser) -> None:
+    """--sample only and always with --usage-history record; --data likewise with --settings-backup export."""
+    if (args.sample is not None) != (args.usage_history == "record"):
+        argument_parser.error("--usage-history record needs --sample" if args.usage_history == "record"
+                              else "--sample is only for --usage-history record")
+    if (args.data is not None) != (args.settings_backup == "export"):
+        argument_parser.error("--settings-backup export needs --data" if args.settings_backup == "export"
+                              else "--data is only for --settings-backup export")
+
+
 def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.ArgumentParser) -> None:
-    """--web-data, --vault, --prompts, --read-dropped and --port-owner stand alone."""
+    """--web-data, --vault, --prompts, --read-dropped, --port-owner, --usage-history and
+    --settings-backup stand alone."""
     if args.method is not None and args.vault is None:
         argument_parser.error("--method needs --vault")
     if args.vault is not None:
@@ -155,6 +187,7 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
         if args.vault in ("add-key", "remove-key") and args.method != "wallet":
             argument_parser.error(f"--vault {args.vault} needs --method wallet")
     _check_prompt_arguments(args, argument_parser)
+    _check_history_and_backup_arguments(args, argument_parser)
     modes = [
         name for name, used in (
             ("--web-data", args.web_data is not None),
@@ -162,6 +195,8 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
             ("--prompts", args.prompts is not None),
             ("--read-dropped", args.read_dropped is not None),
             ("--port-owner", args.port_owner is not None),
+            ("--usage-history", args.usage_history is not None),
+            ("--settings-backup", args.settings_backup is not None),
         ) if used
     ]
     if len(modes) > 1:
@@ -182,7 +217,8 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
             ("--keep", args.keep is not None),
         ) if used
     ]
-    if args.port_owner is not None or args.prompts is not None or args.read_dropped is not None:
+    if (args.port_owner is not None or args.prompts is not None or args.read_dropped is not None
+            or args.usage_history is not None or args.settings_backup is not None):
         others = snapshot_options + web_options
         if others:
             argument_parser.error(f"{others[0]} cannot be combined with {modes[0]}")
@@ -244,6 +280,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         ))
     elif args.read_dropped is not None:
         payload = _dropped_reply(args.read_dropped)
+    elif args.usage_history is not None:
+        payload = _helper_reply(lambda: usagehistory.run(args.usage_history, sample=args.sample))
+    elif args.settings_backup is not None:
+        payload = _helper_reply(lambda: settingsbackup.run(args.settings_backup, data=args.data))
     elif args.catalog:
         payload = catalog_snapshot()
     elif args.detect:
@@ -257,7 +297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _helper_reply(action) -> dict[str, object]:
-    """Run a --web-data/--vault action; any surprise becomes a bare error code.
+    """Run a helper action (--web-data, --vault, --usage-history...); any surprise becomes a bare error code.
 
     No traceback, path or message may reach stdout or stderr.
     """

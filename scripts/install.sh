@@ -36,6 +36,15 @@ if [ "$uninstall_web_data" = true ]; then
         echo "Could not run the Hearthside helper. Nothing was deleted." >&2
         exit 1
     fi
+    # The opt-in usage history goes too, once the sign-in data is gone. The
+    # helper refuses symlinks and replies {"ok":true} also when there is none.
+    clear_usage_history() {
+        if ! history_reply=$(PYTHONPATH="$project_directory/src" PYTHONDONTWRITEBYTECODE=1 python3 -P -m hearthside --usage-history clear </dev/null) \
+            || [ "$history_reply" != '{"ok":true}' ]; then
+            echo "Deleted the Hearthside chat sign-in data, but could not delete the usage history (the folder hearthside/usage-history in ${XDG_DATA_HOME:-$HOME/.local/share}). Delete it by hand." >&2
+            exit 1
+        fi
+    }
     # The usage alert events file and the app and settings icons go too, but
     # only once the data is gone. rm unlinks a symlink, never its target.
     remove_installed_files() {
@@ -48,11 +57,13 @@ if [ "$uninstall_web_data" = true ]; then
     }
     case "$reply" in
         '{"ok":true,"removed":[]}')
+            clear_usage_history
             remove_installed_files
             echo "No Hearthside chat sign-in data found."
             ;;
         '{"ok":true,"removed":["'*'"]}')
             # Categories, in this order: vault, vault-keys, wallet-entry.
+            clear_usage_history
             remove_installed_files
             case "$reply" in *'"vault"'*) echo "Deleted: encrypted chat folder (saved chat sign-ins)." ;; esac
             case "$reply" in *'"vault-keys"'*) echo "Deleted: KDE Wallet unlock slot of the encrypted chat folder." ;; esac

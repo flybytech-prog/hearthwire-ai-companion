@@ -273,6 +273,32 @@ TestCase {
         compare(UsageLogic.shortCountdown(now + 26 * hour, now), {days: 1, hours: 2, minutes: 0})
     }
 
+    // U1: the soonest reset still ahead; the first of equals; the entry itself.
+    function test_nextReset() {
+        var now = 10 * hour
+        var soon = {resetsAtMs: now + 2 * hour, name: "soon"}
+        var twin = {resetsAtMs: now + 2 * hour, name: "twin"}
+        var later = {resetsAtMs: now + 5 * hour, name: "later"}
+        var past = {resetsAtMs: now - minute, name: "past"}
+        var exact = {resetsAtMs: now, name: "exact"}
+        compare(UsageLogic.nextReset([later, past, soon, twin, exact], now), soon)
+        verify(UsageLogic.nextReset([later, soon], now) === soon)
+        compare(UsageLogic.nextReset([past, exact], now), null)
+        compare(UsageLogic.nextReset([], now), null)
+        compare(UsageLogic.nextReset(undefined, now), null)
+        compare(UsageLogic.nextReset("x", now), null)
+        // Unusable entries are skipped.
+        compare(UsageLogic.nextReset([null, 5, {}, {resetsAtMs: "99999999999"}, {resetsAtMs: NaN},
+                                      {resetsAtMs: Infinity}, later], now), later)
+        // An unusable clock gives nothing.
+        compare(UsageLogic.nextReset([later], NaN), null)
+        compare(UsageLogic.nextReset([later], null), null)
+        compare(UsageLogic.nextReset([later], ""), null)
+        compare(UsageLogic.nextReset([later], undefined), null)
+        // Array-likes (a Repeater's modelData) work too.
+        compare(UsageLogic.nextReset({length: 2, 0: later, 1: soon}, now), soon)
+    }
+
     function test_normalizeColour() {
         compare(UsageLogic.normalizeColour("#A1b2C3"), "#a1b2c3")
         compare(UsageLogic.normalizeColour(""), "")

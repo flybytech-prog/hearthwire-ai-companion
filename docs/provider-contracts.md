@@ -843,3 +843,116 @@ server bound only to another loopback address (for example `127.0.0.2`) is
 not seen and so reads as `none`: nothing loads.
 The check cannot tell your own programs apart, and a listener could change in
 the milliseconds between the check and the request; see `docs/privacy.md`.
+
+## Usage history helper
+
+Opt-in (plan D70, off by default): the plasmoid records only while
+`usageHistoryEnabled` is on, and clears the history when it is turned off
+(`src/hearthside/core/usagehistory.py`). No network, no credentials, no
+provider data other than percentages.
+
+- `$XDG_DATA_HOME` (when absolute, else `~/.local/share`)`/hearthside/usage-history/`
+  (`0700`) holds `history.json` and `history.lock` (both `0600`). Every folder
+  is opened through `webdata.open_base` / `open_child_dir` (no symlinks,
+  owner checked).
+- `history.json` is `{"history_version":1,"series":[{"provider_id","metric_id","points":[[t,used],...]}]}`.
+  `t` is the start of a UTC hour bucket (a multiple of 3600), `used` an
+  integer percent used from 0 to 100. A corrupt, oversized (over 256 KiB),
+  duplicate-key or wrong-version file counts as empty; series of pairs the
+  catalog no longer has, and odd points, are skipped.
+- Writes hold an `flock` on `history.lock` (2 s wait, else `busy`), write an
+  `O_EXCL|O_NOFOLLOW` temporary, fsync it, `os.replace` it with directory
+  descriptors and fsync the folder. Each write keeps only the last 7 days
+  (the current bucket and the 168 before it, so at most 169 points per
+  series), drops future points, keeps one value per bucket (the last wins)
+  and writes nothing when the bytes would not change. Temporaries a crashed
+  writer left are deleted under the lock.
+
+| Command | Does | Success reply |
+| --- | --- | --- |
+| `--usage-history read` | The last 7 days; creates nothing (no folder, no lock file) | `{"ok":true,"history_version":1,"bucket_seconds":3600,"now":<int>,"series":[...]}` |
+| `--usage-history record --sample a.b=N,...` | Stores the sample in the current bucket, then replies as `read` | the same |
+| `--usage-history clear` | Deletes `usage-history/` and everything in it (nothing there is success) | `{"ok":true}` |
+
+`series` entries are `{"provider_id","metric_id","points":[[t,used],...]}` in
+catalog order, points ascending, empty series left out. The sample is
+comma-joined pairs, each a fullmatch of
+`[a-z_]{1,32}\.[a-z_]{1,32}=(100|[1-9]?[0-9])`, at most 64, none twice, each
+a catalog (provider, supported metric) pair other than `extra_usage`;
+anything else is `bad-sample` and writes nothing. `--sample` is required with
+`record` and refused otherwise, and `--usage-history` stands alone; otherwise
+argparse exits 2.
+
+Errors (`{"ok":false,"error":"<code>"}`, exit 0): `bad-sample`, `symlink` (a
+folder or file of ours is a symlink), `not-directory`, `not-owned`, `busy`,
+`os-error` (anything else). Replies never carry a path or text.
+`scripts/install.sh --uninstall-web-data` also runs `--usage-history clear`
+once the chat sign-in data is gone.
+
+## Settings backup helper
+
+Settings → General → Backup saves the widget's settings to one fixed file and
+reads them back (plan D71; no file dialog;
+`src/hearthside/core/settingsbackup.py`). No network, no credentials.
+
+- `$XDG_CONFIG_HOME` (when absolute, else `~/.config`)`/hearthside/settings-backup.json`.
+  The folder is `0700` and made only by `export` (which also tightens a safe
+  existing one to `0700`); the file is `0600`, written as an
+  `O_EXCL|O_NOFOLLOW` temporary, fsynced and `os.replace`d with directory
+  descriptors. Export refuses to replace a symlink or someone else's file.
+- Format: `{"format":"hearthside-settings","version":1,"config_schema":3,"exported_at":"YYYY-MM-DDTHH:MM:SSZ","settings":{...}}`,
+  exactly these keys. Another `version` or `config_schema` is `unsupported`.
+
+| Command | Success reply |
+| --- | --- |
+| `--settings-backup status` | `{"ok":true,"exists":false}` or `{"ok":true,"exists":true,"exported_at":"..."}` |
+| `--settings-backup export --data <hex>` | `{"ok":true,"saved":N,"dropped":M}` |
+| `--settings-backup import` | `{"ok":true,"exported_at":"...","settings":{...},"dropped":M}` |
+
+`<hex>` is lowercase hex of a UTF-8 JSON object of settings (even length, at
+most 131072 characters). `--data` is required with `export` and refused
+otherwise; `--settings-backup` stands alone. `status` and `import` create
+nothing and check the whole file the same way.
+
+One check (`validate_settings`) runs on the export input and on the import
+file. JSON with NaN, Infinity, overflowing numbers or duplicate keys is
+refused. Only `BACKUP_KEYS` are kept, in that order; unknown keys,
+`EXCLUDED_KEYS` (`chatSignInStorage`, `chatProfileGeneration`,
+`chatAutoLockMinutes`, `chatVaultUnlock`, `chatSiteZoom`,
+`configSchemaVersion`, `initialSetupComplete`, `usageHistoryEnabled`) and
+known keys with a value the widget would not store are dropped and counted
+in `dropped`. Strings hold at most 4096 characters (`chatCustomUrls` 32768)
+and no C0/C1 controls or lone surrogates; a boolean is never an integer.
+
+| Key | Accepted value |
+| --- | --- |
+| `trackedProviders` | JSON array of catalog provider ids, none twice |
+| `providerMetrics` | JSON object `{providerId: [metric ids of that provider]}`, none twice |
+| `providerOrder` | `""` or a JSON array like `trackedProviders` |
+| `usageMode` | `remaining` or `used` |
+| `refreshInterval` | 60, 300, 900, 1800 or 3600 |
+| `tooltipShowsUsage`, `usageCompact`, `alertLowEnabled`, `alertResetEnabled`, `chatKeepOpen`, `showUsageTab`, `showChatTab` | boolean |
+| `tooltipMetrics` | `""` or a JSON object like `providerMetrics` |
+| `usageWarnPercent` / `usageCriticalPercent` | 50 to 90 / 55 to 95, steps of 5 |
+| `usageNormalColor`, `usageWarnColor`, `usageCriticalColor` | `""` or `#rrggbb` (kept in lower case) |
+| `alertLowPercent` | 5, 10, 15, 20, 25, 30, 40 or 50 |
+| `chatSites` | JSON array of `claude chatgpt grok gemini copilot mscopilot local ollama`, none twice |
+| `chatDefaultSite` | one of those ids |
+| `chatOllamaUrl` | `http://<127.0.0.1\|localhost\|[::1]>:<1-65535>` exactly as the widget stores it |
+| `popupDefaultTab` | `chat` or `usage` |
+| `popupSize` | `compact`, `normal` or `large` |
+| `shortcutOpens` | `popup`, `chat`, `ollama` or `usage` |
+| `panelRing` | `off`, `auto` or a catalog `provider.metric` pair (not `extra_usage`) |
+| `middleClickOpens` | `refresh`, `usage`, `ollama` or a web site id |
+| `chatCustomUrls` | JSON object `{webSiteId: address}` (D74); every address non-empty and valid under the rules of `ChatSites.validateCustomUrl` (https only, http only for Local and only to loopback, at most 2048 UTF-16 units, no whitespace or control characters, no user info, no local address except for Local). One bad entry drops the whole key |
+
+JSON settings are stored re-serialized as `JSON.stringify` writes them, in
+catalog order. An export that keeps nothing is `bad-data` (an existing
+backup is never replaced with an empty one).
+
+Errors (`{"ok":false,"error":"<code>"}`, exit 0): `absent` (no backup;
+`import` only), `invalid` (not a backup file), `unsupported` (another
+version or schema), `too-large` (file over 64 KiB, or an export that would
+be), `bad-data` (export input), `symlink`, `not-owned`, `unsafe-mode` (the
+folder or file is group- or other-writable), `os-error`. Replies never carry
+a path. The widget re-checks every imported value before it applies it.

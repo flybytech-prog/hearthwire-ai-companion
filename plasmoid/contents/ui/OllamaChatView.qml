@@ -1593,6 +1593,8 @@ ColumnLayout {
         // Set directly, never from a layout pass (see textWidth below).
         property real textWidth: 0
         readonly property bool styled: OllamaChat.isStyled(paragraph.spans)
+        // The width unwrapped; formatted text takes all it is given.
+        readonly property real naturalWidth: paragraph.styled ? Infinity : plainText.implicitWidth
 
         width: paragraph.textWidth
         implicitHeight: paragraph.styled ? wordFlow.height : plainText.height
@@ -1869,6 +1871,27 @@ ColumnLayout {
                         // Text widths are set directly, never from a layout pass:
                         // wrapping long text at width 0 first would stall.
                         readonly property real textWidth: Math.max(Kirigami.Units.gridUnit * 10, message.width)
+                        // The widest a reply's blocks get: the reply bubble is at
+                        // most 92% of the pane, padding included.
+                        readonly property real replyTextWidth: Math.max(Kirigami.Units.gridUnit * 5,
+                            Math.round(message.textWidth * 0.92) - Kirigami.Units.largeSpacing * 2)
+                        // Bumped when a block item comes or goes, so replyWidth
+                        // looks at every block again.
+                        property int blockItems: 0
+                        // The reply's content width: its widest block, at most
+                        // replyTextWidth. Built from the blocks' natural widths,
+                        // which never depend on the width they are given.
+                        readonly property real replyWidth: {
+                            // Never true: only makes the binding depend on blockItems.
+                            if (message.blockItems < 0)
+                                return message.replyTextWidth
+                            var widest = OllamaChat.hasHidden(message.body) ? message.replyTextWidth : 0
+                            for (var index = 0; index < blockRepeater.count; index++) {
+                                var item = blockRepeater.itemAt(index)
+                                widest = Math.max(widest, item ? item.naturalWidth : message.replyTextWidth)
+                            }
+                            return Math.min(message.replyTextWidth, widest)
+                        }
                         // Regenerate and Edit act on the last turn only (D49).
                         readonly property bool lastReply: !message.mine && pane.turn !== null
                             && message.index === pane.turn.assistantIndex
@@ -1906,14 +1929,15 @@ ColumnLayout {
                             id: blockModel
                         }
 
-                        // The user's message, right-aligned in a tinted bubble.
+                        // The user's message, right-aligned in a highlight bubble.
                         Rectangle {
+                            objectName: "userBubble"
                             Layout.alignment: Qt.AlignRight
                             Layout.preferredWidth: userText.width + Kirigami.Units.largeSpacing * 2
                             Layout.preferredHeight: userText.height + Kirigami.Units.smallSpacing * 2
                             visible: message.mine
-                            radius: Kirigami.Units.smallSpacing
-                            color: Qt.alpha(Kirigami.Theme.highlightColor, 0.18)
+                            radius: Kirigami.Units.cornerRadius * 2
+                            color: Kirigami.Theme.highlightColor
 
                             TextEdit {
                                 id: userText
@@ -1925,9 +1949,10 @@ ColumnLayout {
                                 selectByMouse: true
                                 wrapMode: ollamaView.wrapFor(message.body)
                                 textFormat: TextEdit.PlainText
-                                color: Kirigami.Theme.textColor
-                                selectionColor: Kirigami.Theme.highlightColor
-                                selectedTextColor: Kirigami.Theme.highlightedTextColor
+                                color: Kirigami.Theme.highlightedTextColor
+                                // Inverted: the bubble is already the highlight colour.
+                                selectionColor: Kirigami.Theme.highlightedTextColor
+                                selectedTextColor: Kirigami.Theme.highlightColor
                                 font: ollamaView.bodyFont
                                 text: message.mine ? message.body : ""
                             }
@@ -1944,126 +1969,160 @@ ColumnLayout {
                             QQC2.ToolTip.visible: hovered
                         }
 
-                        // The reply: headings, paragraphs, lists, and fenced
-                        // code blocks in monospace; all plain text.
-                        Repeater {
-                            model: blockModel
+                        // The reply, left-aligned in a faint bubble: headings,
+                        // paragraphs, lists, and fenced code blocks in monospace;
+                        // all plain text. While the body is empty only the
+                        // thinking row below shows.
+                        Rectangle {
+                            objectName: "replyBubble"
+                            Layout.alignment: Qt.AlignLeft
+                            Layout.preferredWidth: message.replyWidth + Kirigami.Units.largeSpacing * 2
+                            Layout.preferredHeight: replyColumn.height + Kirigami.Units.smallSpacing * 2
+                            visible: !message.mine && message.body !== ""
+                            radius: Kirigami.Units.cornerRadius * 2
+                            color: Qt.alpha(Kirigami.Theme.textColor, 0.06)
 
-                            delegate: Item {
-                                id: segment
-                                required property string kind
-                                required property string shape
-                                readonly property var block: JSON.parse(segment.shape)
-                                readonly property bool code: segment.kind === "code"
-                                readonly property string content: segment.code ? segment.block.text : ""
+                            Column {
+                                id: replyColumn
+                                x: Kirigami.Units.largeSpacing
+                                y: Kirigami.Units.smallSpacing
+                                width: message.replyWidth
+                                spacing: Kirigami.Units.smallSpacing
 
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: blockLoader.height
+                                Repeater {
+                                    id: blockRepeater
+                                    model: blockModel
+                                    onItemAdded: message.blockItems += 1
+                                    onItemRemoved: message.blockItems += 1
 
-                                Loader {
-                                    id: blockLoader
-                                    width: message.textWidth
-                                    sourceComponent: segment.code ? codeBlock
-                                        : segment.kind === "heading" ? headingBlock
-                                        : segment.kind === "bullet" || segment.kind === "number" ? listBlock
-                                        : paragraphBlock
-                                }
+                                    delegate: Item {
+                                        id: segment
+                                        required property string kind
+                                        required property string shape
+                                        readonly property var block: JSON.parse(segment.shape)
+                                        readonly property bool code: segment.kind === "code"
+                                        readonly property string content: segment.code ? segment.block.text : ""
+                                        // The block's width unwrapped (replyTextWidth until
+                                        // it is loaded, so long text never wraps at 0).
+                                        readonly property real naturalWidth: blockLoader.item
+                                            ? Math.min(message.replyTextWidth, blockLoader.item.naturalWidth)
+                                            : message.replyTextWidth
+                                        // Every block is as wide as the bubble's content.
+                                        readonly property real blockWidth: Math.min(message.replyTextWidth,
+                                            Math.max(segment.naturalWidth, message.replyWidth))
 
-                                Component {
-                                    id: paragraphBlock
-                                    ReplyParagraph {
-                                        spans: segment.block.spans
-                                        textWidth: message.textWidth
+                                        width: segment.blockWidth
+                                        height: blockLoader.height
+
+                                        Loader {
+                                            id: blockLoader
+                                            width: segment.blockWidth
+                                            sourceComponent: segment.code ? codeBlock
+                                                : segment.kind === "heading" ? headingBlock
+                                                : segment.kind === "bullet" || segment.kind === "number" ? listBlock
+                                                : paragraphBlock
+                                        }
+
+                                        Component {
+                                            id: paragraphBlock
+                                            ReplyParagraph {
+                                                spans: segment.block.spans
+                                                textWidth: segment.blockWidth
+                                            }
+                                        }
+                                        Component {
+                                            id: headingBlock
+                                            Text {
+                                                readonly property real naturalWidth: implicitWidth
+                                                width: segment.blockWidth
+                                                wrapMode: Text.Wrap
+                                                textFormat: Text.PlainText
+                                                color: Kirigami.Theme.textColor
+                                                font: ollamaView.headingFont(segment.block.level)
+                                                text: OllamaChat.spansText(segment.block.spans)
+                                            }
+                                        }
+                                        Component {
+                                            id: listBlock
+                                            RowLayout {
+                                                id: listItem
+                                                readonly property real markerWidth: Kirigami.Units.gridUnit * 1.5
+                                                readonly property real indent: (segment.block.depth || 0) * Kirigami.Units.gridUnit
+                                                readonly property real naturalWidth: message.replyTextWidth
+                                                spacing: Kirigami.Units.smallSpacing
+
+                                                PlasmaComponents.Label {
+                                                    Layout.leftMargin: listItem.indent
+                                                    Layout.preferredWidth: Math.max(listItem.markerWidth, implicitWidth)
+                                                    Layout.alignment: Qt.AlignTop
+                                                    horizontalAlignment: Text.AlignRight
+                                                    textFormat: Text.PlainText
+                                                    font: ollamaView.bodyFont
+                                                    text: segment.kind === "number" ? segment.block.n + "."
+                                                        : ["•", "◦", "▪"][segment.block.depth || 0]
+                                                }
+                                                ReplyParagraph {
+                                                    Layout.alignment: Qt.AlignTop
+                                                    Layout.preferredWidth: textWidth
+                                                    Layout.preferredHeight: implicitHeight
+                                                    spans: segment.block.spans
+                                                    textWidth: Math.max(Kirigami.Units.gridUnit * 5, segment.blockWidth
+                                                        - listItem.indent - listItem.markerWidth - listItem.spacing)
+                                                }
+                                            }
+                                        }
+                                        Component {
+                                            id: codeBlock
+                                            Rectangle {
+                                                readonly property real inset: Kirigami.Units.smallSpacing
+                                                readonly property real naturalWidth: message.replyTextWidth
+                                                width: segment.blockWidth
+                                                height: codeText.height + inset * 2
+                                                radius: Kirigami.Units.smallSpacing
+                                                color: Kirigami.Theme.alternateBackgroundColor
+
+                                                TextEdit {
+                                                    id: codeText
+                                                    x: parent.inset
+                                                    y: parent.inset
+                                                    width: segment.blockWidth - parent.inset * 2
+                                                        - Kirigami.Units.iconSizes.medium - Kirigami.Units.smallSpacing
+                                                    readOnly: true
+                                                    selectByMouse: true
+                                                    wrapMode: ollamaView.wrapFor(segment.content)
+                                                    textFormat: TextEdit.PlainText
+                                                    color: Kirigami.Theme.textColor
+                                                    selectionColor: Kirigami.Theme.highlightColor
+                                                    selectedTextColor: Kirigami.Theme.highlightedTextColor
+                                                    font: ollamaView.codeFont
+                                                    text: segment.content
+                                                }
+                                                PlasmaComponents.ToolButton {
+                                                    anchors.top: parent.top
+                                                    anchors.right: parent.right
+                                                    icon.name: "edit-copy"
+                                                    display: QQC2.AbstractButton.IconOnly
+                                                    text: i18n("Copy code")
+                                                    onClicked: ollamaView.copyText(segment.content)
+                                                    QQC2.ToolTip.text: text
+                                                    QQC2.ToolTip.visible: hovered
+                                                }
+                                            }
+                                        }
                                     }
                                 }
-                                Component {
-                                    id: headingBlock
-                                    Text {
-                                        width: message.textWidth
-                                        wrapMode: Text.Wrap
-                                        textFormat: Text.PlainText
-                                        color: Kirigami.Theme.textColor
-                                        font: ollamaView.headingFont(segment.block.level)
-                                        text: OllamaChat.spansText(segment.block.spans)
-                                    }
-                                }
-                                Component {
-                                    id: listBlock
-                                    RowLayout {
-                                        id: listItem
-                                        readonly property real markerWidth: Kirigami.Units.gridUnit * 1.5
-                                        readonly property real indent: (segment.block.depth || 0) * Kirigami.Units.gridUnit
-                                        spacing: Kirigami.Units.smallSpacing
 
-                                        PlasmaComponents.Label {
-                                            Layout.leftMargin: listItem.indent
-                                            Layout.preferredWidth: Math.max(listItem.markerWidth, implicitWidth)
-                                            Layout.alignment: Qt.AlignTop
-                                            horizontalAlignment: Text.AlignRight
-                                            textFormat: Text.PlainText
-                                            font: ollamaView.bodyFont
-                                            text: segment.kind === "number" ? segment.block.n + "."
-                                                : ["•", "◦", "▪"][segment.block.depth || 0]
-                                        }
-                                        ReplyParagraph {
-                                            Layout.alignment: Qt.AlignTop
-                                            Layout.preferredWidth: textWidth
-                                            Layout.preferredHeight: implicitHeight
-                                            spans: segment.block.spans
-                                            textWidth: Math.max(Kirigami.Units.gridUnit * 5, message.textWidth
-                                                - listItem.indent - listItem.markerWidth - listItem.spacing)
-                                        }
-                                    }
-                                }
-                                Component {
-                                    id: codeBlock
-                                    Rectangle {
-                                        readonly property real inset: Kirigami.Units.smallSpacing
-                                        width: message.textWidth
-                                        height: codeText.height + inset * 2
-                                        radius: Kirigami.Units.smallSpacing
-                                        color: Kirigami.Theme.alternateBackgroundColor
-
-                                        TextEdit {
-                                            id: codeText
-                                            x: parent.inset
-                                            y: parent.inset
-                                            width: message.textWidth - parent.inset * 2
-                                                - Kirigami.Units.iconSizes.medium - Kirigami.Units.smallSpacing
-                                            readOnly: true
-                                            selectByMouse: true
-                                            wrapMode: ollamaView.wrapFor(segment.content)
-                                            textFormat: TextEdit.PlainText
-                                            color: Kirigami.Theme.textColor
-                                            selectionColor: Kirigami.Theme.highlightColor
-                                            selectedTextColor: Kirigami.Theme.highlightedTextColor
-                                            font: ollamaView.codeFont
-                                            text: segment.content
-                                        }
-                                        PlasmaComponents.ToolButton {
-                                            anchors.top: parent.top
-                                            anchors.right: parent.right
-                                            icon.name: "edit-copy"
-                                            display: QQC2.AbstractButton.IconOnly
-                                            text: i18n("Copy code")
-                                            onClicked: ollamaView.copyText(segment.content)
-                                            QQC2.ToolTip.text: text
-                                            QQC2.ToolTip.visible: hovered
-                                        }
-                                    }
+                                PlasmaComponents.Label {
+                                    objectName: "hiddenCharsNote"
+                                    width: message.replyWidth
+                                    visible: !message.mine && OllamaChat.hasHidden(message.body)
+                                    textFormat: Text.PlainText
+                                    wrapMode: Text.Wrap
+                                    color: Kirigami.Theme.neutralTextColor
+                                    font: Kirigami.Theme.smallFont
+                                    text: i18n("This text contains hidden or control characters, shown as ⟦U+…⟧. Copy copies the marked text.")
                                 }
                             }
-                        }
-
-                        PlasmaComponents.Label {
-                            objectName: "hiddenCharsNote"
-                            Layout.fillWidth: true
-                            visible: !message.mine && OllamaChat.hasHidden(message.body)
-                            textFormat: Text.PlainText
-                            wrapMode: Text.Wrap
-                            color: Kirigami.Theme.neutralTextColor
-                            font: Kirigami.Theme.smallFont
-                            text: i18n("This text contains hidden or control characters, shown as ⟦U+…⟧. Copy copies the marked text.")
                         }
 
                         RowLayout {
