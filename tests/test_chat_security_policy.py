@@ -39,7 +39,7 @@ OLLAMA_CHAT_VIEW = UI / "OllamaChatView.qml"
 COMPACT_REPRESENTATION = UI / "CompactRepresentation.qml"
 PROMPT_LIBRARY_JS = UI / "PromptLibrary.js"
 PROMPT_LIBRARY_PANEL = UI / "PromptLibraryPanel.qml"
-SRC = PLASMOID.parent / "src" / "hearthside"
+SRC = PLASMOID.parent / "src" / "hearthwire"
 PORT_OWNER_PY = SRC / "core" / "portowner.py"
 CLI_PY = SRC / "cli.py"
 # Files of the built-in Ollama chat that are written in later plan phases.
@@ -1043,7 +1043,7 @@ def test_proof_full_representation_ready_binding_is_caught():
 
 def test_proof_helper_flag_outside_chat_storage_is_caught():
     code = _mutated(MAIN_QML, "    function chatNext() {",
-                    "    function x() { return \"python3 -P -m hearthside --vault status\" }\n    function chatNext() {")
+                    "    function x() { return \"python3 -P -m hearthwire --vault status\" }\n    function chatNext() {")
     assert _helper_flag_offenders({"main.qml": code})
 
 
@@ -1853,8 +1853,8 @@ SAMPLE_OLLAMA_JS = """\
 var DEFAULT_ADDRESS = "http://127.0.0.1:11434"
 
 function ownerCommand(port, run, applet) {
-    return "env HEARTHSIDE_RUN=" + run + " HEARTHSIDE_APPLET=" + applet
-        + " python3 -P -m hearthside --port-owner " + port
+    return "env HEARTHWIRE_RUN=" + run + " HEARTHWIRE_APPLET=" + applet
+        + " python3 -P -m hearthwire --port-owner " + port
 }
 """
 
@@ -2238,8 +2238,8 @@ def test_proof_ollama_key_with_a_different_default_is_caught():
 # P7 The owner check command is built only by OllamaChat.js; its reply is stdout only.
 
 OWNER_COMMAND = (
-    r'"env HEARTHSIDE_RUN="\s*\+\s*\w+\s*\+\s*" HEARTHSIDE_APPLET="\s*\+\s*\w+\s*'
-    r'\+\s*" python3 -P -m hearthside --port-owner "\s*\+\s*\w+'
+    r'"env HEARTHWIRE_RUN="\s*\+\s*\w+\s*\+\s*" HEARTHWIRE_APPLET="\s*\+\s*\w+\s*'
+    r'\+\s*" python3 -P -m hearthwire --port-owner "\s*\+\s*\w+'
 )
 OTHER_HELPER_FLAGS = ("--json", "--providers", "--catalog", "--detect") + HELPER_FLAGS
 
@@ -2253,8 +2253,8 @@ def _port_owner_flag_problems(sources):
     for name, code in sources.items():
         if name.endswith("OllamaChat.js"):
             if len(_hits(r"--port-owner", code)) != 1 or len(re.findall(OWNER_COMMAND, code)) != 1:
-                problems.append(f"{name}: --port-owner once, as `\"env HEARTHSIDE_RUN=\" + run + "
-                                "\" HEARTHSIDE_APPLET=\" + applet + \" python3 -P -m hearthside --port-owner \" + port`")
+                problems.append(f"{name}: --port-owner once, as `\"env HEARTHWIRE_RUN=\" + run + "
+                                "\" HEARTHWIRE_APPLET=\" + applet + \" python3 -P -m hearthwire --port-owner \" + port`")
             problems += [f"{name}:{line} {flag}" for flag in OTHER_HELPER_FLAGS
                          for line in _hits(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", code)]
         if name.endswith(("OllamaChatView.qml", "LocalOwnerCheck.qml")):
@@ -2269,8 +2269,8 @@ def test_port_owner_command_is_built_only_by_ollama_chat_js():
 
 
 @pytest.mark.parametrize("target,old,new", [
-    ("js", " python3 -P -m hearthside --port-owner ", " python3 -P -m hearthside --port-owner --json "),
-    ("js", '" HEARTHSIDE_APPLET=" + applet\n', '""\n'),
+    ("js", " python3 -P -m hearthwire --port-owner ", " python3 -P -m hearthwire --port-owner --json "),
+    ("js", '" HEARTHWIRE_APPLET=" + applet\n', '""\n'),
     ("js", "--port-owner", "--port-owne"),
 ])
 def test_proof_port_owner_command_rule_catches(target, old, new):
@@ -2279,7 +2279,7 @@ def test_proof_port_owner_command_rule_catches(target, old, new):
 
 
 @pytest.mark.parametrize("snippet", [
-    '    readonly property string cmd: "python3 -P -m hearthside --port-owner 11434"',
+    '    readonly property string cmd: "python3 -P -m hearthwire --port-owner 11434"',
     '    function f(data) { return data["stderr"] }',
 ])
 def test_proof_port_owner_view_rule_catches(snippet):
@@ -2288,7 +2288,7 @@ def test_proof_port_owner_view_rule_catches(snippet):
 
 def test_proof_port_owner_flag_in_main_is_caught():
     code = _mutated(MAIN_QML, "    function chatNext() {",
-                    "    function x() { return \"python3 -P -m hearthside --port-owner 1\" }\n    function chatNext() {")
+                    "    function x() { return \"python3 -P -m hearthwire --port-owner 1\" }\n    function chatNext() {")
     assert _port_owner_flag_problems({"main.qml": code})
 
 
@@ -2929,7 +2929,7 @@ LOCAL_GATE_MUTATIONS = [
      'ownerCheck.finished(ownerCheck.port, "")'),
     (LOCAL_OWNER_CHECK, "function (command) { ownerSource.connectSource(command) }",
      'function (command) { ownerCheck.ownerDone(command, { ok: true, owner: "self" }) }'),
-    (LOCAL_OWNER_CHECK, "OllamaChat.ownerCommand(port,", '"python3 -P -m hearthside --port-owner " + port + ('),
+    (LOCAL_OWNER_CHECK, "OllamaChat.ownerCommand(port,", '"python3 -P -m hearthwire --port-owner " + port + ('),
 ]
 
 
@@ -3426,23 +3426,23 @@ def test_proof_hidden_chars_regex_rule_catches(old, new):
     assert _hidden_regex_problems(_mutated(OLLAMA_CHAT_JS, old, new))
 
 
-# N3 Every helper the plasmoid starts runs as `python3 -P -m hearthside`
+# N3 Every helper the plasmoid starts runs as `python3 -P -m hearthwire`
 # (-P: no working folder on the module path), RefreshGate.js included.
 
 def _helper_launch_problems(sources):
     problems = []
     for name, code in sources.items():
-        for match in re.finditer(r"\bpython[0-9.]*\b|-m\s+hearthside\b|\bhearthside\s+--", code):
+        for match in re.finditer(r"\bpython[0-9.]*\b|-m\s+hearthwire\b|\bhearthwire\s+--", code):
             text = match.group(0)
             if text.startswith("python"):
-                if not re.compile(r"python3 -P -m hearthside(?![\w.])").match(code, match.start()):
+                if not re.compile(r"python3 -P -m hearthwire(?![\w.])").match(code, match.start()):
                     problems.append(f"{name}:{_line_of(code, match.start())}: helper not started as "
-                                    "`python3 -P -m hearthside`")
+                                    "`python3 -P -m hearthwire`")
             elif text.startswith("-m"):
                 if code[max(0, match.start() - len("python3 -P ")):match.start()] != "python3 -P ":
-                    problems.append(f"{name}:{_line_of(code, match.start())}: `-m hearthside` without `python3 -P`")
+                    problems.append(f"{name}:{_line_of(code, match.start())}: `-m hearthwire` without `python3 -P`")
             elif not code[:match.start()].endswith("python3 -P -m "):
-                problems.append(f"{name}:{_line_of(code, match.start())}: hearthside started without "
+                problems.append(f"{name}:{_line_of(code, match.start())}: hearthwire started without "
                                 "`python3 -P -m`")
     return problems
 
@@ -3456,13 +3456,13 @@ REFRESH_GATE_JS = UI / "RefreshGate.js"
 
 
 @pytest.mark.parametrize(("path", "old", "new"), [
-    (REFRESH_GATE_JS, " python3 -P -m hearthside --json", " python3 -m hearthside --json"),
-    (REFRESH_GATE_JS, " python3 -P -m hearthside --json", " python3 -P -m hearthside.cli --json"),
-    (UI / "configUsage.qml", '"python3 -P -m hearthside --detect"', '"python -m hearthside --detect"'),
-    (UI / "configUsage.qml", '"python3 -P -m hearthside --detect"', '"python3 -I -m hearthside --detect"'),
-    (UI / "configUsage.qml", '"python3 -P -m hearthside --detect"', '"hearthside --detect"'),
-    (CHAT_STORAGE_JS, ' python3 -P -m hearthside"', ' /usr/bin/python3 -m hearthside"'),
-    (OLLAMA_CHAT_JS, " python3 -P -m hearthside --port-owner ", " python3 -m  hearthside --port-owner "),
+    (REFRESH_GATE_JS, " python3 -P -m hearthwire --json", " python3 -m hearthwire --json"),
+    (REFRESH_GATE_JS, " python3 -P -m hearthwire --json", " python3 -P -m hearthwire.cli --json"),
+    (UI / "configUsage.qml", '"python3 -P -m hearthwire --detect"', '"python -m hearthwire --detect"'),
+    (UI / "configUsage.qml", '"python3 -P -m hearthwire --detect"', '"python3 -I -m hearthwire --detect"'),
+    (UI / "configUsage.qml", '"python3 -P -m hearthwire --detect"', '"hearthwire --detect"'),
+    (CHAT_STORAGE_JS, ' python3 -P -m hearthwire"', ' /usr/bin/python3 -m hearthwire"'),
+    (OLLAMA_CHAT_JS, " python3 -P -m hearthwire --port-owner ", " python3 -m  hearthwire --port-owner "),
 ])
 def test_proof_helper_launch_rule_catches(path, old, new):
     sources = _all_code()
@@ -3477,7 +3477,7 @@ def test_proof_helper_launch_rule_catches(path, old, new):
 # each of those in its one allowed place.
 
 ALERT_LOGIC_JS = UI / "AlertLogic.js"
-NOTIFYRC = PLASMOID.parent / "assets" / "hearthside.notifyrc"
+NOTIFYRC = PLASMOID.parent / "assets" / "hearthwire.notifyrc"
 ZOOM_WRITE = (r"\bPlasmoid\s*\.\s*configuration\s*\.\s*chatSiteZoom\s*"
               r"(?:(?P<op>(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)=|\+\+|--)|(?P<eq>=(?!=)))")
 ZOOM_VALUE = re.compile(r"\s*SettingsLogic\s*\.\s*zoomMapToPersist\s*\(")
@@ -3843,12 +3843,12 @@ def _notifyrc_events():
 def test_alerts_use_the_installed_notifyrc_events():
     code = _read_code(MAIN_QML)
     components = re.findall(r"\bcomponentName\s*[:=]\s*([^;\n,}]+)", code)
-    assert components and all(value.strip() == '"hearthside"' for value in components), (
-        f"{_rel(MAIN_QML)}: componentName must be \"hearthside\" (assets/hearthside.notifyrc), got {components}"
+    assert components and all(value.strip() == '"hearthwire"' for value in components), (
+        f"{_rel(MAIN_QML)}: componentName must be \"hearthwire\" (assets/hearthwire.notifyrc), got {components}"
     )
     used = set(re.findall(r'"(usage[A-Z]\w*)"', code))
     assert used == _notifyrc_events() == {"usageLow", "usageReset"}, (
-        f"{_rel(MAIN_QML)} event ids {sorted(used)} must match assets/hearthside.notifyrc {sorted(_notifyrc_events())}"
+        f"{_rel(MAIN_QML)} event ids {sorted(used)} must match assets/hearthwire.notifyrc {sorted(_notifyrc_events())}"
     )
 
 
@@ -4458,7 +4458,7 @@ def test_wallet_tool_names_only_in_chat_storage_lists():
 @pytest.mark.parametrize(("path", "old", "new", "snippet"), [
     (MAIN_QML, None, None, '\n    readonly property string tool: "kwallet-query"\n'),
     (UI / "configGeneral.qml", None, None, '\n    readonly property string hint: i18n("Run qdbus6 to check")\n'),
-    (CHAT_STORAGE_JS, None, None, '\nvar READ = "kwallet-query --folder Hearthside --read-password x"\n'),
+    (CHAT_STORAGE_JS, None, None, '\nvar READ = "kwallet-query --folder Hearthwire --read-password x"\n'),
     (CHAT_STORAGE_JS, '"qdbus6", "openssl"]', '"qdbus6", "openssl", "secret-tool"]', None),
     (OLLAMA_CHAT_JS, None, None, '\nvar KEY = "fido2-assert"\n'),
 ])
@@ -4687,7 +4687,7 @@ def test_prompt_library_js_is_a_pure_library():
 
 
 @pytest.mark.parametrize("snippet", [
-    '    readonly property string c: "python3 -P -m hearthside --prompts list"\n',
+    '    readonly property string c: "python3 -P -m hearthwire --prompts list"\n',
     '    readonly property string c: "--read-dropped 2f"\n',
     '    readonly property string c: " --model " + "x"\n',
 ])
@@ -5910,7 +5910,7 @@ DESTROY_WALLET_MAP = (r'\belse\s+if\s*\(\s*op\s*===\s*"destroy"\s*&&\s*reply\s*\
                       r'\s*page\s*\.\s*vaultMessage\s*=\s*"deleted-wallet-left"')
 DESTROY_WALLET_TEXT = (
     'case "deleted-wallet-left": return i18n("The encrypted folder was deleted, but its key could not be '
-    'removed from KDE Wallet (folder Hearthside, entry encrypted-chat-folder). Remove it in KWalletManager.")'
+    'removed from KDE Wallet (folder Hearthwire, entry encrypted-chat-folder). Remove it in KWalletManager.")'
 )
 
 
@@ -5937,9 +5937,68 @@ def test_destroy_names_the_wallet_entry_it_left():
      '            page.vaultMessage = "deleted-wallet-left"\n', ""),
     ('op === "destroy" && reply.error === "wallet-failed"', 'op === "remove-key" && reply.error === "wallet-failed"'),
     ('page.vaultMessage = "deleted-wallet-left"', 'page.vaultMessage = "wallet-failed"'),
-    ("(folder Hearthside, entry encrypted-chat-folder)", "(folder Hearthside)"),
+    ("(folder Hearthwire, entry encrypted-chat-folder)", "(folder Hearthwire)"),
     ('            return i18n("KDE Wallet didn\'t answer or was cancelled. Try again.")\n',
      '            return i18n("The encrypted folder was deleted.")\n'),
 ])
 def test_proof_destroy_wallet_message_rule_catches(old, new):
     assert _destroy_wallet_message_problems(_mutated(CONFIG_GENERAL, old, new))
+
+
+# RN1 The rename to Hearthwire leaves no trace of the old name in the
+# plasmoid: no old product, module or path name and no old plugin id in any
+# QML/JS file, comments included. The old name is spelled in pieces here so
+# the repository-wide stale-name search stays clean.
+
+OLD_NAME = "hearth" + "side"
+OLD_PLUGIN_ID = "io.github.flybytechprog." + OLD_NAME
+
+
+def _old_name_offenders(sources):
+    return [
+        f"{name}:{line} {rule}"
+        for name, text in sources.items()
+        for rule, pattern in (("old plugin id", re.escape(OLD_PLUGIN_ID)),
+                              ("old name", rf"(?i){OLD_NAME}"))
+        for line in _hits(pattern, text)
+    ]
+
+
+def test_plasmoid_code_has_no_old_name_or_plugin_id():
+    sources = {_rel(path): path.read_text(encoding="utf-8") for path in _code_files()}
+    offenders = _old_name_offenders(sources)
+    assert not offenders, f"the old name is still in plasmoid/: {offenders}"
+
+
+@pytest.mark.parametrize(("name", "snippet"), [
+    ("main.qml", 'readonly property string cmd: "python3 -P -m ' + OLD_NAME + ' --json"'),
+    ("main.qml", "// " + OLD_NAME.capitalize() + " shows usage here"),
+    ("RefreshGate.js", 'var ID = "' + OLD_PLUGIN_ID + '"'),
+    ("ChatStorage.js", 'var ENV = "env ' + OLD_NAME.upper() + '_RUN=1"'),
+])
+def test_proof_old_name_rule_catches(name, snippet):
+    assert _old_name_offenders({name: snippet})
+
+
+# RN2 Only the installer migrates (plan D4): no QML/JS file ever starts the
+# helper with --migrate.
+
+MIGRATE_FLAG = r"--migrate\b"
+
+
+def _migrate_offenders(sources):
+    return [f"{name}:{line} --migrate" for name, code in sources.items() for line in _hits(MIGRATE_FLAG, code)]
+
+
+def test_plasmoid_never_runs_the_migration():
+    offenders = _migrate_offenders(_all_code())
+    assert not offenders, f"the widget must not migrate (the installer does): {offenders}"
+
+
+@pytest.mark.parametrize(("name", "snippet"), [
+    ("main.qml", 'readonly property string cmd: "python3 -P -m hearthwire --migrate run"'),
+    ("configGeneral.qml", 'executable.connectSource("python3 -P -m hearthwire " + "--migrate status")'),
+    ("RefreshGate.js", "var M = ' --migrate=applets'"),
+])
+def test_proof_migrate_rule_catches(name, snippet):
+    assert _migrate_offenders({name: _strip_comments(snippet)})

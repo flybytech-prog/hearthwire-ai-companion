@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from hearthside import cli
-from hearthside.core import usagehistory
-from hearthside.core.catalog import PROVIDER_CATALOG
+from hearthwire import cli
+from hearthwire.core import usagehistory
+from hearthwire.core.catalog import PROVIDER_CATALOG
 
 SOURCE = Path(usagehistory.__file__)
 HOUR = 3600
@@ -26,7 +26,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     (tmp_path / "home").mkdir()
-    return tmp_path / "data" / "hearthside" / "usage-history"
+    return tmp_path / "data" / "hearthwire" / "usage-history"
 
 
 def record(sample, now=NOW, **kwargs):
@@ -131,7 +131,7 @@ def test_record_creates_private_folders_and_files_and_replies_with_the_series(ho
 def test_read_creates_nothing(home, tmp_path):
     assert read() == {"ok": True, "history_version": 1, "bucket_seconds": 3600, "now": NOW, "series": []}
     assert not (tmp_path / "data").exists()
-    (tmp_path / "data" / "hearthside" / "usage-history").mkdir(parents=True)
+    (tmp_path / "data" / "hearthwire" / "usage-history").mkdir(parents=True)
     assert read()["series"] == []
     assert os.listdir(home) == []
 
@@ -379,9 +379,9 @@ def test_clear_removes_the_files_and_the_folder(home):
 def test_clear_with_nothing_there_is_success_and_creates_nothing(home, tmp_path):
     assert usagehistory.run("clear") == {"ok": True}
     assert not (tmp_path / "data").exists()
-    (tmp_path / "data" / "hearthside").mkdir(parents=True)
+    (tmp_path / "data" / "hearthwire").mkdir(parents=True)
     assert usagehistory.run("clear") == {"ok": True}
-    assert os.listdir(tmp_path / "data" / "hearthside") == []
+    assert os.listdir(tmp_path / "data" / "hearthwire") == []
 
 
 # --- the CLI --------------------------------------------------------------------------------------

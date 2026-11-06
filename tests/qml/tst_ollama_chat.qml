@@ -777,12 +777,12 @@ TestCase {
 
     function test_ownerCommand() {
         compare(OllamaChat.ownerCommand(11434, 3, 12),
-                "env HEARTHSIDE_RUN=3 HEARTHSIDE_APPLET=12 python3 -P -m hearthside --port-owner 11434")
+                "env HEARTHWIRE_RUN=3 HEARTHWIRE_APPLET=12 python3 -P -m hearthwire --port-owner 11434")
         compare(OllamaChat.ownerCommand(1, 0, 0),
-                "env HEARTHSIDE_RUN=0 HEARTHSIDE_APPLET=0 python3 -P -m hearthside --port-owner 1")
+                "env HEARTHWIRE_RUN=0 HEARTHWIRE_APPLET=0 python3 -P -m hearthwire --port-owner 1")
         compare(OllamaChat.ownerCommand(65535, 2147483648, 2147483648),
-                "env HEARTHSIDE_RUN=2147483648 HEARTHSIDE_APPLET=2147483648"
-                + " python3 -P -m hearthside --port-owner 65535")
+                "env HEARTHWIRE_RUN=2147483648 HEARTHWIRE_APPLET=2147483648"
+                + " python3 -P -m hearthwire --port-owner 65535")
     }
 
     function test_ownerCommandRejects() {

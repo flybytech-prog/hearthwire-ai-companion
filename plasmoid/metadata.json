@@ -7,13 +7,15 @@
                 "Name": "flybytech-prog"
             }
         ],
+        "BugReportUrl": "https://github.com/flybytech-prog/hearthwire-ai-companion/issues",
         "Category": "System Information",
         "Description": "Your AI companion in the panel: subscription usage at a glance and quick chats with AI sites",
-        "Icon": "hearthside",
-        "Id": "io.github.flybytechprog.hearthside",
+        "Icon": "hearthwire",
+        "Id": "io.github.flybytechprog.hearthwire",
         "License": "MIT",
-        "Name": "Hearthside",
-        "Version": "1.0.0"
+        "Name": "Hearthwire",
+        "Version": "1.0.0",
+        "Website": "https://github.com/flybytech-prog/hearthwire-ai-companion"
     },
     "X-Plasma-API-Minimum-Version": "6.0",
     "X-Plasma-MainScript": "ui/main.qml"

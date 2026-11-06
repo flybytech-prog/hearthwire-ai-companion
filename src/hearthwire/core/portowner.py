@@ -1,6 +1,6 @@
 """Who owns the TCP listener the built-in Ollama chat is about to talk to.
 
-The plasmoid runs ``hearthside --port-owner N`` before every model-list load
+The plasmoid runs ``hearthwire --port-owner N`` before every model-list load
 and every send, so a prompt never goes to another user's program that took
 the port while Ollama was down. Only ``/proc/net/tcp`` and ``/proc/net/tcp6``
 are read: no socket is opened and nothing is sent anywhere. The reply is one

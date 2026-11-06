@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from hearthside import cli
-from hearthside.core import vault, webdata
+from hearthwire import cli
+from hearthwire.core import vault, webdata
 
 
 @pytest.fixture
@@ -61,17 +61,17 @@ def _fake_mount(monkeypatch, info, cipher, mountpoint):
 
 @pytest.fixture
 def mounted(data, tmp_path, monkeypatch, _private_runtime_dir):
-    """Fake a verified gocryptfs mount at $XDG_RUNTIME_DIR/hearthside/vault."""
-    cipher = Path(os.path.realpath(data)) / "hearthside" / "vault"
+    """Fake a verified gocryptfs mount at $XDG_RUNTIME_DIR/hearthwire/vault."""
+    cipher = Path(os.path.realpath(data)) / "hearthwire" / "vault"
     cipher.mkdir(parents=True, mode=0o700)
-    mountpoint = Path(os.path.realpath(_private_runtime_dir)) / "hearthside" / "vault"
+    mountpoint = Path(os.path.realpath(_private_runtime_dir)) / "hearthwire" / "vault"
     _fake_mount(monkeypatch, tmp_path / "mountinfo", cipher, mountpoint)
     return mountpoint
 
 
 def no_plaintext_store(data):
-    """Nothing may ever create $XDG_DATA_HOME/hearthside/web."""
-    return not (data / "hearthside" / "web").exists()
+    """Nothing may ever create $XDG_DATA_HOME/hearthwire/web."""
+    return not (data / "hearthwire" / "web").exists()
 
 
 # --- the unencrypted "folder" store is gone ---------------------------------------------------
@@ -136,13 +136,13 @@ def test_prepare_resets_loose_modes_and_is_idempotent(data, capsys, mounted):
 def test_relative_xdg_data_home_falls_back_to_home(tmp_path, monkeypatch, capsys, _private_runtime_dir):
     monkeypatch.setenv("XDG_DATA_HOME", "relative/data")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    cipher = Path(os.path.realpath(tmp_path)) / "home" / ".local" / "share" / "hearthside" / "vault"
-    mountpoint = Path(os.path.realpath(_private_runtime_dir)) / "hearthside" / "vault"
+    cipher = Path(os.path.realpath(tmp_path)) / "home" / ".local" / "share" / "hearthwire" / "vault"
+    mountpoint = Path(os.path.realpath(_private_runtime_dir)) / "hearthwire" / "vault"
     _fake_mount(monkeypatch, tmp_path / "mountinfo", cipher, mountpoint)
     assert prepare(capsys) == {"ok": True}
     assert (mountpoint / "web" / "applet-1-g0").is_dir()
     assert not Path("relative").exists()
-    assert not (tmp_path / "home" / ".local" / "share" / "hearthside" / "web").exists()
+    assert not (tmp_path / "home" / ".local" / "share" / "hearthwire" / "web").exists()
 
 
 @pytest.mark.parametrize("component", ["web", "profile"])
@@ -309,7 +309,7 @@ def purge(capsys):
 
 
 def make_cipher(data):
-    cipher = data / "hearthside" / "vault"
+    cipher = data / "hearthwire" / "vault"
     cipher.mkdir(parents=True, exist_ok=True)
     (cipher / "gocryptfs.conf").write_text("{}")
     (cipher / "abcdef").write_text("ciphertext")
@@ -322,30 +322,30 @@ def test_purge_deletes_the_vault_and_names_only_categories(data, capsys, no_moun
     captured = capsys.readouterr()
     assert captured.out == '{"ok":true,"removed":["vault"]}\n'
     assert captured.err == ""
-    assert not (data / "hearthside").exists()
+    assert not (data / "hearthwire").exists()
     assert data.is_dir()
 
 
 def test_purge_keeps_other_files_in_the_app_folder(data, capsys, no_mounts):
     make_cipher(data)
-    (data / "hearthside" / "other").write_text("keep")
+    (data / "hearthwire" / "other").write_text("keep")
     assert purge(capsys) == {"ok": True, "removed": ["vault"]}
-    assert (data / "hearthside" / "other").read_text() == "keep"
+    assert (data / "hearthwire" / "other").read_text() == "keep"
 
 
 def test_purge_of_nothing_is_ok(data, capsys, no_mounts):
     assert purge(capsys) == {"ok": True, "removed": []}
     assert not data.exists()
     data.mkdir()
-    (data / "hearthside").mkdir()
+    (data / "hearthwire").mkdir()
     assert purge(capsys) == {"ok": True, "removed": []}
-    assert not (data / "hearthside").exists()
+    assert not (data / "hearthwire").exists()
 
 
 @pytest.mark.parametrize("mounted_at", ["mountpoint", "source", "stale"])
 def test_purge_refuses_while_the_vault_is_mounted(data, capsys, no_mounts, _private_runtime_dir, mounted_at):
     cipher = make_cipher(data)
-    mountpoint = Path(os.path.realpath(_private_runtime_dir)) / "hearthside" / "vault"
+    mountpoint = Path(os.path.realpath(_private_runtime_dir)) / "hearthwire" / "vault"
     if mounted_at == "mountpoint":
         line = f"901 30 0:99 / {mountpoint} rw - fuse.other other rw\n"
     elif mounted_at == "source":
@@ -367,10 +367,10 @@ def test_purge_checks_the_default_runtime_when_the_variable_is_unset(
     runtime.mkdir(mode=0o700)
     monkeypatch.setattr(vault, "DEFAULT_RUNTIME", str(runtime))
     monkeypatch.delenv("XDG_RUNTIME_DIR")
-    mountpoint = runtime / "hearthside" / "vault"
+    mountpoint = runtime / "hearthwire" / "vault"
     no_mounts.write_text(f"901 30 0:99 / {mountpoint} rw - fuse.gocryptfs elsewhere rw\n")
     assert purge(capsys) == {"ok": False, "error": "not-locked"}
-    assert (data / "hearthside" / "vault").is_dir()
+    assert (data / "hearthwire" / "vault").is_dir()
     no_mounts.write_text("")
     assert purge(capsys) == {"ok": True, "removed": ["vault"]}
 
@@ -388,35 +388,35 @@ def test_purge_refuses_when_mountinfo_is_unreadable(data, capsys, no_mounts, tmp
     make_cipher(data)
     monkeypatch.setattr(vault, "MOUNTINFO", str(tmp_path / "missing"))
     assert purge(capsys) == {"ok": False, "error": "os-error"}
-    assert (data / "hearthside" / "vault" / "gocryptfs.conf").exists()
+    assert (data / "hearthwire" / "vault" / "gocryptfs.conf").exists()
 
 
-@pytest.mark.parametrize("component", ["hearthside", "vault"])
+@pytest.mark.parametrize("component", ["hearthwire", "vault"])
 def test_purge_refuses_symlinks_and_deletes_nothing(data, capsys, no_mounts, tmp_path, component):
     target = tmp_path / "target"
     target.mkdir()
     (target / "precious").write_text("keep")
     data.mkdir()
-    if component == "hearthside":
-        (data / "hearthside").symlink_to(target)
+    if component == "hearthwire":
+        (data / "hearthwire").symlink_to(target)
     else:
-        (data / "hearthside").mkdir()
-        (data / "hearthside" / "other").write_text("keep")
-        (data / "hearthside" / component).symlink_to(target)
+        (data / "hearthwire").mkdir()
+        (data / "hearthwire" / "other").write_text("keep")
+        (data / "hearthwire" / component).symlink_to(target)
     assert purge(capsys) == {"ok": False, "error": "symlink"}
     assert (target / "precious").read_text() == "keep"
-    if component == "hearthside":
-        assert (data / "hearthside").is_symlink()
+    if component == "hearthwire":
+        assert (data / "hearthwire").is_symlink()
     else:
-        assert (data / "hearthside" / component).is_symlink()
-        assert (data / "hearthside" / "other").read_text() == "keep"
+        assert (data / "hearthwire" / component).is_symlink()
+        assert (data / "hearthwire" / "other").read_text() == "keep"
 
 
 def test_purge_refuses_a_file_in_the_way(data, capsys, no_mounts):
-    (data / "hearthside").mkdir(parents=True)
-    (data / "hearthside" / "vault").write_text("not a folder")
+    (data / "hearthwire").mkdir(parents=True)
+    (data / "hearthwire" / "vault").write_text("not a folder")
     assert purge(capsys) == {"ok": False, "error": "not-directory"}
-    assert (data / "hearthside" / "vault").read_text() == "not a folder"
+    assert (data / "hearthwire" / "vault").read_text() == "not a folder"
 
 
 def test_purge_never_follows_links_inside_the_tree(data, capsys, no_mounts, tmp_path):
@@ -431,10 +431,10 @@ def test_purge_never_follows_links_inside_the_tree(data, capsys, no_mounts, tmp_
 
 def test_purge_leaves_an_unknown_web_folder_alone(data, capsys, no_mounts):
     # There is no plaintext store any more, so purge has no business there.
-    (data / "hearthside" / "web").mkdir(parents=True)
+    (data / "hearthwire" / "web").mkdir(parents=True)
     make_cipher(data)
     assert purge(capsys) == {"ok": True, "removed": ["vault"]}
-    assert (data / "hearthside" / "web").is_dir()
+    assert (data / "hearthwire" / "web").is_dir()
 
 
 def test_purge_waits_for_the_vault_lock(data, capsys, no_mounts, monkeypatch):
@@ -446,7 +446,7 @@ def test_purge_waits_for_the_vault_lock(data, capsys, no_mounts, monkeypatch):
         # purge opens the lock file again, so its flock contends with this one.
         monkeypatch.setattr(vault.time, "monotonic", lambda: next(clock))
         assert purge(capsys) == {"ok": False, "error": "busy"}
-    assert (data / "hearthside" / "vault").is_dir()
+    assert (data / "hearthwire" / "vault").is_dir()
 
 
 def test_purge_runs_no_tool(data, capsys, no_mounts, monkeypatch):
@@ -460,7 +460,7 @@ def test_purge_requires_symlink_safe_rmtree(data, capsys, no_mounts, monkeypatch
     make_cipher(data)
     monkeypatch.setattr(shutil.rmtree, "avoids_symlink_attacks", False, raising=False)
     assert purge(capsys) == {"ok": False, "error": "os-error"}
-    assert (data / "hearthside" / "vault").is_dir()
+    assert (data / "hearthwire" / "vault").is_dir()
 
 
 def test_purge_output_never_contains_a_path(data, capsys, no_mounts, tmp_path):
@@ -471,7 +471,7 @@ def test_purge_output_never_contains_a_path(data, capsys, no_mounts, tmp_path):
         captured = capsys.readouterr()
         texts.append(captured.out + captured.err)
     data.mkdir(exist_ok=True)
-    (data / "hearthside").symlink_to(tmp_path)
+    (data / "hearthwire").symlink_to(tmp_path)
     cli.main(["--web-data", "purge"])
     captured = capsys.readouterr()
     texts.append(captured.out + captured.err)
@@ -483,7 +483,7 @@ def test_purge_output_never_contains_a_path(data, capsys, no_mounts, tmp_path):
 INSTALL_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "install.sh"
 
 
-# install.sh runs `python3 -P -m hearthside`. This python3 is a shim that points the helper
+# install.sh runs `python3 -P -m hearthwire`. This python3 is a shim that points the helper
 # at a fake mountinfo and a fake default runtime dir before running it, so the script
 # never reads the real /proc/self/mountinfo or /run/user/<uid> (the test must pass even
 # while the user's real folder is unlocked). It refuses (exit 98) a call without -P, so
@@ -491,16 +491,16 @@ INSTALL_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "install.s
 PYTHON_SHIM = """#!/bin/sh
 exec {python} -P -c '
 import os, runpy, sys
-if sys.argv[1:4] != ["-P", "-m", "hearthside"]:
+if sys.argv[1:4] != ["-P", "-m", "hearthwire"]:
     sys.exit(98)
-from hearthside.core import vault
+from hearthwire.core import vault
 vault.MOUNTINFO = os.environ["TEST_MOUNTINFO"]
 vault.DEFAULT_RUNTIME = os.environ["TEST_DEFAULT_RUNTIME"]
 # Never the real kwallet-query/qdbus6: purge finds no wallet tools here.
-from hearthside.core import walletkey
+from hearthwire.core import walletkey
 walletkey.find_tools = lambda: ({{}}, walletkey.TOOLS)
-sys.argv = ["hearthside", *sys.argv[4:]]
-runpy.run_module("hearthside", run_name="__main__", alter_sys=True)
+sys.argv = ["hearthwire", *sys.argv[4:]]
+runpy.run_module("hearthwire", run_name="__main__", alter_sys=True)
 ' "$@"
 """
 
@@ -541,7 +541,7 @@ def test_install_script_rejects_unknown_or_combined_options(tmp_path, _private_r
 
 
 def test_install_script_uninstall_web_data_only_deletes(tmp_path, _private_runtime_dir):
-    share = tmp_path / "home" / ".local" / "share" / "hearthside"
+    share = tmp_path / "home" / ".local" / "share" / "hearthwire"
     (share / "vault").mkdir(parents=True)
     (share / "vault" / "gocryptfs.conf").write_text("{}")
     completed = run_install_script(tmp_path, "--uninstall-web-data", runtime=_private_runtime_dir)
@@ -549,12 +549,12 @@ def test_install_script_uninstall_web_data_only_deletes(tmp_path, _private_runti
     assert completed.stdout == "Deleted: encrypted chat folder (saved chat sign-ins).\n"
     assert not share.exists()
     again = run_install_script(tmp_path, "--uninstall-web-data", runtime=_private_runtime_dir)
-    assert (again.returncode, again.stdout) == (0, "No Hearthside chat sign-in data found.\n")
+    assert (again.returncode, again.stdout) == (0, "No Hearthwire chat sign-in data found.\n")
     assert sorted(path.name for path in (tmp_path / "home").iterdir()) == [".local"]
 
 
 def test_install_script_uninstall_web_data_without_runtime_dir(tmp_path):
-    share = tmp_path / "home" / ".local" / "share" / "hearthside"
+    share = tmp_path / "home" / ".local" / "share" / "hearthwire"
     (share / "vault").mkdir(parents=True)
     completed = run_install_script(tmp_path, "--uninstall-web-data")
     assert (completed.returncode, completed.stderr) == (0, "")
@@ -564,19 +564,19 @@ def test_install_script_uninstall_web_data_without_runtime_dir(tmp_path):
 
 def test_install_script_refuses_while_the_fake_mountinfo_shows_a_mount(tmp_path, _private_runtime_dir):
     # Proves the subprocess reads the test's mountinfo, not the real one.
-    share = tmp_path / "home" / ".local" / "share" / "hearthside"
+    share = tmp_path / "home" / ".local" / "share" / "hearthwire"
     (share / "vault").mkdir(parents=True)
-    mountpoint = Path(os.path.realpath(_private_runtime_dir)) / "hearthside" / "vault"
+    mountpoint = Path(os.path.realpath(_private_runtime_dir)) / "hearthwire" / "vault"
     line = (f"901 30 0:99 / {mountpoint} rw,nosuid,nodev shared:1 - fuse.gocryptfs "
             f"{share / 'vault'} rw,user_id={os.getuid()},group_id={os.getgid()}\n")
     completed = run_install_script(tmp_path, "--uninstall-web-data", runtime=_private_runtime_dir, mountinfo=line)
     assert completed.returncode == 1 and completed.stdout == ""
-    assert completed.stderr.startswith("Lock the encrypted folder in Hearthside first")
+    assert completed.stderr.startswith("Lock the encrypted folder in Hearthwire first")
     assert (share / "vault").is_dir()
 
 
 def _notifyrc(tmp_path):
-    path = tmp_path / "home" / ".local" / "share" / "knotifications6" / "hearthside.notifyrc"
+    path = tmp_path / "home" / ".local" / "share" / "knotifications6" / "hearthwire.notifyrc"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("[Global]\n")
     return path
@@ -585,7 +585,7 @@ def _notifyrc(tmp_path):
 @pytest.mark.parametrize("with_vault", [True, False])
 def test_install_script_uninstall_web_data_removes_the_notifyrc(tmp_path, _private_runtime_dir, with_vault):
     if with_vault:
-        (tmp_path / "home" / ".local" / "share" / "hearthside" / "vault").mkdir(parents=True)
+        (tmp_path / "home" / ".local" / "share" / "hearthwire" / "vault").mkdir(parents=True)
     notifyrc = _notifyrc(tmp_path)
     neighbour = notifyrc.parent / "plasma_workspace.notifyrc"
     neighbour.write_text("keep")
@@ -607,10 +607,10 @@ def test_install_script_uninstall_web_data_removes_a_notifyrc_symlink_not_its_ta
 
 
 def test_install_script_keeps_the_notifyrc_when_it_deletes_nothing(tmp_path, _private_runtime_dir):
-    share = tmp_path / "home" / ".local" / "share" / "hearthside"
+    share = tmp_path / "home" / ".local" / "share" / "hearthwire"
     (share / "vault").mkdir(parents=True)
     notifyrc = _notifyrc(tmp_path)
-    mountpoint = Path(os.path.realpath(_private_runtime_dir)) / "hearthside" / "vault"
+    mountpoint = Path(os.path.realpath(_private_runtime_dir)) / "hearthwire" / "vault"
     line = (f"901 30 0:99 / {mountpoint} rw,nosuid,nodev shared:1 - fuse.gocryptfs "
             f"{share / 'vault'} rw,user_id={os.getuid()},group_id={os.getgid()}\n")
     completed = run_install_script(tmp_path, "--uninstall-web-data", runtime=_private_runtime_dir, mountinfo=line)
@@ -624,7 +624,7 @@ def test_install_script_refuses_symlinked_web_data(tmp_path, _private_runtime_di
     (target / "precious").write_text("keep")
     share = tmp_path / "home" / ".local" / "share"
     share.mkdir(parents=True)
-    (share / "hearthside").symlink_to(target)
+    (share / "hearthwire").symlink_to(target)
     completed = run_install_script(tmp_path, "--uninstall-web-data", runtime=_private_runtime_dir)
     assert completed.returncode == 1
     assert completed.stdout == ""
@@ -724,7 +724,7 @@ def _cli(tmp_path, *argv):
     src = Path(__file__).resolve().parent.parent / "src"
     env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
     return subprocess.run(
-        [sys.executable, "-m", "hearthside", "--web-data", *argv],
+        [sys.executable, "-m", "hearthwire", "--web-data", *argv],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=60, check=False,
     )
 

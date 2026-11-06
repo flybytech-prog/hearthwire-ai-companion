@@ -1024,7 +1024,7 @@ ColumnLayout {
         case "not-running":
             return i18n("Ollama isn't running.")
         case "other":
-            return i18n("Another user's program is using port %1. Hearthside won't send anything to it.", ollamaView.port)
+            return i18n("Another user's program is using port %1. Hearthwire won't send anything to it.", ollamaView.port)
         case "owner-unknown":
             return i18n("Couldn't check which program is using port %1.", ollamaView.port)
         case "not-ollama":

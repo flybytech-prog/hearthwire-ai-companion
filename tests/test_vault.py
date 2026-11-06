@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from hearthside import cli
-from hearthside.core import vault, webdata
+from hearthwire import cli
+from hearthwire.core import vault, webdata
 
 
 SOURCE = Path(vault.__file__)
@@ -204,7 +204,7 @@ import hashlib, json, os, sys, time
 tool = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
 env = os.environ
-KEY = "Hearthside/encrypted-chat-folder"
+KEY = "Hearthwire/encrypted-chat-folder"
 
 
 def fd_target(fd):
@@ -374,11 +374,11 @@ class Stubs:
 
     @property
     def cipher(self):
-        return Path(os.path.realpath(self.data)) / "hearthside" / "vault"
+        return Path(os.path.realpath(self.data)) / "hearthwire" / "vault"
 
     @property
     def mountpoint(self):
-        return Path(os.path.realpath(self.runtime)) / "hearthside" / "vault"
+        return Path(os.path.realpath(self.runtime)) / "hearthwire" / "vault"
 
     def make_locked(self):
         self.cipher.mkdir(parents=True, mode=0o700)
@@ -537,17 +537,17 @@ def test_create_initialises_and_mounts_with_extpass_argv(stubs, capsys):
     # Measured framing: always -init -q; mount with -q -nosyslog; one argv element per
     # -extpass value, never the "-extpass=" form or a single string split on spaces.
     assert without_extpass(init["argv"]) == ["-init", "-q", str(stubs.cipher)]
-    assert extpass_values(init["argv"]) == [kdialog_path, "--title", "Hearthside", "--newpassword", vault.PROMPT_CREATE]
+    assert extpass_values(init["argv"]) == [kdialog_path, "--title", "Hearthwire", "--newpassword", vault.PROMPT_CREATE]
     assert without_extpass(mount["argv"]) == ["-q", "-nosyslog", str(stubs.cipher), str(stubs.mountpoint)]
-    assert extpass_values(mount["argv"]) == [kdialog_path, "--title", "Hearthside", "--password", vault.PROMPT_UNLOCK]
+    assert extpass_values(mount["argv"]) == [kdialog_path, "--title", "Hearthwire", "--password", vault.PROMPT_UNLOCK]
     for call in (init, mount):
         assert call["argv"].count("-extpass") == 5
         assert not any(argument.startswith("-extpass=") for argument in call["argv"])
 
     # gocryptfs ran kdialog itself, with each argument kept whole.
     assert [call["argv"] for call in kdialog] == [
-        ["--title", "Hearthside", "--newpassword", vault.PROMPT_CREATE],
-        ["--title", "Hearthside", "--password", vault.PROMPT_UNLOCK],
+        ["--title", "Hearthwire", "--newpassword", vault.PROMPT_CREATE],
+        ["--title", "Hearthwire", "--password", vault.PROMPT_UNLOCK],
     ]
     assert init["extpass_exit"] == mount["extpass_exit"] == 0
     for call in (init, mount):
@@ -729,7 +729,7 @@ def test_unlock_refuses_a_symlinked_mountpoint(stubs, capsys, tmp_path):
 def test_symlinked_cipher_parent_is_refused(stubs, capsys, tmp_path):
     stubs.data.mkdir()
     (tmp_path / "evil").mkdir()
-    (stubs.data / "hearthside").symlink_to(tmp_path / "evil")
+    (stubs.data / "hearthwire").symlink_to(tmp_path / "evil")
     assert reply("status", capsys) == {"ok": False, "error": "symlink"}
     assert reply("create", capsys) == {"ok": False, "error": "symlink"}
     assert list((tmp_path / "evil").iterdir()) == []
@@ -939,7 +939,7 @@ def test_change_passphrase_runs_old_dialog_via_extpass_then_new_dialog_into_stdi
     assert without_extpass(passwd["argv"]) == ["-passwd", "-q", str(stubs.cipher)]
     assert extpass_values(passwd["argv"]) == [
         sys.executable, vault.RELAY, marker,
-        kdialog_path, "--title", "Hearthside", "--password", vault.PROMPT_CURRENT,
+        kdialog_path, "--title", "Hearthwire", "--password", vault.PROMPT_CURRENT,
     ]
     assert passwd["extpass_exit"] == 0 and passwd["extpass_got_answer"]
     assert passwd["new_received"] is True
@@ -948,8 +948,8 @@ def test_change_passphrase_runs_old_dialog_via_extpass_then_new_dialog_into_stdi
     assert passwd["fds"][1:] == ["/dev/null", "/dev/null"]
 
     old, new = dialogs
-    assert old["argv"] == ["--title", "Hearthside", "--password", vault.PROMPT_CURRENT]
-    assert new["argv"] == ["--title", "Hearthside", "--newpassword", vault.PROMPT_NEW]
+    assert old["argv"] == ["--title", "Hearthwire", "--password", vault.PROMPT_CURRENT]
+    assert new["argv"] == ["--title", "Hearthwire", "--newpassword", vault.PROMPT_NEW]
     # Old dialog: stdin /dev/null, stdout = gocryptfs's extpass pipe (not its stdin).
     assert old["fds"][0] == old["fds"][2] == "/dev/null"
     assert old["fds"][1].startswith("pipe:") and old["fds"][1] != passwd["fds"][0]
@@ -1275,8 +1275,8 @@ def test_argv_guard_refuses_forbidden_flags(argv):
     [["g", "-q", "/c", "/m"], ["/bin/sh", "-c", "x"], ["/usr/bin/python3", "/x"],
      ["/bin/fusermount3", "-u", "/m", "-z"], ["/bin/fusermount3", "-uz", "/m"], ["/bin/fusermount3", "-u", "m"],
      ["/bin/fusermount3", "-u", "/m", "-o", "allow_other"], ["/bin/fusermount3", "-u", "/run/allow_other/m"],
-     ["/bin/kdialog", "--title", "Hearthside", "--password", vault.PROMPT_NEW],
-     ["/bin/kdialog", "--title", "Hearthside", "--newpassword", vault.PROMPT_NEW, "--allow_other"]],
+     ["/bin/kdialog", "--title", "Hearthwire", "--password", vault.PROMPT_NEW],
+     ["/bin/kdialog", "--title", "Hearthwire", "--newpassword", vault.PROMPT_NEW, "--allow_other"]],
 )
 def test_argv_guard_refuses_other_tools_and_shapes(argv):
     with pytest.raises(webdata.HelperError):
@@ -1287,11 +1287,11 @@ def test_argv_guard_accepts_exactly_the_contract_argv():
     kdialog = "/usr/bin/kdialog"
     for argv in (
         [GOCRYPTFS, *vault.VERSION_ARGS],
-        vault.init_argv(GOCRYPTFS, kdialog, "/data/hearthside/vault"),
-        vault.mount_argv(GOCRYPTFS, kdialog, "/data/hearthside/vault", "/run/hearthside/vault"),
-        vault.passwd_argv(GOCRYPTFS, "/usr/bin/python3", "/run/hearthside/passwd.status", kdialog,
-                          "/data/hearthside/vault"),
-        vault.unmount_argv("/usr/bin/fusermount3", "/run/hearthside/vault"),
+        vault.init_argv(GOCRYPTFS, kdialog, "/data/hearthwire/vault"),
+        vault.mount_argv(GOCRYPTFS, kdialog, "/data/hearthwire/vault", "/run/hearthwire/vault"),
+        vault.passwd_argv(GOCRYPTFS, "/usr/bin/python3", "/run/hearthwire/passwd.status", kdialog,
+                          "/data/hearthwire/vault"),
+        vault.unmount_argv("/usr/bin/fusermount3", "/run/hearthwire/vault"),
         vault.new_passphrase_argv(kdialog),
     ):
         vault._check_argv(argv)
@@ -1304,10 +1304,10 @@ def test_argv_guard_accepts_exactly_the_contract_argv():
         "-init", "-passwd", "-q", "-nosyslog", "-extpass", "-config"}
     assert "-config" not in vault.PHASE_FLAGS["init"]
     # The wallet shapes pass only with their own slot path.
-    slot = "/data/hearthside/vault-keys/wallet.conf"
+    slot = "/data/hearthwire/vault-keys/wallet.conf"
     mount = vault.wallet_mount_argv(GOCRYPTFS, "/usr/bin/kwallet-query", "kdewallet", slot,
-                                    "/data/hearthside/vault", "/run/hearthside/vault")
-    passwd = vault.wallet_passwd_argv(GOCRYPTFS, kdialog, slot + ".new", "/data/hearthside/vault")
+                                    "/data/hearthwire/vault", "/run/hearthwire/vault")
+    passwd = vault.wallet_passwd_argv(GOCRYPTFS, kdialog, slot + ".new", "/data/hearthwire/vault")
     vault._check_argv(mount, config=slot)
     vault._check_argv(passwd, config=slot + ".new")
     for argv, config in ((mount, None), (mount, slot + ".new"), (passwd, slot), (passwd, None)):
@@ -1368,7 +1368,7 @@ def test_cli_subprocess_prints_one_json_object(stubs, tmp_path):
     src = Path(__file__).resolve().parent.parent / "src"
     env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
     completed = subprocess.run(
-        [sys.executable, "-m", "hearthside", "--vault", "status"],
+        [sys.executable, "-m", "hearthwire", "--vault", "status"],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=60, check=False,
     )
     assert completed.returncode == 0
@@ -1408,7 +1408,7 @@ def test_vault_source_never_captures_output_uses_a_shell_or_prints():
 
 
 def test_vault_and_webdata_use_only_the_standard_library():
-    allowed = set(sys.stdlib_module_names) | {"hearthside"}
+    allowed = set(sys.stdlib_module_names) | {"hearthwire"}
     for path in (SOURCE, Path(webdata.__file__)):
         code = path.read_text(encoding="utf-8")
         modules = re.findall(r"^\s*(?:from|import)\s+([\w.]+)", code, re.MULTILINE)

@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from hearthside import cli
-from hearthside.core import promptstore, vault
+from hearthwire import cli
+from hearthwire.core import promptstore, vault
 from test_webdata import _fake_mount
 
 SOURCE = Path(promptstore.__file__)
@@ -76,8 +76,8 @@ class Library:
         monkeypatch.setenv("STUB_LOG", str(self.log))
         monkeypatch.setenv("STUB_TEXT_FILE", str(self.text_file))
         self.monkeypatch = monkeypatch
-        self.cipher = Path(os.path.realpath(self.data)) / "hearthside" / "vault"
-        self.mountpoint = Path(os.path.realpath(runtime)) / "hearthside" / "vault"
+        self.cipher = Path(os.path.realpath(self.data)) / "hearthwire" / "vault"
+        self.mountpoint = Path(os.path.realpath(runtime)) / "hearthwire" / "vault"
         self.mountinfo = tmp_path / "mountinfo"
         monkeypatch.setenv("STUB_MOUNTINFO", str(self.mountinfo))
         monkeypatch.setenv("STUB_LOCK", str(self.mountpoint.parent / "vault.lock"))
@@ -137,7 +137,7 @@ def mode(path):
 def test_every_command_needs_the_unlocked_folder(lib, capsys, argv):
     assert prompts(capsys, *argv) == {"ok": False, "error": "locked"}
     assert lib.dialogs() == []
-    assert not (lib.data / "hearthside" / "library").exists()
+    assert not (lib.data / "hearthwire" / "library").exists()
     assert not lib.folder.exists()
 
 
@@ -155,7 +155,7 @@ def test_a_foreign_mount_is_not_verified(lib, capsys):
 def test_add_writes_through_kdialog_stdout_into_the_mount(mounted, capsys):
     assert add(capsys, mounted, "Summarise this:\nplease\n") == {"ok": True, "id": 1}
     (dialog,) = mounted.dialogs()
-    assert dialog["argv"] == ["--title", "Hearthside", "--textinputbox", promptstore.LABELS["prompt"]]
+    assert dialog["argv"] == ["--title", "Hearthwire", "--textinputbox", promptstore.LABELS["prompt"]]
     assert dialog["fds"][0] == "/dev/null" and dialog["fds"][2] == "/dev/null"
     assert re.fullmatch(re.escape(str(mounted.folder)) + r"/pending-[0-9]+-[0-9a-f]{16}\.tmp", dialog["fds"][1])
     # The vault lock is not held while the dialog is open.
@@ -166,7 +166,7 @@ def test_add_writes_through_kdialog_stdout_into_the_mount(mounted, capsys):
     assert prompts(capsys, "list") == {
         "ok": True, "items": [{"id": 1, "kind": "prompt", "text": "Summarise this:\nplease"}], "personas": {}}
     # Nothing outside the mount.
-    assert sorted(os.listdir(mounted.data / "hearthside")) == ["vault"]
+    assert sorted(os.listdir(mounted.data / "hearthwire")) == ["vault"]
 
 
 def test_personas_ids_and_defaults(mounted, capsys):
@@ -355,6 +355,6 @@ def test_promptstore_is_stdlib_only_and_never_prints_or_uses_a_shell():
                     r"\blogging\b"):
         assert not re.search(pattern, code), pattern
     # The dialog argv carries only fixed words: no initial text.
-    assert promptstore.dialog_argv("/k", "prompt") == ["/k", "--title", "Hearthside", "--textinputbox",
+    assert promptstore.dialog_argv("/k", "prompt") == ["/k", "--title", "Hearthwire", "--textinputbox",
                                                        promptstore.LABELS["prompt"]]
     assert not any(label.startswith("-") for label in promptstore.LABELS.values())

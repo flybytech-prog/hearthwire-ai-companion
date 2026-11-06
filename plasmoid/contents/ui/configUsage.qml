@@ -127,7 +127,7 @@ KCM.ScrollViewKCM {
     property string statusMessage: ""
     property bool checkingProviders: false
     property bool detecting: false
-    readonly property string detectCommand: "python3 -P -m hearthside --detect"
+    readonly property string detectCommand: "python3 -P -m hearthwire --detect"
 
     function parseList(value, fallback) {
         try {
@@ -373,7 +373,7 @@ KCM.ScrollViewKCM {
             return Catalog.byId(providerId) !== null
         })
         providerSource.connectSource(
-            "python3 -P -m hearthside --json --providers=" + safe.join(",")
+            "python3 -P -m hearthwire --json --providers=" + safe.join(",")
         )
     }
 

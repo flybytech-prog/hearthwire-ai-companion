@@ -1,7 +1,7 @@
 """Passphrase-encrypted folder for the Chat tab's saved sign-ins (gocryptfs).
 
-Layout: the cipher directory is ``$XDG_DATA_HOME/hearthside/vault/`` and the
-plaintext view is mounted at ``$XDG_RUNTIME_DIR/hearthside/vault/`` (tmpfs, so
+Layout: the cipher directory is ``$XDG_DATA_HOME/hearthwire/vault/`` and the
+plaintext view is mounted at ``$XDG_RUNTIME_DIR/hearthwire/vault/`` (tmpfs, so
 anything written after an unmount lands in RAM, never on disk).
 
 The passphrase never passes through this process. gocryptfs runs kdialog
@@ -98,14 +98,14 @@ MOUNTPOINT_MODE = 0o700
 SEALED_MODE = 0o500
 
 # Fixed English kdialog prompts (D26). None may start with "-".
-TITLE = "Hearthside"
+TITLE = "Hearthwire"
 PROMPT_CREATE = (
-    "Choose a passphrase for the Hearthside encrypted chat folder. "
+    "Choose a passphrase for the Hearthwire encrypted chat folder. "
     "If you forget it, the saved chat data cannot be recovered."
 )
-PROMPT_UNLOCK = "Enter the passphrase for the Hearthside encrypted chat folder."
-PROMPT_CURRENT = "Enter the current passphrase for the Hearthside encrypted chat folder."
-PROMPT_NEW = "Choose a new passphrase for the Hearthside encrypted chat folder."
+PROMPT_UNLOCK = "Enter the passphrase for the Hearthwire encrypted chat folder."
+PROMPT_CURRENT = "Enter the current passphrase for the Hearthwire encrypted chat folder."
+PROMPT_NEW = "Choose a new passphrase for the Hearthwire encrypted chat folder."
 
 # Allow-list of the dash arguments each gocryptfs phase may pass, checked before every
 # run; everything else (key material, -ko/-o mount options, -fsname, debug output,
@@ -553,7 +553,7 @@ def vault_lock(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> Iterator[int]:
-    """Hold ``$XDG_RUNTIME_DIR/hearthside/vault.lock``; yields that directory's fd.
+    """Hold ``$XDG_RUNTIME_DIR/hearthwire/vault.lock``; yields that directory's fd.
 
     With ``wait`` it blocks as long as needed (an unlock dialog may be open in
     another widget); otherwise a lock held past ``LOCK_TIMEOUT`` gives "busy".
@@ -836,7 +836,7 @@ def status(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
 
 @contextmanager
 def _keys_dir(ctx: Context, *, create: bool) -> Iterator[Optional[int]]:
-    """``$XDG_DATA_HOME/hearthside/vault-keys`` (0700), opened without following links.
+    """``$XDG_DATA_HOME/hearthwire/vault-keys`` (0700), opened without following links.
 
     Yields None when it (or a parent) does not exist and ``create`` is false.
     """
@@ -1556,7 +1556,7 @@ def destroy(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
 
 # --- purge (scripts/install.sh --uninstall-web-data) -------------------------------------------
 
-# What purge may delete below $XDG_DATA_HOME/hearthside, in reply order: the
+# What purge may delete below $XDG_DATA_HOME/hearthwire, in reply order: the
 # encrypted folder's ciphertext (saved sign-ins exist nowhere else; there is no
 # unencrypted store) and its key slots. The wallet entry is reported after them.
 PURGE_CATEGORIES = (VAULT_DIR, KEYS_DIR)

@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from hearthside import cli
-from hearthside.core import droppedfile
+from hearthwire import cli
+from hearthwire.core import droppedfile
 
 SOURCE = Path(droppedfile.__file__)
 
@@ -92,7 +92,7 @@ def test_a_fifo_is_refused_without_blocking(tmp_path):
     os.mkfifo(fifo)
     src = Path(__file__).resolve().parent.parent / "src"
     completed = subprocess.run(
-        [sys.executable, "-P", "-m", "hearthside", "--read-dropped", hexpath(fifo)],
+        [sys.executable, "-P", "-m", "hearthwire", "--read-dropped", hexpath(fifo)],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False,
         env={**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"},
     )

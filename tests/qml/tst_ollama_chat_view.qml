@@ -234,7 +234,7 @@ TestCase {
         var wrapper = make({ shown: true })
         var view = wrapper.view
         compare(testCase.ownerCommands.length, 1)
-        verify(/^env HEARTHSIDE_RUN=\d+ HEARTHSIDE_APPLET=7 python3 -P -m hearthside --port-owner 11434$/
+        verify(/^env HEARTHWIRE_RUN=\d+ HEARTHWIRE_APPLET=7 python3 -P -m hearthwire --port-owner 11434$/
                .test(testCase.ownerCommands[0]), testCase.ownerCommands[0])
         // Nothing goes to the port before the owner is known.
         compare(testCase.requests.length, 0)

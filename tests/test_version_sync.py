@@ -4,7 +4,7 @@ import json
 import tomllib
 from pathlib import Path
 
-import hearthside
+import hearthwire
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +22,6 @@ def _plasmoid_version():
 
 
 def test_versions_are_in_sync():
-    assert hearthside.__version__ == EXPECTED_VERSION
+    assert hearthwire.__version__ == EXPECTED_VERSION
     assert _pyproject_version() == EXPECTED_VERSION
     assert _plasmoid_version() == EXPECTED_VERSION

@@ -29,7 +29,7 @@ PlasmaExtras.Representation {
         root.popupScale
     )
 
-    // A theme icon name, else fallbackName: Hearthside's own icons are only
+    // A theme icon name, else fallbackName: Hearthwire's own icons are only
     // in the theme after install.sh, not after a plain kpackagetool6 install.
     component IconChoice: Kirigami.Icon {
         required property string fallbackName
@@ -273,7 +273,7 @@ PlasmaExtras.Representation {
                     Layout.fillWidth: true
                     visible: !tabBar.visible
                     level: 2
-                    text: i18n("Hearthside")
+                    text: i18n("Hearthwire")
                     elide: Text.ElideRight
                 }
                 PlasmaComponents.TabBar {
@@ -287,12 +287,12 @@ PlasmaExtras.Representation {
 
                     PlasmaComponents.TabButton {
                         text: i18n("Chat")
-                        // Hearthside's icons, as in Settings (install.sh).
+                        // Hearthwire's icons, as in Settings (install.sh).
                         icon.name: chatIcon.name
                         onClicked: root.popupTab = "chat"
                         IconChoice {
                             id: chatIcon
-                            source: "hearthside-settings-chat"
+                            source: "hearthwire-settings-chat"
                             fallbackName: "dialog-messages"
                         }
                     }
@@ -302,7 +302,7 @@ PlasmaExtras.Representation {
                         onClicked: root.popupTab = "usage"
                         IconChoice {
                             id: usageIcon
-                            source: "hearthside-settings-ai"
+                            source: "hearthwire-settings-ai"
                             fallbackName: "speedometer"
                         }
                     }
@@ -315,7 +315,7 @@ PlasmaExtras.Representation {
                     QQC2.ToolTip.visible: hovered
                     IconChoice {
                         id: settingsIcon
-                        source: "hearthside-settings-general"
+                        source: "hearthwire-settings-general"
                         fallbackName: "configure"
                     }
                 }

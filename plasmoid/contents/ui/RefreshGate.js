@@ -24,6 +24,6 @@ function decide(inFlight, startedAtMs, nowMs) {
 function usageCommand(runId, providerIds) {
     var run = Math.max(0, Math.floor(Number(runId) || 0))
     var ids = Array.isArray(providerIds) ? providerIds : []
-    return "env HEARTHSIDE_RUN=" + run
-        + " python3 -P -m hearthside --json --providers=" + ids.join(",")
+    return "env HEARTHWIRE_RUN=" + run
+        + " python3 -P -m hearthwire --json --providers=" + ids.join(",")
 }

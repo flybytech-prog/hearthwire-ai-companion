@@ -106,7 +106,7 @@ TestCase {
 
         // The download waits for the user's Save.
         tryVerify(function () { return web.pendingDownload !== null }, 10000, "no download was offered")
-        compare(web.pendingDownloadName, "hearthside-test.bin")
+        compare(web.pendingDownloadName, "hearthwire-test.bin")
         compare(web.pendingDownload.state, WebEngineDownloadRequest.DownloadRequested)
         wait(1500)
         verify(web.pendingDownload !== null)

@@ -105,7 +105,7 @@ TestCase {
             current: true,
             storageMode: "encrypted",
             storageReady: true,
-            storagePath: "/run/user/1/hearthside/vault/web/applet-1-g0",
+            storagePath: "/run/user/1/hearthwire/vault/web/applet-1-g0",
             profileName: "applet-1-g0",
             card: {view: "web", message: ""}
         })
@@ -136,7 +136,7 @@ TestCase {
         verify(card !== null)
         verify(card.visible)
 
-        view.storagePath = "/run/user/1/hearthside/vault/web/applet-1-g0"
+        view.storagePath = "/run/user/1/hearthwire/vault/web/applet-1-g0"
         view.profileName = "applet-1-g0"
         view.storageReady = true
         view.card = {view: "web", message: ""}
@@ -144,7 +144,7 @@ TestCase {
         compare(testCase.builds.length, 1)
         compare(testCase.builds[0], {
             staySignedIn: true,
-            storagePath: "/run/user/1/hearthside/vault/web/applet-1-g0",
+            storagePath: "/run/user/1/hearthwire/vault/web/applet-1-g0",
             profileName: "applet-1-g0"
         })
         verify(view.persistentActive)
@@ -183,7 +183,7 @@ TestCase {
             current: true,
             storageMode: "encrypted",
             storageReady: true,
-            storagePath: "/r/hearthside/vault/web/applet-1-g0",
+            storagePath: "/r/hearthwire/vault/web/applet-1-g0",
             profileName: "applet-1-g0"
         })
         tryVerify(function () { return view.web !== null })
@@ -213,7 +213,7 @@ TestCase {
             current: true,
             storageMode: "encrypted",
             storageReady: true,
-            storagePath: "/r/hearthside/vault/web/applet-1-g0",
+            storagePath: "/r/hearthwire/vault/web/applet-1-g0",
             profileName: "applet-1-g0"
         })
         tryVerify(function () { return view.web !== null })
@@ -283,7 +283,7 @@ TestCase {
         verify(button.visible)
         verify(!confirm.visible)
         view.card = {view: "damaged", message: "busy"}
-        compare(card.message, "The encrypted folder is busy, perhaps used by another Hearthside widget. Try again in a moment.")
+        compare(card.message, "The encrypted folder is busy, perhaps used by another Hearthwire widget. Try again in a moment.")
     }
 
     // --- Lock automatically ---------------------------------------------
@@ -298,7 +298,7 @@ TestCase {
             current: true,
             storageMode: "encrypted",
             storageReady: true,
-            storagePath: "/r/hearthside/vault/web/applet-1-g0",
+            storagePath: "/r/hearthwire/vault/web/applet-1-g0",
             profileName: "applet-1-g0",
             autoLockMinutes: 1
         }, extra))
@@ -417,7 +417,7 @@ TestCase {
         view.web.localOwnerPort = 3000
         view.web.localOwnerProblem = "other"
         verify(message.visible)
-        compare(message.text, "Another user's program is using port 3000. Hearthside won't load anything from it.")
+        compare(message.text, "Another user's program is using port 3000. Hearthwire won't load anything from it.")
         compare(view.localOwnerText("other", 3000).indexOf("localhost"), -1)
         compare(view.localOwnerText("owner-unknown", 3000),
                 "Couldn't check which program is using port 3000. Nothing was loaded.")

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from conftest import fixture
-from hearthside.core.auth import (
+from hearthwire.core.auth import (
     CODEX_KEYRING_SERVICE,
     ClaudeAuthStore,
     ClaudeCredentials,
@@ -17,7 +17,7 @@ from hearthside.core.auth import (
     load_claude_credentials,
     load_codex_credentials,
 )
-from hearthside.core.environment import LoginShellEnvironment
+from hearthwire.core.environment import LoginShellEnvironment
 
 
 def _environment(values=None):
@@ -242,7 +242,7 @@ def test_codex_non_utf8_first_path_still_loads_second(tmp_path, monkeypatch):
 
 
 def test_atomic_write_refuses_non_utf8_target(tmp_path):
-    from hearthside.core.storage import atomic_write_private
+    from hearthwire.core.storage import atomic_write_private
 
     path = tmp_path / "auth.json"
     path.write_bytes(_NOT_UTF8)

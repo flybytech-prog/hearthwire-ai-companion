@@ -21,7 +21,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
-NOTIFYRC = ROOT / "assets" / "hearthside.notifyrc"
+NOTIFYRC = ROOT / "assets" / "hearthwire.notifyrc"
 REQUIRED_QML = (
     "QtQuick/Layouts", "QtQuick/Dialogs", "QtCore", "org/kde/kirigami", "org/kde/kcmutils",
     "org/kde/plasma/plasma5support", "org/kde/plasma/components", "org/kde/plasma/extras",
@@ -36,7 +36,7 @@ case "$*" in
     "-P -m pip --version") exit 0 ;;
     "-P -m pip show ai-usage-kde") exit 1 ;;
     "-P -m pip install "*) exit 0 ;;
-    "-P -m hearthside --version") echo 0.0-test ;;
+    "-P -m hearthwire --version") echo 0.0-test ;;
     *) exit 97 ;;
 esac
 """
@@ -92,7 +92,7 @@ def test_notifyrc_declares_the_component_and_both_alert_events():
     parser.optionxform = str
     parser.read_string(NOTIFYRC.read_text(encoding="utf-8"))
     assert {section: dict(parser[section]) for section in parser.sections()} == {
-        "Global": {"IconName": "hearthside", "Comment": "Hearthside"},
+        "Global": {"IconName": "hearthwire", "Comment": "Hearthwire"},
         "Event/usageLow": {"Name": "Plan running low", "Action": "Popup"},
         "Event/usageReset": {"Name": "Plan reset", "Action": "Popup"},
     }
@@ -139,10 +139,10 @@ def test_modules_planted_in_the_working_folder_never_run(tmp_path):
     assert marker.read_text() == "pip\n"
     marker.unlink()
     # The real interpreter, with the fake pip on PYTHONPATH; only the final
-    # "hearthside --version" is answered by the stub (the copy has no src/).
+    # "hearthwire --version" is answered by the stub (the copy has no src/).
     wrapper = (
         "#!/bin/sh\n"
-        'if [ "$*" = "-P -m hearthside --version" ]; then echo 0.0-test; exit 0; fi\n'
+        'if [ "$*" = "-P -m hearthwire --version" ]; then echo 0.0-test; exit 0; fi\n'
         f"PYTHONPATH='{fake.parent}' PYTHONDONTWRITEBYTECODE=1 exec '{sys.executable}' \"$@\"\n"
     )
     completed, _ = run_install(tmp_path, python_stub=wrapper, cwd=work)
@@ -157,7 +157,7 @@ def test_modules_planted_in_the_working_folder_never_run(tmp_path):
 def test_install_copies_the_notifyrc_with_mode_0644(tmp_path):
     completed, home = run_install(tmp_path)
     assert completed.returncode == 0, completed.stderr
-    installed = home / ".local" / "share" / "knotifications6" / "hearthside.notifyrc"
+    installed = home / ".local" / "share" / "knotifications6" / "hearthwire.notifyrc"
     assert installed.read_bytes() == NOTIFYRC.read_bytes()
     assert stat.S_IMODE(installed.stat().st_mode) == 0o644
     assert not installed.is_symlink()
@@ -167,7 +167,7 @@ def test_install_honours_xdg_data_home(tmp_path):
     data = tmp_path / "data"
     completed, home = run_install(tmp_path, xdg_data_home=data)
     assert completed.returncode == 0, completed.stderr
-    assert (data / "knotifications6" / "hearthside.notifyrc").read_bytes() == NOTIFYRC.read_bytes()
+    assert (data / "knotifications6" / "hearthwire.notifyrc").read_bytes() == NOTIFYRC.read_bytes()
     assert not (home / ".local" / "share" / "knotifications6").exists()
 
 
@@ -175,12 +175,12 @@ def test_install_honours_xdg_data_home(tmp_path):
 def test_install_replaces_an_old_copy_and_resets_its_mode(tmp_path, old_mode):
     directory = tmp_path / "home" / ".local" / "share" / "knotifications6"
     directory.mkdir(parents=True)
-    (directory / "hearthside.notifyrc").write_text("[Global]\n")
-    (directory / "hearthside.notifyrc").chmod(old_mode)
+    (directory / "hearthwire.notifyrc").write_text("[Global]\n")
+    (directory / "hearthwire.notifyrc").chmod(old_mode)
     completed, _ = run_install(tmp_path)
     assert completed.returncode == 0, completed.stderr
-    assert (directory / "hearthside.notifyrc").read_bytes() == NOTIFYRC.read_bytes()
-    assert stat.S_IMODE((directory / "hearthside.notifyrc").stat().st_mode) == 0o644
+    assert (directory / "hearthwire.notifyrc").read_bytes() == NOTIFYRC.read_bytes()
+    assert stat.S_IMODE((directory / "hearthwire.notifyrc").stat().st_mode) == 0o644
 
 
 def test_install_replaces_a_settings_icon_symlink_instead_of_writing_through_it(tmp_path):
@@ -188,13 +188,13 @@ def test_install_replaces_a_settings_icon_symlink_instead_of_writing_through_it(
     target.write_text("keep")
     directory = tmp_path / "home" / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps"
     directory.mkdir(parents=True)
-    (directory / "hearthside-settings-general.svg").symlink_to(target)
+    (directory / "hearthwire-settings-general.svg").symlink_to(target)
     completed, _ = run_install(tmp_path)
     assert completed.returncode == 0, completed.stderr
     assert target.read_text() == "keep"
-    assert not (directory / "hearthside-settings-general.svg").is_symlink()
-    assert (directory / "hearthside-settings-general.svg").read_bytes() == \
-        (ROOT / "assets" / "hearthside-settings-general.svg").read_bytes()
+    assert not (directory / "hearthwire-settings-general.svg").is_symlink()
+    assert (directory / "hearthwire-settings-general.svg").read_bytes() == \
+        (ROOT / "assets" / "hearthwire-settings-general.svg").read_bytes()
 
 
 def test_install_replaces_an_app_icon_symlink_instead_of_writing_through_it(tmp_path):
@@ -202,12 +202,12 @@ def test_install_replaces_an_app_icon_symlink_instead_of_writing_through_it(tmp_
     target.write_text("keep")
     directory = tmp_path / "home" / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps"
     directory.mkdir(parents=True)
-    (directory / "hearthside.svg").symlink_to(target)
+    (directory / "hearthwire.svg").symlink_to(target)
     completed, _ = run_install(tmp_path)
     assert completed.returncode == 0, completed.stderr
     assert target.read_text() == "keep"
-    assert not (directory / "hearthside.svg").is_symlink()
-    assert (directory / "hearthside.svg").read_bytes() == (ROOT / "assets" / "hearthside.svg").read_bytes()
+    assert not (directory / "hearthwire.svg").is_symlink()
+    assert (directory / "hearthwire.svg").read_bytes() == (ROOT / "assets" / "hearthwire.svg").read_bytes()
 
 
 def test_install_replaces_a_symlink_instead_of_writing_through_it(tmp_path):
@@ -215,12 +215,12 @@ def test_install_replaces_a_symlink_instead_of_writing_through_it(tmp_path):
     target.write_text("keep")
     directory = tmp_path / "home" / ".local" / "share" / "knotifications6"
     directory.mkdir(parents=True)
-    (directory / "hearthside.notifyrc").symlink_to(target)
+    (directory / "hearthwire.notifyrc").symlink_to(target)
     completed, _ = run_install(tmp_path)
     assert completed.returncode == 0, completed.stderr
     assert target.read_text() == "keep"
-    assert not (directory / "hearthside.notifyrc").is_symlink()
-    assert (directory / "hearthside.notifyrc").read_bytes() == NOTIFYRC.read_bytes()
+    assert not (directory / "hearthwire.notifyrc").is_symlink()
+    assert (directory / "hearthwire.notifyrc").read_bytes() == NOTIFYRC.read_bytes()
 
 
 def test_install_writes_only_the_icons_and_the_notifyrc_under_home(tmp_path):
@@ -228,19 +228,19 @@ def test_install_writes_only_the_icons_and_the_notifyrc_under_home(tmp_path):
     assert completed.returncode == 0, completed.stderr
     written = sorted(path.relative_to(home).as_posix() for path in home.rglob("*") if path.is_file())
     assert written == [
-        ".local/share/icons/hicolor/scalable/apps/hearthside-settings-ai.svg",
-        ".local/share/icons/hicolor/scalable/apps/hearthside-settings-chat.svg",
-        ".local/share/icons/hicolor/scalable/apps/hearthside-settings-general.svg",
-        ".local/share/icons/hicolor/scalable/apps/hearthside.svg",
-        ".local/share/knotifications6/hearthside.notifyrc",
+        ".local/share/icons/hicolor/scalable/apps/hearthwire-settings-ai.svg",
+        ".local/share/icons/hicolor/scalable/apps/hearthwire-settings-chat.svg",
+        ".local/share/icons/hicolor/scalable/apps/hearthwire-settings-general.svg",
+        ".local/share/icons/hicolor/scalable/apps/hearthwire.svg",
+        ".local/share/knotifications6/hearthwire.notifyrc",
     ]
     assert sorted(os.listdir(tmp_path / "project")) == ["assets", "plasmoid", "scripts"]
 
 
 # --- --uninstall-web-data: the icons ------------------------------------------------------------
 
-ICON_NAMES = ("hearthside.svg", "hearthside-settings-general.svg", "hearthside-settings-ai.svg",
-              "hearthside-settings-chat.svg")
+ICON_NAMES = ("hearthwire.svg", "hearthwire-settings-general.svg", "hearthwire-settings-ai.svg",
+              "hearthwire-settings-chat.svg")
 
 
 HISTORY_CLEARED = '{"ok":true}'
@@ -259,8 +259,8 @@ def run_uninstall(tmp_path, reply_text, history_reply=HISTORY_CLEARED, *, extra_
         "#!/bin/sh\n"
         f"printf '%s\\n' \"$*\" >> '{log}'\n"
         'case "$*" in\n'
-        f"    '-P -m hearthside --web-data purge') printf '%s\\n' '{reply_text}' ;;\n"
-        f"    '-P -m hearthside --usage-history clear') printf '%s\\n' '{history_reply}' ;;\n"
+        f"    '-P -m hearthwire --web-data purge') printf '%s\\n' '{reply_text}' ;;\n"
+        f"    '-P -m hearthwire --usage-history clear') printf '%s\\n' '{history_reply}' ;;\n"
         "    *) exit 97 ;;\n"
         "esac\n"
     ))
@@ -289,11 +289,11 @@ def test_uninstall_web_data_removes_the_icons_and_nothing_else(tmp_path, reply_t
     directory = _icon_directory(tmp_path)
     for name in ICON_NAMES:
         (directory / name).write_text("<svg/>")
-    neighbour = directory / "hearthside-other.svg"
+    neighbour = directory / "hearthwire-other.svg"
     neighbour.write_text("keep")
     completed = run_uninstall(tmp_path, reply_text)
     assert (completed.returncode, completed.stderr) == (0, "")
-    assert sorted(os.listdir(directory)) == ["hearthside-other.svg"]
+    assert sorted(os.listdir(directory)) == ["hearthwire-other.svg"]
     assert neighbour.read_text() == "keep"
 
 
@@ -327,7 +327,7 @@ def test_uninstall_web_data_keeps_the_icons_when_nothing_was_deleted(tmp_path):
 def test_uninstall_web_data_clears_the_usage_history_after_the_purge(tmp_path, reply_text):
     completed = run_uninstall(tmp_path, reply_text)
     assert (completed.returncode, completed.stderr) == (0, "")
-    assert helper_calls(tmp_path) == ["-P -m hearthside --web-data purge", "-P -m hearthside --usage-history clear"]
+    assert helper_calls(tmp_path) == ["-P -m hearthwire --web-data purge", "-P -m hearthwire --usage-history clear"]
 
 
 @pytest.mark.parametrize("reply_text", ['{"ok":false,"error":"not-locked"}', '{"ok":false,"error":"busy"}',
@@ -335,7 +335,7 @@ def test_uninstall_web_data_clears_the_usage_history_after_the_purge(tmp_path, r
 def test_uninstall_web_data_keeps_the_history_when_the_purge_failed(tmp_path, reply_text):
     completed = run_uninstall(tmp_path, reply_text)
     assert completed.returncode == 1
-    assert helper_calls(tmp_path) == ["-P -m hearthside --web-data purge"]
+    assert helper_calls(tmp_path) == ["-P -m hearthwire --web-data purge"]
 
 
 @pytest.mark.parametrize("history_reply", ['{"ok":false,"error":"busy"}', '{"ok":false,"error":"symlink"}',
@@ -356,7 +356,7 @@ def test_uninstall_web_data_really_deletes_the_history_folder(tmp_path):
     shutil.copytree(ROOT / "src", project / "src", ignore=shutil.ignore_patterns("__pycache__"))
     home = tmp_path / "home"
     data = tmp_path / "data"
-    history = data / "hearthside" / "usage-history"
+    history = data / "hearthwire" / "usage-history"
     history.mkdir(parents=True)
     (history / "history.json").write_text('{"history_version":1,"series":[]}')
     (history / "history.lock").write_text("")
@@ -365,7 +365,7 @@ def test_uninstall_web_data_really_deletes_the_history_folder(tmp_path):
     stubs.mkdir()
     _stub(stubs, "python3", (
         "#!/bin/sh\n"
-        'if [ "$*" = "-P -m hearthside --web-data purge" ]; then echo \'{"ok":true,"removed":[]}\'; exit 0; fi\n'
+        'if [ "$*" = "-P -m hearthwire --web-data purge" ]; then echo \'{"ok":true,"removed":[]}\'; exit 0; fi\n'
         f"exec '{sys.executable}' \"$@\"\n"
     ))
     completed = subprocess.run(
@@ -375,4 +375,4 @@ def test_uninstall_web_data_really_deletes_the_history_folder(tmp_path):
     )
     assert (completed.returncode, completed.stderr) == (0, "")
     assert not history.exists()
-    assert (data / "hearthside").is_dir()
+    assert (data / "hearthwire").is_dir()

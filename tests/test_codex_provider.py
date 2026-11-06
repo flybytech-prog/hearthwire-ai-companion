@@ -7,12 +7,12 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from conftest import fixture
-from hearthside.core.auth import CodexAuthStore, SecretToolStore
-from hearthside.core.environment import LoginShellEnvironment
-from hearthside.core.http import HttpResponse
-from hearthside.core.locking import credential_lock, lock_directory
-from hearthside.core.model import FailureKind, ProviderStatus
-from hearthside.providers.codex import (
+from hearthwire.core.auth import CodexAuthStore, SecretToolStore
+from hearthwire.core.environment import LoginShellEnvironment
+from hearthwire.core.http import HttpResponse
+from hearthwire.core.locking import credential_lock, lock_directory
+from hearthwire.core.model import FailureKind, ProviderStatus
+from hearthwire.providers.codex import (
     CLIENT_ID,
     REFRESH_URL,
     USAGE_URL,
@@ -505,8 +505,8 @@ def test_codex_keyring_lookup_failure_at_reread_is_storage_error(tmp_path):
     assert posts == []
 
 
-def test_codex_identifies_as_hearthside():
-    from hearthside import __version__
+def test_codex_identifies_as_hearthwire():
+    from hearthwire import __version__
 
     credentials, store = _credentials()
     captured = {}
@@ -521,4 +521,4 @@ def test_codex_identifies_as_hearthside():
         getter=getter,
         now=lambda: NOW,
     ).fetch()
-    assert captured["headers"]["User-Agent"] == f"Hearthside/{__version__}"
+    assert captured["headers"]["User-Agent"] == f"Hearthwire/{__version__}"

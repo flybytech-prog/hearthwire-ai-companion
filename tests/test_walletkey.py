@@ -22,13 +22,13 @@ from pathlib import Path
 
 import pytest
 
-from hearthside import cli
-from hearthside.core import vault, walletkey, webdata
+from hearthwire import cli
+from hearthwire.core import vault, walletkey, webdata
 from test_vault import Stubs, _stale, reply, vault_argv  # noqa: F401  (fixture helpers)
 
 SOURCE = Path(walletkey.__file__)
 VAULT_SOURCE = Path(vault.__file__)
-KEY = "Hearthside/encrypted-chat-folder"
+KEY = "Hearthwire/encrypted-chat-folder"
 
 
 @pytest.fixture
@@ -39,7 +39,7 @@ def stubs(tmp_path, monkeypatch, _private_runtime_dir):
 
 
 def keys_dir(stubs):
-    return Path(os.path.realpath(stubs.data)) / "hearthside" / "vault-keys"
+    return Path(os.path.realpath(stubs.data)) / "hearthwire" / "vault-keys"
 
 
 def slot(stubs):
@@ -99,8 +99,8 @@ def test_add_key_moves_the_key_fd_to_fd_and_unlock_uses_it(stubs, capsys):
     assert hashlib.sha256((stored + "\n").encode()).hexdigest() == openssl["sha"]
     assert kq[6]["sha"] != digest
     # argv: long options, our folder, entry and the wallet's name; -config is the copy.
-    assert copy_write["argv"] == ["--folder", "Hearthside", "--write-password", real, "kdewallet"]
-    assert read["argv"] == ["--folder", "Hearthside", "--read-password", new, "kdewallet"]
+    assert copy_write["argv"] == ["--folder", "Hearthwire", "--write-password", real, "kdewallet"]
+    assert read["argv"] == ["--folder", "Hearthwire", "--read-password", new, "kdewallet"]
     config = passwd["argv"][passwd["argv"].index("-config") + 1]
     assert config == str(keys_dir(stubs) / "wallet.conf.new")
     assert stat.S_IMODE(os.lstat(slot(stubs)).st_mode) == 0o400
@@ -115,7 +115,7 @@ def test_add_key_moves_the_key_fd_to_fd_and_unlock_uses_it(stubs, capsys):
     (mount,) = stubs.calls("gocryptfs")
     assert mount["argv"][:4] == ["-q", "-nosyslog", "-config", str(slot(stubs))]
     assert [mount["argv"][i + 1] for i, a in enumerate(mount["argv"]) if a == "-extpass"] == [
-        str(stubs.bin / "kwallet-query"), "--folder", "Hearthside", "--read-password", "encrypted-chat-folder",
+        str(stubs.bin / "kwallet-query"), "--folder", "Hearthwire", "--read-password", "encrypted-chat-folder",
         "kdewallet"]
     assert mount["fds"] == ["/dev/null"] * 3
     assert mount["extpass_sha"] == digest
@@ -456,7 +456,7 @@ def test_remove_key_deletes_slot_then_overwrites_and_deletes_the_entry(stubs, ca
     assert [call["argv"][5] for call in calls if call["tool"] == "qdbus6"
             and call["argv"][2].endswith("keyDoesNotExist")][-1] == "encrypted-chat-folder.new"
     (remove,) = [call["argv"] for call in calls if call["tool"] == "qdbus6" and call["argv"][2].endswith("removeEntry")]
-    assert remove[3:] == ["7", "Hearthside", "encrypted-chat-folder", "Hearthside"]
+    assert remove[3:] == ["7", "Hearthwire", "encrypted-chat-folder", "Hearthwire"]
     assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "off"}
     # Again: nothing left, nothing written.
     stubs.log.write_text("")
@@ -510,7 +510,7 @@ def test_purge_removes_vault_keys_and_the_entry(stubs, capsys, monkeypatch, tmp_
     assert cli.main(["--web-data", "purge"]) == 0
     assert capsys.readouterr().out == '{"ok":true,"removed":["vault","vault-keys","wallet-entry"]}\n'
     assert KEY not in wallet_state(stubs)
-    assert not (Path(os.path.realpath(stubs.data)) / "hearthside").exists()
+    assert not (Path(os.path.realpath(stubs.data)) / "hearthwire").exists()
     assert cli.main(["--web-data", "purge"]) == 0
     assert capsys.readouterr().out == '{"ok":true,"removed":[]}\n'
 
@@ -600,7 +600,7 @@ def test_output_never_contains_a_path_or_the_key(stubs, capsys, tmp_path, monkey
         outputs.append(captured.out + captured.err)
     text = "".join(outputs)
     assert str(tmp_path) not in text and "/" not in text
-    assert "kdewallet" not in text and "Hearthside" not in text
+    assert "kdewallet" not in text and "Hearthwire" not in text
     for line in stubs.log.read_text().splitlines():
         record = json.loads(line)
         for value in (record.get("sha"), record.get("stdin_sha")):
@@ -665,10 +665,10 @@ def test_argv_guard_accepts_the_contract_shapes():
         walletkey.keygen_argv("/usr/bin/openssl"),
         walletkey.write_argv(KQ, "kdewallet"), walletkey.read_argv(KQ, "my wallet.1"),
         walletkey.kwallet_argv(QD, "isEnabled"), walletkey.kwallet_argv(QD, "localWallet"),
-        walletkey.kwallet_argv(QD, "keyDoesNotExist", "kdewallet", "Hearthside", "encrypted-chat-folder"),
-        walletkey.kwallet_argv(QD, "open", "kdewallet", "0", "Hearthside"),
-        walletkey.kwallet_argv(QD, "removeEntry", "12", "Hearthside", "encrypted-chat-folder", "Hearthside"),
-        walletkey.kwallet_argv(QD, "close", "12", "false", "Hearthside"),
+        walletkey.kwallet_argv(QD, "keyDoesNotExist", "kdewallet", "Hearthwire", "encrypted-chat-folder"),
+        walletkey.kwallet_argv(QD, "open", "kdewallet", "0", "Hearthwire"),
+        walletkey.kwallet_argv(QD, "removeEntry", "12", "Hearthwire", "encrypted-chat-folder", "Hearthwire"),
+        walletkey.kwallet_argv(QD, "close", "12", "false", "Hearthwire"),
         walletkey.secrets_argv(QD, "/org/freedesktop/secrets/aliases/default", "Label"),
         walletkey.secrets_argv(QD, "/org/freedesktop/secrets/collection/kdewallet", "Locked"),
     ):
@@ -679,17 +679,17 @@ def test_argv_guard_accepts_the_contract_shapes():
 @pytest.mark.parametrize(
     "argv",
     [["/usr/bin/openssl", "rand", "-hex", "16"], ["/usr/bin/openssl", "rand", "-out", "/x", "32"],
-     ["openssl", "rand", "-hex", "32"], [KQ, "--folder", "Hearthside", "--read-password", "other", "kdewallet"],
-     [KQ, "-f", "Hearthside", "-r", "encrypted-chat-folder", "kdewallet"],
-     [KQ, "--folder", "Hearthside", "--read-password", "encrypted-chat-folder", "-v"],
-     [KQ, "--folder", "Hearthside", "--list-entries", "kdewallet"], [KQ, "kdewallet"],
+     ["openssl", "rand", "-hex", "32"], [KQ, "--folder", "Hearthwire", "--read-password", "other", "kdewallet"],
+     [KQ, "-f", "Hearthwire", "-r", "encrypted-chat-folder", "kdewallet"],
+     [KQ, "--folder", "Hearthwire", "--read-password", "encrypted-chat-folder", "-v"],
+     [KQ, "--folder", "Hearthwire", "--list-entries", "kdewallet"], [KQ, "kdewallet"],
      [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.readPassword", "1", "a", "b", "c"],
-     [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.removeFolder", "1", "Hearthside", "x"],
+     [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.removeFolder", "1", "Hearthwire", "x"],
      [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.isEnabled", "x"],
      [QD, "org.kde.kwalletd6", "/other", "org.kde.KWallet.isEnabled"],
-     [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.removeEntry", "1", "Other", "x", "Hearthside"],
-     [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.close", "1", "true", "Hearthside"],
-     [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.open", "-x", "0", "Hearthside"],
+     [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.removeEntry", "1", "Other", "x", "Hearthwire"],
+     [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.close", "1", "true", "Hearthwire"],
+     [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.open", "-x", "0", "Hearthwire"],
      [QD, "org.freedesktop.secrets", "/org/freedesktop/secrets/collection/a/b", "Locked"],
      [QD, "org.freedesktop.secrets", "/org/freedesktop/secrets/aliases/default", "Unlock"],
      [QD, "org.freedesktop.Notifications"], ["/bin/sh", "-c", "kwallet-query"]],
@@ -700,10 +700,10 @@ def test_argv_guard_refuses_other_shapes(argv):
 
 
 def test_extpass_may_only_be_the_exact_wallet_read():
-    cipher, mountpoint, config = "/d/hearthside/vault", "/r/hearthside/vault", "/d/hearthside/vault-keys/wallet.conf"
+    cipher, mountpoint, config = "/d/hearthwire/vault", "/r/hearthwire/vault", "/d/hearthwire/vault-keys/wallet.conf"
     good = vault.wallet_mount_argv("/usr/bin/gocryptfs", KQ, "kdewallet", config, cipher, mountpoint)
     vault._check_argv(good, config=config)
-    for extpass in ([KQ, "--folder", "Hearthside", "--write-password", "encrypted-chat-folder", "kdewallet"],
+    for extpass in ([KQ, "--folder", "Hearthwire", "--write-password", "encrypted-chat-folder", "kdewallet"],
                     [KQ, "--folder", "Other", "--read-password", "encrypted-chat-folder", "kdewallet"],
                     ["/usr/bin/cat", "/etc/passwd"], ["relative/kdialog", "--password", "x"]):
         argv = ["/usr/bin/gocryptfs", "-q", "-nosyslog", "-config", config,
@@ -956,7 +956,7 @@ def test_staging_entry_never_reaches_gocryptfs_as_extpass():
     staged = walletkey.read_argv(KQ, "kdewallet", walletkey.ENTRY_NEW)
     walletkey.check_argv(staged)
     assert not walletkey.is_read_argv(staged)
-    cipher, mountpoint, config = "/d/hearthside/vault", "/r/hearthside/vault", "/d/hearthside/vault-keys/wallet.conf"
+    cipher, mountpoint, config = "/d/hearthwire/vault", "/r/hearthwire/vault", "/d/hearthwire/vault-keys/wallet.conf"
     argv = ["/usr/bin/gocryptfs", "-q", "-nosyslog", "-config", config,
             *[item for value in staged for item in ("-extpass", value)], cipher, mountpoint]
     with pytest.raises(webdata.HelperError):

@@ -272,7 +272,7 @@ KCM.SimpleKCM {
         case "wallet-failed":
             return i18n("KDE Wallet didn't answer or was cancelled. Try again.")
         case "deleted-wallet-left":
-            return i18n("The encrypted folder was deleted, but its key could not be removed from KDE Wallet (folder Hearthside, entry encrypted-chat-folder). Remove it in KWalletManager.")
+            return i18n("The encrypted folder was deleted, but its key could not be removed from KDE Wallet (folder Hearthwire, entry encrypted-chat-folder). Remove it in KWalletManager.")
         case "wallet-write-failed":
             return i18n("Couldn't set up KDE Wallet. The passphrase still unlocks the folder.")
         case "wrong-passphrase":
@@ -465,7 +465,7 @@ KCM.SimpleKCM {
                 onActivated: page.cfg_refreshInterval = currentValue
             }
             Kirigami.ContextualHelpButton {
-                toolTipText: i18n("Hearthside starts with Plasma while this widget remains on a panel.")
+                toolTipText: i18n("Hearthwire starts with Plasma while this widget remains on a panel.")
             }
         }
 
@@ -496,7 +496,7 @@ KCM.SimpleKCM {
                 text: i18n("left")
             }
             Kirigami.ContextualHelpButton {
-                toolTipText: i18n("Shows one notification when a plan's usage left reaches this level, whether the popup shows Left or Used. It is checked at every usage refresh, only while the Usage tab is shown. A plan that is already this low when Plasma starts doesn't notify. Notifications can be muted under System Settings → Notifications → Hearthside.")
+                toolTipText: i18n("Shows one notification when a plan's usage left reaches this level, whether the popup shows Left or Used. It is checked at every usage refresh, only while the Usage tab is shown. A plan that is already this low when Plasma starts doesn't notify. Notifications can be muted under System Settings → Notifications → Hearthwire.")
             }
         }
 
@@ -702,7 +702,7 @@ KCM.SimpleKCM {
             Layout.fillWidth: true
             visible: page.confirmingOff
             type: Kirigami.MessageType.Warning
-            text: i18n("Turn off Stay signed in? When you apply this, the encrypted folder and every sign-in saved in it are deleted, for all Hearthside widgets. This can't be undone.")
+            text: i18n("Turn off Stay signed in? When you apply this, the encrypted folder and every sign-in saved in it are deleted, for all Hearthwire widgets. This can't be undone.")
             actions: [
                 Kirigami.Action {
                     text: i18n("Turn off and delete")
@@ -766,7 +766,7 @@ KCM.SimpleKCM {
             Layout.fillWidth: true
             visible: page.showFolderActions && page.confirmingDelete
             type: Kirigami.MessageType.Warning
-            text: i18n("Delete the encrypted folder? Every sign-in saved in it is lost, for all Hearthside widgets. This can't be undone.")
+            text: i18n("Delete the encrypted folder? Every sign-in saved in it is lost, for all Hearthwire widgets. This can't be undone.")
             actions: [
                 Kirigami.Action {
                     text: i18n("Delete")

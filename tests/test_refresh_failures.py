@@ -8,10 +8,10 @@ from datetime import timedelta
 
 import pytest
 
-from hearthside.core.auth import SecretToolStore
-from hearthside.core.locking import credential_lock, lock_directory
-from hearthside.core.model import FailureKind, ProviderStatus
-from hearthside.providers.cursor import (
+from hearthwire.core.auth import SecretToolStore
+from hearthwire.core.locking import credential_lock, lock_directory
+from hearthwire.core.model import FailureKind, ProviderStatus
+from hearthwire.providers.cursor import (
     ACCESS_KEY,
     MEMBERSHIP_KEY,
     PLAN_URL,
@@ -21,7 +21,7 @@ from hearthside.providers.cursor import (
     CursorAuthStore,
     CursorProvider,
 )
-from hearthside.providers.grok import GrokProvider
+from hearthwire.providers.grok import GrokProvider
 
 from test_additional_providers import (
     GROK_EXPIRED,

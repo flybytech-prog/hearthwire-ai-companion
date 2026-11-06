@@ -9,28 +9,28 @@ from datetime import datetime, timezone
 
 import pytest
 
-from hearthside.core.auth import SecretToolStore
-from hearthside.core.environment import LoginShellEnvironment
-from hearthside.core.http import HttpResponse
-from hearthside.core.locking import credential_lock, lock_directory
-from hearthside.core.model import FailureKind, ProviderStatus
-from hearthside.core.sqlite_store import SQLiteStateStore
-from hearthside.providers.antigravity import (
+from hearthwire.core.auth import SecretToolStore
+from hearthwire.core.environment import LoginShellEnvironment
+from hearthwire.core.http import HttpResponse
+from hearthwire.core.locking import credential_lock, lock_directory
+from hearthwire.core.model import FailureKind, ProviderStatus
+from hearthwire.core.sqlite_store import SQLiteStateStore
+from hearthwire.providers.antigravity import (
     AntigravityAuthStore,
     AntigravityCredentials,
     AntigravityOAuthClientStore,
     AntigravityProvider,
 )
-from hearthside.providers.copilot import CopilotAuthStore, CopilotProvider
-from hearthside.providers.cursor import (
+from hearthwire.providers.copilot import CopilotAuthStore, CopilotProvider
+from hearthwire.providers.cursor import (
     ACCESS_KEY,
     MEMBERSHIP_KEY,
     REFRESH_KEY,
     CursorAuthStore,
     CursorProvider,
 )
-from hearthside.providers.devin import DevinAuthStore, DevinProvider
-from hearthside.providers.grok import SETTINGS_URL, USAGE_URL, GrokAuthStore, GrokProvider
+from hearthwire.providers.devin import DevinAuthStore, DevinProvider
+from hearthwire.providers.grok import SETTINGS_URL, USAGE_URL, GrokAuthStore, GrokProvider
 
 
 NOW = datetime(2027, 1, 15, tzinfo=timezone.utc)
@@ -556,7 +556,7 @@ def test_grok_never_sends_the_same_refresh_token_twice(tmp_path, monkeypatch):
     assert posts == ["old-refresh"]
 
 
-def test_antigravity_cache_lives_under_hearthside(tmp_path):
+def test_antigravity_cache_lives_under_hearthwire(tmp_path):
     environment = LoginShellEnvironment(environ={"XDG_CACHE_HOME": str(tmp_path / "cache")})
     store = AntigravityAuthStore(environment=environment, secret_store=SecretToolStore(executable=""))
-    assert store.cache_path() == tmp_path / "cache" / "hearthside" / "antigravity-auth.json"
+    assert store.cache_path() == tmp_path / "cache" / "hearthwire" / "antigravity-auth.json"

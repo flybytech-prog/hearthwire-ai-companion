@@ -56,7 +56,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.reply(200, "text/html; charset=utf-8", HOSTILE)
         elif tag == "site" and self.path.startswith("/dl"):
             self.reply(200, "application/octet-stream", b"not a real file\n",
-                       [("Content-Disposition", 'attachment; filename="hearthside-test.bin"')])
+                       [("Content-Disposition", 'attachment; filename="hearthwire-test.bin"')])
         elif tag == "site":
             self.reply(404, "text/plain", b"")
         else:

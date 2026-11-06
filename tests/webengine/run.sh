@@ -121,12 +121,12 @@ RUNNER=/usr/lib/qt6/bin/qmltestrunner
 [ -x "$RUNNER" ] || RUNNER=$(command -v qmltestrunner 2>/dev/null) || skip "qmltestrunner is not available"
 unshare -r -n -m true 2>/dev/null || skip "unshare -r -n -m is not permitted here"
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/hearthside-webengine.XXXXXX") || exit 1
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/hearthwire-webengine.XXXXXX") || exit 1
 mkdir -p "$WORK/tree/plasmoid/contents" "$WORK/tree/tests"
 cp -r "$UI" "$WORK/tree/plasmoid/contents/ui"
 cp -r "$HERE" "$WORK/tree/tests/webengine"
 env -i HOME="$WORK/home" PATH=/usr/bin:/bin LANG=C.UTF-8 \
     unshare -r -n -m /bin/sh "$WORK/tree/tests/webengine/run.sh" --inner "$WORK" "$RUNNER"
 status=$?
-[ "${HEARTHSIDE_WEBENGINE_KEEP:-}" = "1" ] && echo "work folder: $WORK" || rm -rf "$WORK"
+[ "${HEARTHWIRE_WEBENGINE_KEEP:-}" = "1" ] && echo "work folder: $WORK" || rm -rf "$WORK"
 exit $status

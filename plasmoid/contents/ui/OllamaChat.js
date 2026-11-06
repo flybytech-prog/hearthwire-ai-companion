@@ -865,8 +865,8 @@ function ownerCommand(port, run, applet) {
     if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535
             || validInt(run) < 0 || validInt(applet) < 0)
         return ""
-    return "env HEARTHSIDE_RUN=" + run + " HEARTHSIDE_APPLET=" + applet
-        + " python3 -P -m hearthside --port-owner " + port
+    return "env HEARTHWIRE_RUN=" + run + " HEARTHWIRE_APPLET=" + applet
+        + " python3 -P -m hearthwire --port-owner " + port
 }
 
 function parseOwnerReply(exitCode, stdout) {

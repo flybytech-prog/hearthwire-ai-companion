@@ -1,4 +1,4 @@
-"""``hearthside --port-owner N``: who listens on the Ollama port (docs/provider-contracts.md).
+"""``hearthwire --port-owner N``: who listens on the Ollama port (docs/provider-contracts.md).
 
 All tables are sanitized /proc/net text written into ``tmp_path``; the real
 /proc is never read. Addresses are the kernel's little-endian word format.
@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hearthside import cli
-from hearthside.core import portowner
+from hearthwire import cli
+from hearthwire.core import portowner
 
 
 SELF = 1000

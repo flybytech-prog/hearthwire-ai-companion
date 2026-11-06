@@ -5,7 +5,7 @@ import "../../plasmoid/contents/ui/PromptLibrary.js" as PromptLibrary
 TestCase {
     name: "PromptLibrary"
 
-    readonly property string prefix: "env HEARTHSIDE_RUN=3 HEARTHSIDE_APPLET=5 python3 -P -m hearthside "
+    readonly property string prefix: "env HEARTHWIRE_RUN=3 HEARTHWIRE_APPLET=5 python3 -P -m hearthwire "
 
     function test_promptsCommands() {
         compare(PromptLibrary.promptsCommand("list", 3, 5), prefix + "--prompts list")

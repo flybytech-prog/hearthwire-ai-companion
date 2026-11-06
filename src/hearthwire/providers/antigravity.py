@@ -139,7 +139,7 @@ class AntigravityAuthStore:
     def cache_path(self) -> Path:
         configured = self.environment.value("XDG_CACHE_HOME")
         root = Path(configured).expanduser() if configured else Path.home() / ".cache"
-        return root / "hearthside" / "antigravity-auth.json"
+        return root / "hearthwire" / "antigravity-auth.json"
 
     def load(self) -> Optional[AntigravityCredentials]:
         raw = self.secrets.lookup(SECRET_SERVICE, SECRET_USERNAME)

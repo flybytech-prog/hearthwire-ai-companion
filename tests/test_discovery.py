@@ -5,9 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from hearthside.core import environment as environment_module
-from hearthside.core.discovery import detect_installed_providers
-from hearthside.core.environment import _SUPPORTED_NAMES, LoginShellEnvironment
+from hearthwire.core import environment as environment_module
+from hearthwire.core.discovery import detect_installed_providers
+from hearthwire.core.environment import _SUPPORTED_NAMES, LoginShellEnvironment
 
 
 class _Environment:
@@ -27,14 +27,14 @@ def test_login_shell_environment_prefers_process_and_parses_markers():
             returncode=0,
             stdout=(
                 "startup noise\n"
-                "__HEARTHSIDE_ENV_BEGIN__\n"
-                "__HEARTHSIDE_ENV_VAR__CLAUDE_CONFIG_DIR\n"
+                "__HEARTHWIRE_ENV_BEGIN__\n"
+                "__HEARTHWIRE_ENV_VAR__CLAUDE_CONFIG_DIR\n"
                 "/profiles/work\n"
-                "__HEARTHSIDE_ENV_VAR__CODEX_HOME\n"
+                "__HEARTHWIRE_ENV_VAR__CODEX_HOME\n"
                 "/profiles/codex\n"
-                "__HEARTHSIDE_ENV_VAR__PATH\n"
+                "__HEARTHWIRE_ENV_VAR__PATH\n"
                 "/login/bin:/process/bin\n"
-                "__HEARTHSIDE_ENV_END__\n"
+                "__HEARTHWIRE_ENV_END__\n"
                 "more noise"
             ),
             stderr="",
@@ -85,10 +85,10 @@ def test_detects_executable_from_login_shell_path(tmp_path):
         return SimpleNamespace(
             returncode=0,
             stdout=(
-                "__HEARTHSIDE_ENV_BEGIN__\n"
-                "__HEARTHSIDE_ENV_VAR__PATH\n"
+                "__HEARTHWIRE_ENV_BEGIN__\n"
+                "__HEARTHWIRE_ENV_VAR__PATH\n"
                 f"{bin_dir}\n"
-                "__HEARTHSIDE_ENV_END__\n"
+                "__HEARTHWIRE_ENV_END__\n"
             ),
             stderr="",
         )
@@ -156,17 +156,17 @@ def test_detects_all_reference_cli_names_in_catalog_order(tmp_path):
 def test_parse_tolerates_noise_and_filters_values():
     output = (
         "\x1b]0;title\x07welcome banner\n"
-        "\x1b[0m__HEARTHSIDE_ENV_BEGIN__\n"
-        "__HEARTHSIDE_ENV_VAR__CLAUDE_CONFIG_DIR\n"
-        "__HEARTHSIDE_ENV_VAR__CODEX_HOME\n"
+        "\x1b[0m__HEARTHWIRE_ENV_BEGIN__\n"
+        "__HEARTHWIRE_ENV_VAR__CLAUDE_CONFIG_DIR\n"
+        "__HEARTHWIRE_ENV_VAR__CODEX_HOME\n"
         "/profiles/codex\n"
-        "__HEARTHSIDE_ENV_VAR__AWS_SECRET_ACCESS_KEY\n"
+        "__HEARTHWIRE_ENV_VAR__AWS_SECRET_ACCESS_KEY\n"
         "must-not-be-read\n"
-        "__HEARTHSIDE_ENV_VAR__XDG_DATA_HOME\n"
+        "__HEARTHWIRE_ENV_VAR__XDG_DATA_HOME\n"
         "/broken/\ufffd/path\n"
-        "__HEARTHSIDE_ENV_VAR__PATH\n"
+        "__HEARTHWIRE_ENV_VAR__PATH\n"
         "/login/bin\n"
-        "\x1b[0m__HEARTHSIDE_ENV_END__\n"
+        "\x1b[0m__HEARTHWIRE_ENV_END__\n"
         "goodbye noise\n"
     )
     assert LoginShellEnvironment.parse(output) == {
@@ -177,8 +177,8 @@ def test_parse_tolerates_noise_and_filters_values():
 
 def test_parse_requires_end_marker():
     output = (
-        "__HEARTHSIDE_ENV_BEGIN__\n"
-        "__HEARTHSIDE_ENV_VAR__CODEX_HOME\n"
+        "__HEARTHWIRE_ENV_BEGIN__\n"
+        "__HEARTHWIRE_ENV_VAR__CODEX_HOME\n"
         "/profiles/codex\n"
     )
     assert LoginShellEnvironment.parse(output) == {}
@@ -190,10 +190,10 @@ def test_capture_parses_framed_output_even_on_nonzero_exit():
         return SimpleNamespace(
             returncode=1,
             stdout=(
-                "__HEARTHSIDE_ENV_BEGIN__\n"
-                "__HEARTHSIDE_ENV_VAR__CODEX_HOME\n"
+                "__HEARTHWIRE_ENV_BEGIN__\n"
+                "__HEARTHWIRE_ENV_VAR__CODEX_HOME\n"
                 "/profiles/codex\n"
-                "__HEARTHSIDE_ENV_END__\n"
+                "__HEARTHWIRE_ENV_END__\n"
             ),
             stderr="",
         )
@@ -230,14 +230,14 @@ def test_capture_command_is_shell_agnostic_and_allow_listed():
     assert "\\0" not in command and "\0" not in command
     statements = [part.strip() for part in command.split(";")]
     allowed = (
-        {"echo __HEARTHSIDE_ENV_BEGIN__", "echo __HEARTHSIDE_ENV_END__"}
-        | {f"echo __HEARTHSIDE_ENV_VAR__{name}" for name in _SUPPORTED_NAMES}
+        {"echo __HEARTHWIRE_ENV_BEGIN__", "echo __HEARTHWIRE_ENV_END__"}
+        | {f"echo __HEARTHWIRE_ENV_VAR__{name}" for name in _SUPPORTED_NAMES}
         | {f"printenv {name}" for name in _SUPPORTED_NAMES}
     )
     assert set(statements) <= allowed
     printed = {item.removeprefix("printenv ") for item in statements if item.startswith("printenv ")}
     assert printed == set(_SUPPORTED_NAMES)
-    assert command.endswith("echo __HEARTHSIDE_ENV_END__")
+    assert command.endswith("echo __HEARTHWIRE_ENV_END__")
 
 
 def test_run_process_detaches_stdin_and_session(monkeypatch):

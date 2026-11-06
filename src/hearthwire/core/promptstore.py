@@ -57,10 +57,10 @@ _ITEM_NAME = re.compile(r"(prompt|persona)-([1-9][0-9]{0,9})\.txt")
 _PENDING_NAME = re.compile(r"pending-([1-9][0-9]{0,9})-[0-9a-f]{16}\.tmp")
 
 # Fixed kdialog text box labels (D26); none may start with "-".
-TITLE = "Hearthside"
+TITLE = "Hearthwire"
 LABELS = {
-    "prompt": "Type or paste the prompt to save in the Hearthside library.",
-    "persona": "Type or paste the personality (system prompt) to save in the Hearthside library.",
+    "prompt": "Type or paste the prompt to save in the Hearthwire library.",
+    "persona": "Type or paste the personality (system prompt) to save in the Hearthwire library.",
 }
 
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC

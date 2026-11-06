@@ -50,13 +50,13 @@ MouseArea {
         }
     }
 
-    // Only the Hearthside icon is shown in the panel; usage lives in the
+    // Only the Hearthwire icon is shown in the panel; usage lives in the
     // popup and the tooltip.
     Kirigami.Icon {
         id: content
         anchors.fill: parent
         anchors.margins: Math.round(Kirigami.Units.smallSpacing / 2)
-        source: Qt.resolvedUrl("../images/hearthside.svg")
+        source: Qt.resolvedUrl("../images/hearthwire.svg")
         isMask: true
         color: Kirigami.Theme.textColor
         active: compactRoot.containsMouse

@@ -107,7 +107,7 @@ function nextRun(run) {
 function helperPrefix(run, applet) {
     if (validInt(run) < 0 || validInt(applet) < 0)
         return ""
-    return "env HEARTHSIDE_RUN=" + run + " HEARTHSIDE_APPLET=" + applet + " python3 -P -m hearthside"
+    return "env HEARTHWIRE_RUN=" + run + " HEARTHWIRE_APPLET=" + applet + " python3 -P -m hearthwire"
 }
 
 // op "prepare" needs a generation; op "remove" keeps generation `keep` when it
@@ -227,7 +227,7 @@ function profilePath(runtimeDir, applet, generation) {
     var name = profileName(applet, generation)
     if (base === "" || name === "")
         return ""
-    return base + "/hearthside/vault/web/" + name
+    return base + "/hearthwire/vault/web/" + name
 }
 
 function installCommand(missing) {

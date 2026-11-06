@@ -26,8 +26,8 @@ def lock_directory(environ: Optional[Mapping[str, str]] = None) -> Path:
     values = os.environ if environ is None else environ
     runtime = values.get("XDG_RUNTIME_DIR") or ""
     if runtime and os.path.isabs(runtime) and os.path.isdir(runtime):
-        return Path(runtime) / "hearthside"
-    return Path(tempfile.gettempdir()) / f"hearthside-{os.getuid()}"
+        return Path(runtime) / "hearthwire"
+    return Path(tempfile.gettempdir()) / f"hearthwire-{os.getuid()}"
 
 
 def _private_directory(directory: Path) -> bool:

@@ -2,11 +2,11 @@
 
 They start Chromium against a hostile fake chat site inside a private user,
 network and mount namespace (see tests/webengine/run.sh), so they are slow
-and need user namespaces. They run only with HEARTHSIDE_WEBENGINE_TESTS=1;
+and need user namespaces. They run only with HEARTHWIRE_WEBENGINE_TESTS=1;
 where the runner can't isolate itself (no unshare, openssl or user
 namespaces) it says SKIP and the test is skipped.
 
-With HEARTHSIDE_WEBENGINE_BYPASSES=1 as well, the runner is also pointed at
+With HEARTHWIRE_WEBENGINE_BYPASSES=1 as well, the runner is also pointed at
 copies of the plasmoid with one of the pentest bypasses (grant, cert, nav)
 applied, and must fail on each.
 """
@@ -22,8 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNNER = ROOT / "tests" / "webengine" / "run.sh"
 UI = ROOT / "plasmoid" / "contents" / "ui"
 
-pytestmark = pytest.mark.skipif(os.environ.get("HEARTHSIDE_WEBENGINE_TESTS") != "1",
-                                reason="set HEARTHSIDE_WEBENGINE_TESTS=1 to run the WebEngine runtime tests")
+pytestmark = pytest.mark.skipif(os.environ.get("HEARTHWIRE_WEBENGINE_TESTS") != "1",
+                                reason="set HEARTHWIRE_WEBENGINE_TESTS=1 to run the WebEngine runtime tests")
 
 # (name, old, new) in ChatWebView.qml: the pentest bypasses the runtime
 # tests must catch even if a static rule were missed.
@@ -61,8 +61,8 @@ def test_hostile_site_gets_nothing_from_the_real_chat_web_view(tmp_path):
     assert code == 0 and "webengine runtime tests: PASS" in output, output
 
 
-@pytest.mark.skipif(os.environ.get("HEARTHSIDE_WEBENGINE_BYPASSES") != "1",
-                    reason="set HEARTHSIDE_WEBENGINE_BYPASSES=1 to prove the runtime tests catch the bypasses")
+@pytest.mark.skipif(os.environ.get("HEARTHWIRE_WEBENGINE_BYPASSES") != "1",
+                    reason="set HEARTHWIRE_WEBENGINE_BYPASSES=1 to prove the runtime tests catch the bypasses")
 @pytest.mark.parametrize(("name", "old", "new"), BYPASSES, ids=[name for name, _, _ in BYPASSES])
 def test_runtime_tests_fail_on_a_bypass(tmp_path, name, old, new):
     ui = tmp_path / "ui"

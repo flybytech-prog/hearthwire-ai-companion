@@ -29,37 +29,37 @@ if [ "$uninstall_web_data" = true ]; then
         echo "Required command not found: python3" >&2
         exit 1
     fi
-    # -P (Python 3.11+, which Hearthside requires) keeps the working folder off
+    # -P (Python 3.11+, which Hearthwire requires) keeps the working folder off
     # sys.path, so a stray json.py there is never imported; PYTHONPATH points
     # at this checkout instead.
-    if ! reply=$(PYTHONPATH="$project_directory/src" PYTHONDONTWRITEBYTECODE=1 python3 -P -m hearthside --web-data purge </dev/null); then
-        echo "Could not run the Hearthside helper. Nothing was deleted." >&2
+    if ! reply=$(PYTHONPATH="$project_directory/src" PYTHONDONTWRITEBYTECODE=1 python3 -P -m hearthwire --web-data purge </dev/null); then
+        echo "Could not run the Hearthwire helper. Nothing was deleted." >&2
         exit 1
     fi
     # The opt-in usage history goes too, once the sign-in data is gone. The
     # helper refuses symlinks and replies {"ok":true} also when there is none.
     clear_usage_history() {
-        if ! history_reply=$(PYTHONPATH="$project_directory/src" PYTHONDONTWRITEBYTECODE=1 python3 -P -m hearthside --usage-history clear </dev/null) \
+        if ! history_reply=$(PYTHONPATH="$project_directory/src" PYTHONDONTWRITEBYTECODE=1 python3 -P -m hearthwire --usage-history clear </dev/null) \
             || [ "$history_reply" != '{"ok":true}' ]; then
-            echo "Deleted the Hearthside chat sign-in data, but could not delete the usage history (the folder hearthside/usage-history in ${XDG_DATA_HOME:-$HOME/.local/share}). Delete it by hand." >&2
+            echo "Deleted the Hearthwire chat sign-in data, but could not delete the usage history (the folder hearthwire/usage-history in ${XDG_DATA_HOME:-$HOME/.local/share}). Delete it by hand." >&2
             exit 1
         fi
     }
     # The usage alert events file and the app and settings icons go too, but
     # only once the data is gone. rm unlinks a symlink, never its target.
     remove_installed_files() {
-        rm -f -- "${XDG_DATA_HOME:-$HOME/.local/share}/knotifications6/hearthside.notifyrc"
+        rm -f -- "${XDG_DATA_HOME:-$HOME/.local/share}/knotifications6/hearthwire.notifyrc"
         uninstall_icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
-        rm -f -- "$uninstall_icons/hearthside.svg" \
-            "$uninstall_icons/hearthside-settings-general.svg" \
-            "$uninstall_icons/hearthside-settings-ai.svg" \
-            "$uninstall_icons/hearthside-settings-chat.svg"
+        rm -f -- "$uninstall_icons/hearthwire.svg" \
+            "$uninstall_icons/hearthwire-settings-general.svg" \
+            "$uninstall_icons/hearthwire-settings-ai.svg" \
+            "$uninstall_icons/hearthwire-settings-chat.svg"
     }
     case "$reply" in
         '{"ok":true,"removed":[]}')
             clear_usage_history
             remove_installed_files
-            echo "No Hearthside chat sign-in data found."
+            echo "No Hearthwire chat sign-in data found."
             ;;
         '{"ok":true,"removed":["'*'"]}')
             # Categories, in this order: vault, vault-keys, wallet-entry.
@@ -70,27 +70,27 @@ if [ "$uninstall_web_data" = true ]; then
             case "$reply" in *'"wallet-entry"'*) echo "Deleted: the encrypted chat folder's key in KDE Wallet." ;; esac
             ;;
         '{"ok":false,"error":"wallet-failed"}')
-            echo "Deleted the Hearthside chat files, but could not remove the encrypted chat folder's key from KDE Wallet (folder Hearthside, entry encrypted-chat-folder). Remove it in KWalletManager." >&2
+            echo "Deleted the Hearthwire chat files, but could not remove the encrypted chat folder's key from KDE Wallet (folder Hearthwire, entry encrypted-chat-folder). Remove it in KWalletManager." >&2
             exit 1
             ;;
         '{"ok":false,"error":"not-locked"}')
-            echo "Lock the encrypted folder in Hearthside first, then run this again. Nothing was deleted." >&2
+            echo "Lock the encrypted folder in Hearthwire first, then run this again. Nothing was deleted." >&2
             exit 1
             ;;
         '{"ok":false,"error":"busy"}')
-            echo "Hearthside is using the encrypted folder right now. Try again in a moment. Nothing was deleted." >&2
+            echo "Hearthwire is using the encrypted folder right now. Try again in a moment. Nothing was deleted." >&2
             exit 1
             ;;
         '{"ok":false,"error":"symlink"}')
-            echo "A Hearthside data folder is a symbolic link; refusing to delete through it. Nothing was deleted." >&2
+            echo "A Hearthwire data folder is a symbolic link; refusing to delete through it. Nothing was deleted." >&2
             exit 1
             ;;
         '{"ok":false,"error":"not-directory"}'|'{"ok":false,"error":"not-owned"}')
-            echo "A Hearthside data folder is not a folder you own; refusing to delete it. Nothing was deleted." >&2
+            echo "A Hearthwire data folder is not a folder you own; refusing to delete it. Nothing was deleted." >&2
             exit 1
             ;;
         *)
-            echo "Could not delete Hearthside chat sign-in data. Some of it may remain." >&2
+            echo "Could not delete Hearthwire chat sign-in data. Some of it may remain." >&2
             exit 1
             ;;
     esac
@@ -109,7 +109,7 @@ done
 # a pip.py or json.py where the script is run from is never imported. (An
 # older Python rejects -P, which fails the version check as it should.)
 if ! python3 -P -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
-    echo "Hearthside needs Python 3.11 or newer." >&2
+    echo "Hearthwire needs Python 3.11 or newer." >&2
     exit 1
 fi
 if ! python3 -P -m pip --version >/dev/null 2>&1; then
@@ -159,7 +159,7 @@ missing_required_packages() {
 }
 packages=$(missing_required_packages)
 if [ -n "$packages" ]; then
-    echo "Hearthside needs these packages: $packages" >&2
+    echo "Hearthwire needs these packages: $packages" >&2
     # shellcheck disable=SC2086
     if offer_install "Install them now with sudo pacman?" $packages; then
         packages=$(missing_required_packages)
@@ -170,7 +170,7 @@ if [ -n "$packages" ]; then
     fi
 fi
 
-# Optional features: offer each one, install Hearthside either way.
+# Optional features: offer each one, install Hearthwire either way.
 if [ ! -d "$qml_directory/QtWebEngine" ]; then
     echo "The Chat tab (AI chat web sites) needs Qt WebEngine (package qt6-webengine)."
     offer_install "Install qt6-webengine now with sudo pacman?" qt6-webengine || true
@@ -240,33 +240,33 @@ python3 -P -m pip install \
     --break-system-packages \
     "$project_directory"
 
-if kpackagetool6 -t Plasma/Applet -s io.github.flybytechprog.hearthside >/dev/null 2>&1; then
+if kpackagetool6 -t Plasma/Applet -s io.github.flybytechprog.hearthwire >/dev/null 2>&1; then
     kpackagetool6 -t Plasma/Applet -u "$project_directory/plasmoid"
 else
     kpackagetool6 -t Plasma/Applet -i "$project_directory/plasmoid"
 fi
 
-# Full-colour app icon for the widget list and Settings → About (metadata "Icon": "hearthside").
+# Full-colour app icon for the widget list and Settings → About (metadata "Icon": "hearthwire").
 icon_directory="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
 mkdir -p -- "$icon_directory"
 # Unlinked first, like the notifyrc below, so a symlink is replaced, never followed.
-rm -f -- "$icon_directory/hearthside.svg"
-cp -- "$project_directory/assets/hearthside.svg" "$icon_directory/hearthside.svg"
+rm -f -- "$icon_directory/hearthwire.svg"
+cp -- "$project_directory/assets/hearthwire.svg" "$icon_directory/hearthwire.svg"
 # Settings page icons (config.qml), single colour: Plasma recolours them to
 # the theme like its own icons. Unlinked first too.
 for settings_icon in general ai chat; do
-    rm -f -- "$icon_directory/hearthside-settings-$settings_icon.svg"
-    cp -- "$project_directory/assets/hearthside-settings-$settings_icon.svg" \
-        "$icon_directory/hearthside-settings-$settings_icon.svg"
+    rm -f -- "$icon_directory/hearthwire-settings-$settings_icon.svg"
+    cp -- "$project_directory/assets/hearthwire-settings-$settings_icon.svg" \
+        "$icon_directory/hearthwire-settings-$settings_icon.svg"
 done
 
-# Usage alert events (System Settings → Notifications → Hearthside). The old
+# Usage alert events (System Settings → Notifications → Hearthwire). The old
 # file is unlinked first, so a symlink in its place is replaced, never followed.
 notifyrc_directory="${XDG_DATA_HOME:-$HOME/.local/share}/knotifications6"
 mkdir -p -- "$notifyrc_directory"
-rm -f -- "$notifyrc_directory/hearthside.notifyrc"
-cp -- "$project_directory/assets/hearthside.notifyrc" "$notifyrc_directory/hearthside.notifyrc"
-chmod 0644 -- "$notifyrc_directory/hearthside.notifyrc"
+rm -f -- "$notifyrc_directory/hearthwire.notifyrc"
+cp -- "$project_directory/assets/hearthwire.notifyrc" "$notifyrc_directory/hearthwire.notifyrc"
+chmod 0644 -- "$notifyrc_directory/hearthwire.notifyrc"
 
 if [ "$restart_plasma" = true ]; then
     if systemctl --user is-active plasma-plasmashell.service >/dev/null 2>&1; then
@@ -277,12 +277,12 @@ if [ "$restart_plasma" = true ]; then
     fi
 fi
 
-version=$(python3 -P -m hearthside --version)
-echo "Hearthside ${version} installed."
+version=$(python3 -P -m hearthwire --version)
+echo "Hearthwire ${version} installed."
 if [ -n "$optional_notes" ]; then
     echo "Optional features not available yet:"
     printf '%b' "$optional_notes"
 fi
 if [ "$migrated" = true ]; then
-    echo "Remove the old AI Usage widget from your panel if it is still there, then add Hearthside via Add Widgets…"
+    echo "Remove the old AI Usage widget from your panel if it is still there, then add Hearthwire via Add Widgets…"
 fi

@@ -1,9 +1,9 @@
 """KDE Wallet key slot for the encrypted Chat folder (see ``vault.py``).
 
 The wallet slot is a copy of ``gocryptfs.conf`` at
-``$XDG_DATA_HOME/hearthside/vault-keys/wallet.conf`` whose master key is
+``$XDG_DATA_HOME/hearthwire/vault-keys/wallet.conf`` whose master key is
 wrapped with a random 256-bit key (``openssl rand -hex 32``) kept in the
-user's KDE Wallet, folder ``Hearthside``, entry ``encrypted-chat-folder``.
+user's KDE Wallet, folder ``Hearthwire``, entry ``encrypted-chat-folder``.
 A (re-)setup stages its new key in ``encrypted-chat-folder.new`` and moves it
 to the real entry only after the new slot is keyed (``vault.add_key``).
 
@@ -49,13 +49,13 @@ from .webdata import HelperError, _close
 # qt6-tools -> qdbus6). openssl is needed only to set up or remove the key.
 TOOLS = ("kwallet-query", "qdbus6")
 KEYGEN_TOOL = "openssl"
-FOLDER = "Hearthside"
+FOLDER = "Hearthwire"
 ENTRY = "encrypted-chat-folder"
 # A re-setup stages its new key here and moves it to ENTRY only after the new
 # slot is keyed, so a failed re-setup leaves the working slot and entry alone.
 ENTRY_NEW = ENTRY + ".new"
 ENTRIES = (ENTRY, ENTRY_NEW)
-APP_ID = "Hearthside"
+APP_ID = "Hearthwire"
 
 KEYS_DIR = "vault-keys"
 SLOT_FILE = "wallet.conf"

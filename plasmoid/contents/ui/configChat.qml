@@ -228,7 +228,7 @@ KCM.SimpleKCM {
                 }
                 Kirigami.ContextualHelpButton {
                     visible: siteRow.modelData.native === true
-                    toolTipText: i18n("The conversation is kept in memory only and goes to the Ollama server on this computer, nowhere else. Clear also unloads the models it used. Cloud models are hidden. Before sending, Hearthside checks that the Ollama port belongs to you or to the system, never to another user. Hearthside never starts Ollama.")
+                    toolTipText: i18n("The conversation is kept in memory only and goes to the Ollama server on this computer, nowhere else. Clear also unloads the models it used. Cloud models are hidden. Before sending, Hearthwire checks that the Ollama port belongs to you or to the system, never to another user. Hearthwire never starts Ollama.")
                 }
                 Item {
                     Layout.fillWidth: true

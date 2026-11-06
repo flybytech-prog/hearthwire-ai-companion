@@ -262,7 +262,7 @@ class GrokProvider:
                 "Authorization": f"Bearer {token}",
                 "X-XAI-Token-Auth": "xai-grok-cli",
                 "Accept": "application/json",
-                "User-Agent": f"Hearthside/{__version__}",
+                "User-Agent": f"Hearthwire/{__version__}",
             })
         except Exception:
             return None

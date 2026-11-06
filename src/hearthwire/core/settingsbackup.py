@@ -3,10 +3,10 @@
 One fixed file, no file dialog::
 
     $XDG_CONFIG_HOME (when absolute, else ~/.config)/
-        hearthside/                  0700, created only by export
+        hearthwire/                  0700, created only by export
             settings-backup.json     0600, replaced atomically
 
-    {"format":"hearthside-settings","version":1,"config_schema":3,
+    {"format":"hearthwire-settings","version":1,"config_schema":3,
      "exported_at":"YYYY-MM-DDTHH:MM:SSZ","settings":{...}}
 
 ``export`` gets the widget's settings as lowercase hex of a UTF-8 JSON object
@@ -36,7 +36,7 @@ from .catalog import CATALOG_BY_ID, PROVIDER_CATALOG, PROVIDER_IDS
 from .webdata import APP_DIR, PRIVATE_MODE, HelperError, _close, _descriptors, open_base, open_child_dir
 
 OPERATIONS = ("status", "export", "import")
-FORMAT = "hearthside-settings"
+FORMAT = "hearthwire-settings"
 FORMAT_VERSION = 1
 CONFIG_SCHEMA = 3
 BACKUP_FILE = "settings-backup.json"
@@ -485,7 +485,7 @@ def _unsafe(mode: int) -> bool:
 
 
 def _backup_directory(environ: Optional[Mapping[str, str]], opened: list[int], *, create: bool) -> Optional[int]:
-    """``<config>/hearthside``: never a symlink, ours, not group- or other-writable.
+    """``<config>/hearthwire``: never a symlink, ours, not group- or other-writable.
 
     Only ``create`` (export) makes it (0700) or tightens a safe one to 0700.
     """

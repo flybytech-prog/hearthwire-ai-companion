@@ -1,7 +1,7 @@
 [project]
-name = "hearthside"
+name = "hearthwire"
 version = "1.0.0"
-description = "Hearthside: an AI companion for KDE Plasma 6 with subscription usage meters and chats with AI sites"
+description = "Hearthwire: an AI companion for KDE Plasma 6 with subscription usage meters and chats with AI sites"
 requires-python = ">=3.11"
 # PySide6 is provided by the system package (pacman), intentionally NOT a pip dep.
 dependencies = []
@@ -9,8 +9,12 @@ dependencies = []
 [project.optional-dependencies]
 test = ["pytest>=8"]
 
+[project.urls]
+Homepage = "https://github.com/flybytech-prog/hearthwire-ai-companion"
+Issues = "https://github.com/flybytech-prog/hearthwire-ai-companion/issues"
+
 [project.scripts]
-hearthside = "hearthside.cli:main"
+hearthwire = "hearthwire.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -19,7 +23,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 namespaces = false
-include = ["hearthside*"]
+include = ["hearthwire*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

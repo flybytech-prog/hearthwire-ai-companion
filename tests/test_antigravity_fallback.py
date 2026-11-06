@@ -5,9 +5,9 @@ from datetime import timedelta
 
 import pytest
 
-from hearthside.core.auth import SecretToolStore
-from hearthside.core.model import FailureKind, ProviderStatus
-from hearthside.providers.antigravity import (
+from hearthwire.core.auth import SecretToolStore
+from hearthwire.core.model import FailureKind, ProviderStatus
+from hearthwire.providers.antigravity import (
     CLOUD_BASES,
     MODELS_PATH,
     PLAN_PATH,

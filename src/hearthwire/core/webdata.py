@@ -24,7 +24,7 @@ from typing import Optional
 
 # Only "encrypted"; --store stays so the CLI contract can grow later.
 STORES = ("encrypted",)
-APP_DIR = "hearthside"
+APP_DIR = "hearthwire"
 WEB_DIR = "web"
 PRIVATE_MODE = 0o700
 

@@ -49,11 +49,11 @@ TestCase {
 
     function test_vaultCommands() {
         compare(ChatStorage.vaultCommand("status", 3, 12),
-                "env HEARTHSIDE_RUN=3 HEARTHSIDE_APPLET=12 python3 -P -m hearthside --vault status")
+                "env HEARTHWIRE_RUN=3 HEARTHWIRE_APPLET=12 python3 -P -m hearthwire --vault status")
         var ops = ["status", "create", "unlock", "lock", "change-passphrase", "destroy"]
         for (var index = 0; index < ops.length; index++)
             compare(ChatStorage.vaultCommand(ops[index], 1, 0),
-                    "env HEARTHSIDE_RUN=1 HEARTHSIDE_APPLET=0 python3 -P -m hearthside --vault " + ops[index])
+                    "env HEARTHWIRE_RUN=1 HEARTHWIRE_APPLET=0 python3 -P -m hearthwire --vault " + ops[index])
     }
 
     function test_vaultCommandRejectsAnythingElse() {
@@ -92,13 +92,13 @@ TestCase {
 
     function test_webDataCommands() {
         compare(ChatStorage.webDataCommand("prepare", "encrypted", 5, 2, null, 9),
-                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -P -m hearthside --web-data prepare --store encrypted --applet 5 --generation 2")
+                "env HEARTHWIRE_RUN=9 HEARTHWIRE_APPLET=5 python3 -P -m hearthwire --web-data prepare --store encrypted --applet 5 --generation 2")
         compare(ChatStorage.webDataCommand("remove", "encrypted", 5, null, 2, 9),
-                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -P -m hearthside --web-data remove --store encrypted --applet 5 --keep 2")
+                "env HEARTHWIRE_RUN=9 HEARTHWIRE_APPLET=5 python3 -P -m hearthwire --web-data remove --store encrypted --applet 5 --keep 2")
         compare(ChatStorage.webDataCommand("remove", "encrypted", 5, null, null, 9),
-                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -P -m hearthside --web-data remove --store encrypted --applet 5")
+                "env HEARTHWIRE_RUN=9 HEARTHWIRE_APPLET=5 python3 -P -m hearthwire --web-data remove --store encrypted --applet 5")
         compare(ChatStorage.webDataCommand("remove", "encrypted", 5, null, undefined, 9),
-                "env HEARTHSIDE_RUN=9 HEARTHSIDE_APPLET=5 python3 -P -m hearthside --web-data remove --store encrypted --applet 5")
+                "env HEARTHWIRE_RUN=9 HEARTHWIRE_APPLET=5 python3 -P -m hearthwire --web-data remove --store encrypted --applet 5")
     }
 
     function test_webDataCommandRejectsAnythingElse() {
@@ -179,7 +179,7 @@ TestCase {
 
     function test_profilePath() {
         compare(ChatStorage.profilePath("file:///run/user/1000", 7, 3),
-                "/run/user/1000/hearthside/vault/web/applet-7-g3")
+                "/run/user/1000/hearthwire/vault/web/applet-7-g3")
         compare(ChatStorage.profilePath("", 7, 3), "")
         compare(ChatStorage.profilePath("file:///run/user/1000", -1, 3), "")
         compare(ChatStorage.profilePath("file:///run/user/1000", 7, "3"), "")
@@ -525,7 +525,7 @@ TestCase {
     }
 
     function test_walletVaultCommands() {
-        var prefix = "env HEARTHSIDE_RUN=3 HEARTHSIDE_APPLET=5 python3 -P -m hearthside --vault "
+        var prefix = "env HEARTHWIRE_RUN=3 HEARTHWIRE_APPLET=5 python3 -P -m hearthwire --vault "
         compare(ChatStorage.vaultCommand("unlock", 3, 5), prefix + "unlock")
         compare(ChatStorage.vaultCommand("unlock", 3, 5, "passphrase"), prefix + "unlock")
         compare(ChatStorage.vaultCommand("unlock", 3, 5, "wallet"), prefix + "unlock --method wallet")
@@ -600,7 +600,7 @@ TestCase {
         compare(ChatStorage.stepMethod("unlock"), "")
         compare(ChatStorage.vaultCommand(ChatStorage.stepOperation("unlock-wallet"), 1, 1,
                 ChatStorage.stepMethod("unlock-wallet")),
-                "env HEARTHSIDE_RUN=1 HEARTHSIDE_APPLET=1 python3 -P -m hearthside --vault unlock --method wallet")
+                "env HEARTHWIRE_RUN=1 HEARTHWIRE_APPLET=1 python3 -P -m hearthwire --vault unlock --method wallet")
     }
 
     // M1: Unlock with shows the real slot, and a slot not applied.

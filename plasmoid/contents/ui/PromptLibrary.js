@@ -44,7 +44,7 @@ function isModelName(name) {
 function helperPrefix(run, applet) {
     if (validInt(run) < 0 || validInt(applet) < 0)
         return ""
-    return "env HEARTHSIDE_RUN=" + run + " HEARTHSIDE_APPLET=" + applet + " python3 -P -m hearthside"
+    return "env HEARTHWIRE_RUN=" + run + " HEARTHWIRE_APPLET=" + applet + " python3 -P -m hearthwire"
 }
 
 // op: list | add (args.kind) | replace (args.id) | remove (args.id) |

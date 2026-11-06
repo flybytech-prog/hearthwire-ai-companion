@@ -4,14 +4,14 @@ import sys
 from datetime import datetime, timezone
 
 from conftest import SRC
-from hearthside.core.environment import LoginShellEnvironment
-from hearthside.core.model import (
+from hearthwire.core.environment import LoginShellEnvironment
+from hearthwire.core.model import (
     BillingUsage,
     ProviderStatus,
     ProviderUsage,
     UsageWindow,
 )
-from hearthside.core.snapshot import build_snapshot, collect_snapshot
+from hearthwire.core.snapshot import build_snapshot, collect_snapshot
 
 
 def _usage(provider_id, percent, billing=None):
@@ -109,7 +109,7 @@ def test_installed_but_signed_out_claude_remains_visible(tmp_path):
 
 
 def test_json_cli_is_qt_free():
-    code = "import sys, hearthside.cli; sys.exit(1 if 'PySide6' in sys.modules else 0)"
+    code = "import sys, hearthwire.cli; sys.exit(1 if 'PySide6' in sys.modules else 0)"
     environment = {**os.environ, "PYTHONPATH": str(SRC)}
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -123,7 +123,7 @@ def test_json_cli_is_qt_free():
 def test_provider_that_cannot_be_built_reports_storage_for_itself_only(monkeypatch):
     import json
 
-    from hearthside.core import snapshot as snapshot_module
+    from hearthwire.core import snapshot as snapshot_module
 
     class Healthy:
         id = "grok"

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from hearthside.core.model import (
+from hearthwire.core.model import (
     BillingUsage, ProviderStatus, ProviderUsage, UsageWindow, threshold_color,
 )
 

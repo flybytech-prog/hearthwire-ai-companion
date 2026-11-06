@@ -40,7 +40,7 @@ TestCase {
         var check = make()
         check.start(3000)
         compare(testCase.commands.length, 1)
-        verify(/^env HEARTHSIDE_RUN=\d+ HEARTHSIDE_APPLET=7 python3 -P -m hearthside --port-owner 3000$/
+        verify(/^env HEARTHWIRE_RUN=\d+ HEARTHWIRE_APPLET=7 python3 -P -m hearthwire --port-owner 3000$/
                .test(testCase.commands[0]), testCase.commands[0])
         verify(check.busy)
         compare(testCase.results, [])

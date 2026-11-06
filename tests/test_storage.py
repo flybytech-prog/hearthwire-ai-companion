@@ -1,6 +1,6 @@
 import os
 
-from hearthside.core.storage import atomic_write_private
+from hearthwire.core.storage import atomic_write_private
 
 
 def _leftover_temps(*directories):

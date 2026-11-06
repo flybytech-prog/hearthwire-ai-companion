@@ -9,9 +9,9 @@ from urllib.parse import urlencode
 
 import pytest
 
-from hearthside.core import http
-from hearthside.core.model import FailureKind, ProviderStatus
-from hearthside.providers.copilot import CopilotProvider
+from hearthwire.core import http
+from hearthwire.core.model import FailureKind, ProviderStatus
+from hearthwire.providers.copilot import CopilotProvider
 
 DUMMY_TOKEN = "Bearer DUMMY-NOT-A-SECRET"
 

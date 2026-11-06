@@ -378,7 +378,7 @@ class CodexProvider:
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
-            "User-Agent": f"Hearthside/{__version__}",
+            "User-Agent": f"Hearthwire/{__version__}",
         }
         if account_id:
             headers["ChatGPT-Account-Id"] = account_id

@@ -2,7 +2,7 @@
 
 Layout below ``$XDG_DATA_HOME`` (when absolute, else ``~/.local/share``)::
 
-    hearthside/              0700
+    hearthwire/              0700
         usage-history/       0700
             history.json     0600, {"history_version":1,"series":[...]}
             history.lock     0600, empty; only its flock matters
@@ -184,7 +184,7 @@ def decode(data: bytes) -> History:
 
 
 def _history_directory(environ: Optional[Mapping[str, str]], opened: list[int], *, create: bool) -> Optional[int]:
-    """``<data>/hearthside/usage-history``; None when a part is missing and not ``create``."""
+    """``<data>/hearthwire/usage-history``; None when a part is missing and not ``create``."""
     parent = open_base(data_base(environ), create=create)
     if parent is None:
         return None

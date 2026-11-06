@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 
-from hearthside.core.catalog import catalog_json
+from hearthwire.core.catalog import catalog_json
 
 
 CATALOG_JS = (

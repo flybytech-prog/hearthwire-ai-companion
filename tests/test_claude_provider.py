@@ -7,16 +7,16 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from conftest import fixture
-from hearthside.core.auth import (
+from hearthwire.core.auth import (
     CLAUDE_REFRESH_SCOPES,
     CLAUDE_REFRESH_URL,
     ClaudeAuthStore,
 )
-from hearthside.core.environment import LoginShellEnvironment
-from hearthside.core.http import HttpResponse
-from hearthside.core.locking import credential_lock, lock_directory
-from hearthside.core.model import FailureKind, ProviderStatus
-from hearthside.providers.claude import ClaudeProvider, USAGE_URL
+from hearthwire.core.environment import LoginShellEnvironment
+from hearthwire.core.http import HttpResponse
+from hearthwire.core.locking import credential_lock, lock_directory
+from hearthwire.core.model import FailureKind, ProviderStatus
+from hearthwire.providers.claude import ClaudeProvider, USAGE_URL
 
 
 NOW = datetime(2027, 1, 15, tzinfo=timezone.utc)

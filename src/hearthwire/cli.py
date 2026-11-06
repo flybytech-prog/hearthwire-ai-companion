@@ -52,7 +52,7 @@ def _hex_path(value: str) -> str:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        prog="hearthside",
+        prog="hearthwire",
         description="Read local AI CLI sessions and print subscription usage as JSON.",
     )
     result.add_argument("--json", action="store_true", help="Print JSON (the default).")

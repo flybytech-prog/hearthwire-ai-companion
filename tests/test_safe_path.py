@@ -1,4 +1,4 @@
-"""`python3 -m hearthside` must not import modules from the working directory.
+"""`python3 -m hearthwire` must not import modules from the working directory.
 
 plasmashell runs the helper with $HOME as its working directory, so a stray
 ~/json.py would otherwise run inside the process that reads provider tokens.
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-import hearthside
+import hearthwire
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 # Standard-library modules the helper imports after the package __init__ runs.
@@ -74,18 +74,18 @@ def test_version_ignores_modules_in_working_directory(tmp_path, flag):
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     marker = _plant(cwd)
-    args = [a for a in (flag, "-m", "hearthside", "--version") if a]
+    args = [a for a in (flag, "-m", "hearthwire", "--version") if a]
     result = _run(cwd, _env(tmp_path), *args)
     assert not marker.exists()
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == hearthside.__version__
+    assert result.stdout.strip() == hearthwire.__version__
 
 
 def test_detect_ignores_modules_in_working_directory(tmp_path):
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     marker = _plant(cwd)
-    result = _run(cwd, _env(tmp_path), "-m", "hearthside", "--detect")
+    result = _run(cwd, _env(tmp_path), "-m", "hearthwire", "--detect")
     assert not marker.exists()
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
@@ -93,19 +93,19 @@ def test_detect_ignores_modules_in_working_directory(tmp_path):
 
 
 def test_running_from_the_package_parent_still_works(tmp_path):
-    """`cd src && python3 -m hearthside` keeps the package's own folder."""
+    """`cd src && python3 -m hearthwire` keeps the package's own folder."""
     env = _env(tmp_path)
     del env["PYTHONPATH"]
-    result = _run(SRC, env, "-m", "hearthside", "--version")
+    result = _run(SRC, env, "-m", "hearthwire", "--version")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == hearthside.__version__
+    assert result.stdout.strip() == hearthwire.__version__
 
 
 def test_importing_the_package_elsewhere_leaves_sys_path_alone(tmp_path):
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     code = (
-        "import sys; before = list(sys.path); import hearthside; "
+        "import sys; before = list(sys.path); import hearthwire; "
         "sys.exit(0 if sys.path == before else 1)"
     )
     result = _run(cwd, _env(tmp_path), "-c", code)

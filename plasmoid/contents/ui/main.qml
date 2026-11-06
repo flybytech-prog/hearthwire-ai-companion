@@ -1177,9 +1177,9 @@ PlasmoidItem {
             property string metricName: ""
             property int percentLeft: 0
 
-            componentName: "hearthside"
+            componentName: "hearthwire"
             eventId: reset ? "usageReset" : "usageLow"
-            iconName: "hearthside"
+            iconName: "hearthwire"
             urgency: Notification.NormalUrgency
             autoDelete: true
             title: reset ? i18n("%1 has reset", providerName) : i18n("%1 is running low", providerName)
@@ -1295,9 +1295,9 @@ PlasmoidItem {
     // Settings → General → Keep the popup open; also while a dialog is open.
     hideOnWindowDeactivate: !Plasmoid.configuration.chatKeepOpen && !root.chatDialogOpen
 
-    Plasmoid.icon: Qt.resolvedUrl("../images/hearthside.svg")
+    Plasmoid.icon: Qt.resolvedUrl("../images/hearthwire.svg")
     Plasmoid.busy: root.usageShown && !root.hasData && root.lastError === ""
-    toolTipMainText: i18n("Hearthside")
+    toolTipMainText: i18n("Hearthwire")
     // Provider names, plans and helper errors: never rich text.
     toolTipTextFormat: Text.PlainText
     // Errors, loading and "no usage" as one line of text; the readings use
@@ -1341,7 +1341,7 @@ PlasmoidItem {
         return TooltipLogic.tooltipSections(groups)
     }
     property Item usageTooltip: UsageTooltip {
-        title: i18n("Hearthside")
+        title: i18n("Hearthwire")
         sections: root.tooltipSections
         normalColor: root.normalUsageColor
         warningColor: root.warnUsageColor

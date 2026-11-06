@@ -306,9 +306,9 @@ ColumnLayout {
         case "wrong-passphrase":
             return i18n("Wrong passphrase. Try again.")
         case "busy":
-            return i18n("The encrypted folder is busy, perhaps used by another Hearthside widget. Try again in a moment.")
+            return i18n("The encrypted folder is busy, perhaps used by another Hearthwire widget. Try again in a moment.")
         case "lock-busy":
-            return i18n("The encrypted folder is still in use, perhaps by another Hearthside widget. It was not locked.")
+            return i18n("The encrypted folder is still in use, perhaps by another Hearthwire widget. It was not locked.")
         case "missing-tool":
             return i18n("A required tool is missing. Install gocryptfs and try again.")
         case "exists":
@@ -326,7 +326,7 @@ ColumnLayout {
         case "damaged":
             return i18n("The encrypted folder is damaged and can't be opened.")
         case "delete-failed":
-            return i18n("Couldn't delete the encrypted folder because it is still in use. Close Chat in other Hearthside widgets, then delete it in Settings → Chat → Advanced.")
+            return i18n("Couldn't delete the encrypted folder because it is still in use. Close Chat in other Hearthwire widgets, then delete it in Settings → Chat → Advanced.")
         case "":
             return ""
         default:
@@ -340,7 +340,7 @@ ColumnLayout {
         case "":
             return ""
         case "other":
-            return i18n("Another user's program is using port %1. Hearthside won't load anything from it.", port)
+            return i18n("Another user's program is using port %1. Hearthwire won't load anything from it.", port)
         case "not-running":
             return i18n("Nothing is using port %1. Is your local chat server running?", port)
         case "resend":
@@ -889,7 +889,7 @@ ColumnLayout {
                     Layout.fillWidth: true
                     visible: storageCard.view === "damaged" && chatView.confirmingDelete
                     type: Kirigami.MessageType.Warning
-                    text: i18n("Delete the encrypted folder? Every sign-in saved in it is lost, for all Hearthside widgets. This can't be undone.")
+                    text: i18n("Delete the encrypted folder? Every sign-in saved in it is lost, for all Hearthwire widgets. This can't be undone.")
                     actions: [
                         Kirigami.Action {
                             text: i18n("Delete")

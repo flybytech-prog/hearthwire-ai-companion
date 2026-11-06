@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from hearthside import cli
-from hearthside.core import settingsbackup as backup
-from hearthside.core.catalog import PROVIDER_CATALOG
+from hearthwire import cli
+from hearthwire.core import settingsbackup as backup
+from hearthwire.core.catalog import PROVIDER_CATALOG
 
 ROOT = Path(__file__).resolve().parent.parent
 UI = ROOT / "plasmoid" / "contents" / "ui"
@@ -66,7 +66,7 @@ def config(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     (tmp_path / "home").mkdir()
-    return tmp_path / "config" / "hearthside"
+    return tmp_path / "config" / "hearthwire"
 
 
 def hexed(value):
@@ -103,7 +103,7 @@ def write_backup(folder, content, *, mode=0o600, folder_mode=0o700):
 
 
 def document(settings=None, **overrides):
-    result = {"format": "hearthside-settings", "version": 1, "config_schema": 3,
+    result = {"format": "hearthwire-settings", "version": 1, "config_schema": 3,
               "exported_at": STAMP, "settings": GOOD if settings is None else settings}
     result.update(overrides)
     return result
@@ -500,9 +500,9 @@ def test_import_drops_and_counts_odd_settings(config):
     (document(version="1"), "invalid"), (document(version=True), "invalid"), (document(version=1.0), "invalid"),
     (document(exported_at="2026-11-06 00:10:29Z"), "invalid"), (document(exported_at="2026-13-06T00:10:29Z"), "invalid"),
     (document(exported_at=1), "invalid"), (document(settings=[]), "invalid"), (document(extra=1), "invalid"),
-    ('{"format":"hearthside-settings","version":1,"config_schema":3,"exported_at":"%s","settings":{},'
+    ('{"format":"hearthwire-settings","version":1,"config_schema":3,"exported_at":"%s","settings":{},'
      '"settings":{}}' % STAMP, "invalid"),
-    ('{"format":"hearthside-settings","version":1,"config_schema":3,"exported_at":"%s",'
+    ('{"format":"hearthwire-settings","version":1,"config_schema":3,"exported_at":"%s",'
      '"settings":{"refreshInterval":NaN}}' % STAMP, "invalid"),
 ])
 def test_bad_files_are_refused(config, content, error):

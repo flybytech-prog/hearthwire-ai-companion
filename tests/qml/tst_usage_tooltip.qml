@@ -28,7 +28,7 @@ TestCase {
 
     function test_layout() {
         var tip = createTemporaryObject(tooltipComponent, this, {
-            title: "Hearthside",
+            title: "Hearthwire",
             sections: [
                 {name: "Claude Code", items: [{title: "Session", value: "100% left"},
                                               {title: "Weekly", value: "41% left"}]},
