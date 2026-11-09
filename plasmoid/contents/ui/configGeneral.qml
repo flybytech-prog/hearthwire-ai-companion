@@ -6,6 +6,7 @@ import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasmoid
 import org.kde.plasma.plasma5support as Plasma5Support
 import "ChatStorage.js" as ChatStorage
+import "ChatSites.js" as ChatSites
 import "SettingsLogic.js" as SettingsLogic
 import "ProviderCatalog.js" as Catalog
 
@@ -87,6 +88,10 @@ KCM.SimpleKCM {
     property string cfg_usageWarnColorDefault: ""
     property string cfg_usageCriticalColor: ""
     property string cfg_usageCriticalColorDefault: ""
+    property string cfg_panelRing: "auto"
+    property string cfg_panelRingDefault: "auto"
+    property string cfg_middleClickOpens: "refresh"
+    property string cfg_middleClickOpensDefault: "refresh"
 
     // Page-local only; the folder actions always start collapsed.
     property bool showFolderActions: false
@@ -103,6 +108,15 @@ KCM.SimpleKCM {
         { value: "ollama", text: i18n("Ollama message box") },
         { value: "usage", text: i18n("Usage") }
     ]
+    // Refresh, the Usage tab, Ollama or a web site, enabled or not: a site
+    // that is off acts as a normal click (SettingsLogic.middleClickPlan).
+    readonly property var middleClickChoices: [
+        { value: "refresh", text: i18n("Refresh usage") },
+        { value: "usage", text: i18n("Usage") },
+        { value: "ollama", text: i18n("Ollama message box") }
+    ].concat(ChatSites.sites.map(function (site) {
+        return { value: site.id, text: site.name }
+    }))
     readonly property var alertChoices: SettingsLogic.ALERT_PERCENTS.map(function (percent) {
         return { value: percent, text: i18n("%1%", percent) }
     })
@@ -435,6 +449,24 @@ KCM.SimpleKCM {
             }
             Kirigami.ContextualHelpButton {
                 toolTipText: i18n("Choose the key in the Keyboard Shortcuts tab. Pressing it again closes the popup. Ollama message box opens the popup as usual while Ollama is off or the Chat tab is hidden; a hidden tab opens the other one.")
+            }
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Middle-click opens:")
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.ComboBox {
+                objectName: "middleClickChoice"
+                textRole: "text"
+                valueRole: "value"
+                model: page.middleClickChoices
+                currentIndex: page.choiceIndex(page.middleClickChoices,
+                    SettingsLogic.normalizeMiddleClick(page.cfg_middleClickOpens, ChatSites.siteIds()), 0)
+                onActivated: page.cfg_middleClickOpens = currentValue
+            }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18n("A mouse action; the keyboard shortcut is in the Keyboard Shortcuts tab. A tab or site closes the popup if it is already showing it. While that tab is hidden or that site is off, the middle-click acts as a normal click.")
             }
         }
 

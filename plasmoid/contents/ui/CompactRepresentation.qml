@@ -15,11 +15,16 @@ MouseArea {
     Layout.preferredWidth: vertical ? -1 : height
     Layout.preferredHeight: vertical ? width : -1
 
+    // The ring's stroke: readable in a small panel, in step with a big one.
+    readonly property real ringSide: Math.min(width, height)
+    readonly property real ringWidth: Math.max(Math.round(Kirigami.Units.smallSpacing / 2),
+        Math.round(compactRoot.ringSide / 10))
+
     hoverEnabled: true
     acceptedButtons: Qt.LeftButton | Qt.MiddleButton
     onClicked: (mouse) => {
         if (mouse.button === Qt.MiddleButton)
-            root.refresh()
+            root.middleClick()
         else
             root.expanded = !root.expanded
     }
@@ -50,12 +55,28 @@ MouseArea {
         }
     }
 
-    // Only the Hearthwire icon is shown in the panel; usage lives in the
-    // popup and the tooltip.
+    // One reading around the icon (AI Provider Settings → Usage ring).
+    UsageRing {
+        objectName: "usageRing"
+        anchors.centerIn: parent
+        width: compactRoot.ringSide
+        height: compactRoot.ringSide
+        visible: root.ringState.visible
+        fraction: root.ringState.fraction
+        ringColor: root.ringState.color
+        trackColor: Qt.alpha(Kirigami.Theme.textColor, 0.2)
+        ringWidth: compactRoot.ringWidth
+        stale: root.ringState.stale
+    }
+
+    // Only the Hearthwire icon is shown in the panel, inside the ring while
+    // there is one; everything else lives in the popup and the tooltip.
     Kirigami.Icon {
         id: content
         anchors.fill: parent
-        anchors.margins: Math.round(Kirigami.Units.smallSpacing / 2)
+        anchors.margins: root.ringState.visible
+            ? compactRoot.ringWidth + Math.round(Kirigami.Units.smallSpacing / 4)
+            : Math.round(Kirigami.Units.smallSpacing / 2)
         source: Qt.resolvedUrl("../images/hearthwire.svg")
         isMask: true
         color: Kirigami.Theme.textColor

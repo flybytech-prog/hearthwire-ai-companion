@@ -363,4 +363,152 @@ TestCase {
         compare(UsageLogic.defaultNormalColor(0.1, 0.1, 0.1), "#32c7d3")
         compare(UsageLogic.defaultNormalColor(0.95, 0.95, 0.95), "#008c95")
     }
+
+    // --- Usage ring ---------------------------------------------------------
+
+    function test_ringOptionsSkipMoney() {
+        var options = UsageLogic.ringOptions(Catalog.providers)
+        var values = options.map(function (option) { return option.value })
+        verify(values.indexOf("claude.session") >= 0)
+        verify(values.indexOf("codex.credits") >= 0)
+        verify(values.indexOf("claude.extra_usage") < 0)
+        compare(options[0], {value: "claude.session", provider: "Claude Code", metric: "Session"})
+        compare(UsageLogic.ringOptions(null), [])
+        compare(UsageLogic.ringOptions([null, {provider_id: 3}, {provider_id: "x", metrics: [{id: 1}, null]}]), [])
+    }
+
+    function test_parsePanelRing() {
+        var auto = {mode: "auto", value: "auto", provider_id: "", metric_id: ""}
+        compare(UsageLogic.parsePanelRing("off", Catalog.providers).mode, "off")
+        compare(UsageLogic.parsePanelRing("auto", Catalog.providers), auto)
+        compare(UsageLogic.parsePanelRing("grok.weekly", Catalog.providers),
+                {mode: "pair", value: "grok.weekly", provider_id: "grok", metric_id: "weekly"})
+        compare(UsageLogic.parsePanelRing("", Catalog.providers), auto)
+        compare(UsageLogic.parsePanelRing("Auto", Catalog.providers), auto)
+        compare(UsageLogic.parsePanelRing("claude", Catalog.providers), auto)
+        compare(UsageLogic.parsePanelRing("claude.spark", Catalog.providers), auto)
+        compare(UsageLogic.parsePanelRing("claude.extra_usage", Catalog.providers), auto)
+        compare(UsageLogic.parsePanelRing("claude.session.x", Catalog.providers), auto)
+        compare(UsageLogic.parsePanelRing("nobody.weekly", Catalog.providers), auto)
+        compare(UsageLogic.parsePanelRing(undefined, Catalog.providers), auto)
+        compare(UsageLogic.parsePanelRing(null, Catalog.providers), auto)
+        compare(UsageLogic.parsePanelRing(7, Catalog.providers), auto)
+    }
+
+    // The fake metricReading: the metric id comes back, so a test sees which one.
+    function readingOf(provider, metricId) {
+        return provider.readings && provider.readings[metricId] !== undefined
+            ? provider.readings[metricId] : null
+    }
+
+    function group(id, status, metrics, readings) {
+        return {provider_id: id, metrics: metrics,
+                provider: {provider_id: id, status: status, readings: readings}}
+    }
+
+    function test_ringReadingAutoIsFirstReadingOfFirstUsableGroup() {
+        var a = {type: "percentage", raw_used: 10}
+        var b = {type: "percentage", raw_used: 20}
+        var auto = {mode: "auto"}
+        var groups = [group("broken", "error", ["s"], {s: a}),
+                      group("good", "ok", ["w", "s"], {w: b, s: a}),
+                      group("later", "ok", ["s"], {s: a})]
+        compare(UsageLogic.ringReading(auto, groups, [], readingOf), {reading: b, stale: false})
+        var stale = [group("old", "stale", ["s"], {s: a}), group("good", "ok", ["s"], {s: b})]
+        compare(UsageLogic.ringReading(auto, stale, [], readingOf), {reading: a, stale: true})
+        // Only the first reading counts: a missing one is no ring, not another.
+        compare(UsageLogic.ringReading(auto, [group("good", "ok", ["gone", "s"], {s: a})], [], readingOf), null)
+        compare(UsageLogic.ringReading(auto, [group("good", "ok", [], {s: a})], [], readingOf), null)
+        compare(UsageLogic.ringReading(auto, [null, {}, group("bad", "error", ["s"], {s: a})], [], readingOf), null)
+        compare(UsageLogic.ringReading(auto, null, null, readingOf), null)
+    }
+
+    function test_ringReadingPairAndOff() {
+        var a = {type: "percentage", raw_used: 10}
+        var pair = {mode: "pair", provider_id: "good", metric_id: "w"}
+        var okList = [{provider_id: "other", status: "ok", readings: {w: {type: "percentage", raw_used: 99}}},
+                      {provider_id: "good", status: "ok", readings: {w: a}}]
+        compare(UsageLogic.ringReading(pair, [], okList, readingOf), {reading: a, stale: false})
+        compare(UsageLogic.ringReading(pair, [], [{provider_id: "good", status: "stale", readings: {w: a}}], readingOf),
+                {reading: a, stale: true})
+        compare(UsageLogic.ringReading(pair, [], [{provider_id: "good", status: "error", readings: {w: a}}], readingOf), null)
+        compare(UsageLogic.ringReading(pair, [], [], readingOf), null)
+        compare(UsageLogic.ringReading({mode: "off"}, [group("good", "ok", ["w"], {w: a})], okList, readingOf), null)
+        compare(UsageLogic.ringReading(null, [], [], readingOf), null)
+        compare(UsageLogic.ringReading({mode: "auto"}, [], [], undefined), null)
+    }
+
+    function test_ringFractionLeftDrainsUsedFills() {
+        compare(UsageLogic.ringFraction({type: "percentage", raw_used: 30}, "remaining"), 0.7)
+        compare(UsageLogic.ringFraction({type: "percentage", raw_used: 30}, "used"), 0.3)
+        compare(UsageLogic.ringFraction({type: "percentage", raw_used: 0}, "remaining"), 1)
+        compare(UsageLogic.ringFraction({type: "percentage", raw_used: 100}, "remaining"), 0)
+        compare(UsageLogic.ringFraction({type: "percentage", raw_used: 100}, "used"), 1)
+        // Helper numbers outside the range stay on the ring.
+        compare(UsageLogic.ringFraction({type: "percentage", raw_used: 140}, "used"), 1)
+        compare(UsageLogic.ringFraction({type: "percentage", raw_used: -20}, "remaining"), 1)
+    }
+
+    function test_ringFractionNeedsAPercentage() {
+        compare(UsageLogic.ringFraction({type: "money", value: 3}, "used"), null)
+        compare(UsageLogic.ringFraction({type: "money", value: 3, raw_used: 40}, "used"), null)
+        compare(UsageLogic.ringFraction({type: "credits", value: 3}, "remaining"), null)
+        compare(UsageLogic.ringFraction({type: "percentage", raw_used: NaN}, "used"), null)
+        compare(UsageLogic.ringFraction({type: "percentage"}, "used"), null)
+        compare(UsageLogic.ringFraction({type: "percentage", raw_used: null}, "used"), null)
+        compare(UsageLogic.ringFraction(null, "used"), null)
+        compare(UsageLogic.ringFraction("x", "used"), null)
+    }
+
+    // --- Color preview ------------------------------------------------------
+
+    // Every pair of levels the page can set, in both modes.
+    function everyThreshold(check) {
+        UsageLogic.WARN_PERCENTS.forEach(function (warn) {
+            UsageLogic.CRITICAL_PERCENTS.forEach(function (critical) {
+                if (critical > warn) {
+                    check(UsageLogic.levelSamples({warn: warn, critical: critical}, "remaining"), warn, critical, "remaining")
+                    check(UsageLogic.levelSamples({warn: warn, critical: critical}, "used"), warn, critical, "used")
+                }
+            })
+        })
+    }
+
+    function test_samplesSitInTheirOwnLevel() {
+        everyThreshold(function (samples, warn, critical, mode) {
+            compare(samples.map(function (sample) { return sample.level }), ["normal", "warning", "critical"])
+            samples.forEach(function (sample) {
+                compare(UsageLogic.usageLevel(sample.used, {warn: warn, critical: critical}), sample.level,
+                        sample.level + " at " + warn + "/" + critical)
+                compare(sample.shown, UsageLogic.shownPercent(sample.used, mode))
+            })
+        })
+    }
+
+    function test_samplesFollowLeftAndUsed() {
+        var left = UsageLogic.levelSamples({warn: 60, critical: 85}, "remaining")
+        compare(left.map(function (sample) { return sample.shown }), [70, 28, 7])
+        var used = UsageLogic.levelSamples({warn: 60, critical: 85}, "used")
+        compare(used.map(function (sample) { return sample.shown }), [30, 72, 93])
+        // Unset limits read as the defaults.
+        compare(UsageLogic.levelSamples(null, "used"), used)
+    }
+
+    function test_sampleBarsStayVisibleAndInOrder() {
+        everyThreshold(function (samples, warn, critical, mode) {
+            var shares = samples.map(function (sample) { return UsageLogic.sampleShare(sample.shown) })
+            shares.forEach(function (share) {
+                verify(share >= UsageLogic.SAMPLE_MIN_SHARE, "at least the minimum: " + share)
+                verify(share <= 1)
+            })
+            if (mode === "used")
+                verify(shares[0] < shares[1] && shares[1] < shares[2], "used grows: " + shares)
+            else
+                verify(shares[0] > shares[1] && shares[1] > shares[2], "left drains: " + shares)
+        })
+        compare(UsageLogic.sampleShare(0), UsageLogic.SAMPLE_MIN_SHARE)
+        compare(UsageLogic.sampleShare(100), 1)
+        compare(UsageLogic.sampleShare(200), 1)
+        compare(UsageLogic.sampleShare("x"), UsageLogic.SAMPLE_MIN_SHARE)
+    }
 }

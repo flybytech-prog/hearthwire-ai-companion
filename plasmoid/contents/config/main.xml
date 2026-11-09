@@ -104,5 +104,11 @@
         <entry name="usageCriticalColor" type="String">
             <default></default>
         </entry>
+        <entry name="panelRing" type="String">
+            <default>auto</default>
+        </entry>
+        <entry name="middleClickOpens" type="String">
+            <default>refresh</default>
+        </entry>
     </group>
 </kcfg>

@@ -87,8 +87,20 @@ KCM.ScrollViewKCM {
     property string cfg_usageWarnColorDefault: ""
     property string cfg_usageCriticalColor: ""
     property string cfg_usageCriticalColorDefault: ""
+    property string cfg_panelRing: "auto"
+    property string cfg_panelRingDefault: "auto"
+    property string cfg_middleClickOpens: "refresh"
+    property string cfg_middleClickOpensDefault: "refresh"
 
     property var catalogModel: Catalog.providers
+    // Off, Automatic, then every reading in the Usage tab's order.
+    readonly property var ringChoices: [
+        { value: "off", text: i18n("Off") },
+        { value: "auto", text: i18n("Automatic") }
+    ].concat(UsageLogic.ringOptions(UsageLogic.orderProviders(Catalog.providers, page.providerOrder)).map(function (option) {
+        return { value: option.value, text: i18nc("@item provider and reading", "%1: %2", option.provider, option.metric) }
+    }))
+    readonly property var ringChoice: UsageLogic.parsePanelRing(page.cfg_panelRing, Catalog.providers)
     // The provider rows in the Usage tab's order.
     readonly property var providerOrder: UsageLogic.normalizeOrder(page.cfg_providerOrder, Catalog.providerIds())
     readonly property var orderedCatalog: UsageLogic.orderProviders(page.catalogModel, page.providerOrder)
@@ -257,6 +269,33 @@ KCM.ScrollViewKCM {
 
     // {level: the color its box shows}, kept by the boxes for setUsageColor.
     property var shownColors: ({})
+
+    // What a color box shows while it is empty. theme is the Kirigami.Theme
+    // of the item asking: the page's own can differ under some styles.
+    function fallbackColor(level, theme) {
+        if (level === "normal")
+            return UsageLogic.defaultNormalColor(theme.backgroundColor.r,
+                theme.backgroundColor.g, theme.backgroundColor.b)
+        if (level === "warning")
+            return theme.neutralTextColor
+        // Shown while empty, as main.qml uses it; never saved.
+        return UsageLogic.effectiveCriticalColor("", page.cfg_usageWarnColor) || theme.negativeTextColor
+    }
+
+    // The level's color as chosen on this page, before Apply.
+    function previewColor(level, theme) {
+        var chosen = UsageLogic.normalizeColor(level === "normal" ? page.cfg_usageNormalColor
+            : level === "warning" ? page.cfg_usageWarnColor : page.cfg_usageCriticalColor)
+        return chosen !== "" ? chosen : page.fallbackColor(level, theme)
+    }
+
+    function levelName(level) {
+        return level === "normal" ? i18n("Normal") : level === "warning" ? i18n("Warning") : i18n("Critical")
+    }
+
+    function setPanelRing(value) {
+        page.cfg_panelRing = value
+    }
 
     function setUsageColor(level, color) {
         var value = UsageLogic.normalizeColor(color)
@@ -505,8 +544,7 @@ KCM.ScrollViewKCM {
                     Kirigami.FormData.label: i18n("Normal color:")
                     level: "normal"
                     chosen: UsageLogic.normalizeColor(page.cfg_usageNormalColor)
-                    fallback: UsageLogic.defaultNormalColor(Kirigami.Theme.backgroundColor.r,
-                        Kirigami.Theme.backgroundColor.g, Kirigami.Theme.backgroundColor.b)
+                    fallback: page.fallbackColor("normal", Kirigami.Theme)
                 }
 
                 RowLayout {
@@ -525,7 +563,7 @@ KCM.ScrollViewKCM {
                     ColorChoice {
                         level: "warning"
                         chosen: UsageLogic.normalizeColor(page.cfg_usageWarnColor)
-                        fallback: Kirigami.Theme.neutralTextColor
+                        fallback: page.fallbackColor("warning", Kirigami.Theme)
                     }
                     Kirigami.ContextualHelpButton {
                         toolTipText: i18n("Bars and values turn to the warning color at this level and to the critical color at the Critical level. The levels read as left or used, as General → Display shows: with Left, 40% means 40% left. The critical level always stays past the warning level. The color boxes choose each color; the reset button next to a box goes back to the default.")
@@ -552,9 +590,60 @@ KCM.ScrollViewKCM {
                     ColorChoice {
                         level: "critical"
                         chosen: UsageLogic.normalizeColor(page.cfg_usageCriticalColor)
-                        // Shown while empty, as main.qml uses it; never saved.
-                        fallback: UsageLogic.effectiveCriticalColor("", page.cfg_usageWarnColor)
-                            || Kirigami.Theme.negativeTextColor
+                        fallback: page.fallbackColor("critical", Kirigami.Theme)
+                    }
+                }
+
+                // The chosen colors before Apply: one sample per level, read
+                // as Left or Used like the level boxes.
+                ColumnLayout {
+                    objectName: "usagePreview"
+                    Kirigami.FormData.label: i18n("Preview:")
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Repeater {
+                        model: UsageLogic.levelSamples(page.thresholds, page.cfg_usageMode)
+
+                        delegate: RowLayout {
+                            id: sampleRow
+                            required property var modelData
+                            readonly property color levelColor:
+                                page.previewColor(sampleRow.modelData.level, Kirigami.Theme)
+                            spacing: Kirigami.Units.smallSpacing
+
+                            Rectangle {
+                                id: sampleTrack
+                                objectName: "previewTrack_" + sampleRow.modelData.level
+                                Layout.alignment: Qt.AlignVCenter
+                                implicitWidth: Kirigami.Units.gridUnit * 8
+                                implicitHeight: Math.round(Kirigami.Units.gridUnit * 0.35)
+                                radius: height / 2
+                                color: Qt.alpha(Kirigami.Theme.textColor, 0.14)
+
+                                Rectangle {
+                                    objectName: "previewFill_" + sampleRow.modelData.level
+                                    width: sampleTrack.width * UsageLogic.sampleShare(sampleRow.modelData.shown)
+                                    height: parent.height
+                                    radius: height / 2
+                                    color: sampleRow.levelColor
+                                }
+                            }
+                            Rectangle {
+                                objectName: "previewDot_" + sampleRow.modelData.level
+                                Layout.alignment: Qt.AlignVCenter
+                                implicitWidth: Math.round(Kirigami.Units.gridUnit / 2)
+                                implicitHeight: implicitWidth
+                                radius: width / 2
+                                color: sampleRow.levelColor
+                            }
+                            QQC2.Label {
+                                objectName: "previewLabel_" + sampleRow.modelData.level
+                                textFormat: Text.PlainText
+                                text: i18nc("@label level and sample reading", "%1 · %2", page.levelName(sampleRow.modelData.level),
+                                    page.cfg_usageMode === "used" ? i18n("%1% used", sampleRow.modelData.shown)
+                                        : i18n("%1% left", sampleRow.modelData.shown))
+                            }
+                        }
                     }
                 }
             }
@@ -742,6 +831,24 @@ KCM.ScrollViewKCM {
                     }
                     Kirigami.ContextualHelpButton {
                         toolTipText: i18n("Percentages follow General → Display: Left shows \"62% left\", Used shows \"38% used\".")
+                    }
+                }
+
+                RowLayout {
+                    Kirigami.FormData.label: i18n("Usage ring:")
+                    spacing: Kirigami.Units.smallSpacing
+
+                    QQC2.ComboBox {
+                        objectName: "panelRingChoice"
+                        enabled: page.cfg_showUsageTab
+                        textRole: "text"
+                        valueRole: "value"
+                        model: page.ringChoices
+                        currentIndex: page.choiceIndex(page.ringChoices, page.ringChoice.value, 1)
+                        onActivated: page.setPanelRing(currentValue)
+                    }
+                    Kirigami.ContextualHelpButton {
+                        toolTipText: i18n("Draws one reading as a ring around the panel icon, in the level colors above. Automatic uses the first reading of the first provider in the hover popup that has data. With Left the ring drains as usage grows, with Used it fills. No ring shows while the reading has no percentage or its provider has no data.")
                     }
                 }
 

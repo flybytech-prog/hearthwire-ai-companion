@@ -82,6 +82,48 @@ function shortcutPlan(target, tabs, ollamaEnabled) {
     return plan
 }
 
+// --- Middle-click on the panel icon (Settings → General → Popup) ------------
+
+// refresh = refresh usage; usage = the Usage tab; ollama = the Ollama message
+// box; otherwise the id of a web chat site.
+var MIDDLE_CLICK_TARGETS = ["refresh", "usage", "ollama"]
+
+// One of MIDDLE_CLICK_TARGETS or one of webSiteIds; anything else is refresh.
+function normalizeMiddleClick(value, webSiteIds) {
+    if (MIDDLE_CLICK_TARGETS.indexOf(value) >= 0)
+        return value
+    return typeof value === "string" && value !== "" && Array.isArray(webSiteIds)
+        && webSiteIds.indexOf(value) >= 0 ? value : "refresh"
+}
+
+// What a middle-click does: {action, tab, site, focusInput}. action is
+// refresh, toggle (as a left click: the target's tab is hidden or its site
+// is off), close (the popup already shows the target) or open (tab and site
+// to show; also switches an open popup). state: {expanded, tabs, siteIds
+// (the enabled chat entries, Ollama included), shownTab, siteId}.
+function middleClickPlan(target, state) {
+    var plan = { action: "refresh", tab: "", site: "", focusInput: false }
+    if (target === "refresh")
+        return plan
+    var now = state || {}
+    var tabs = now.tabs || {}
+    var sites = Array.isArray(now.siteIds) ? now.siteIds : []
+    if (target === "usage" ? tabs.usage !== true : tabs.chat !== true || sites.indexOf(target) < 0) {
+        plan.action = "toggle"
+        return plan
+    }
+    if (now.expanded === true && now.shownTab === (target === "usage" ? "usage" : "chat")
+            && (target === "usage" || now.siteId === target)) {
+        plan.action = "close"
+        return plan
+    }
+    plan.action = "open"
+    plan.tab = target === "usage" ? "usage" : "chat"
+    plan.site = target === "usage" ? "" : target
+    plan.focusInput = target === "ollama"
+    return plan
+}
+
 // --- Per-site zoom (Ctrl+= / Ctrl+- / Ctrl+0) -------------------------------
 
 var ZOOM_STEPS = [0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0]

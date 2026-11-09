@@ -95,6 +95,9 @@ PlasmoidItem {
     // Settings → General → Keyboard shortcut opens.
     readonly property string shortcutTarget:
         SettingsLogic.normalizeShortcutTarget(Plasmoid.configuration.shortcutOpens)
+    // Settings → General → Middle-click opens.
+    readonly property string middleClickTarget:
+        SettingsLogic.normalizeMiddleClick(Plasmoid.configuration.middleClickOpens, ChatSites.siteIds())
     // The shortcut opened the Ollama chat: its message box takes the focus.
     signal ollamaFocusRequested()
     // What the last shortcut press asked for: open (true) or closed.
@@ -254,6 +257,22 @@ PlasmoidItem {
             return root.customNormalColor
         var background = Kirigami.Theme.backgroundColor
         return UsageLogic.defaultNormalColor(background.r, background.g, background.b)
+    }
+
+    // AI Provider Settings → Usage ring. Same reading rules and colors as
+    // the hover popup and the bars.
+    readonly property var ringChoice: UsageLogic.parsePanelRing(
+        Plasmoid.configuration.panelRing, Catalog.providers)
+    readonly property var ringState: {
+        var none = {visible: false, fraction: 0, color: root.normalUsageColor, stale: false}
+        if (!root.usageShown || !root.hasData)
+            return none
+        var found = UsageLogic.ringReading(root.ringChoice, root.tooltipGroups,
+            root.shownProviders, root.metricReading)
+        var fraction = found ? UsageLogic.ringFraction(found.reading, root.usageMode) : null
+        if (fraction === null)
+            return none
+        return {visible: true, fraction: fraction, color: root.barColor(found.reading.raw_used), stale: found.stale}
     }
 
     function configuredList(value, fallback) {
@@ -826,6 +845,31 @@ PlasmoidItem {
         // Plasma expands the popup itself right after this handler (spike
         // K1), so the close is applied once it is done.
         Qt.callLater(root.finishShortcut)
+    }
+
+    // A middle-click on the panel icon, as chosen in Settings → General.
+    function middleClick() {
+        var plan = SettingsLogic.middleClickPlan(root.middleClickTarget, {
+            expanded: root.expanded,
+            tabs: root.popupTabs,
+            siteIds: root.chatSiteIds,
+            shownTab: root.shownTab,
+            siteId: root.chatSiteId
+        })
+        if (plan.action === "refresh") {
+            root.refresh()
+        } else if (plan.action === "toggle") {
+            root.expanded = !root.expanded
+        } else if (plan.action === "close") {
+            root.expanded = false
+        } else {
+            root.popupTab = plan.tab
+            if (plan.site !== "")
+                root.chatSiteId = plan.site
+            root.expanded = true
+            if (plan.focusInput)
+                root.ollamaFocusRequested()
+        }
     }
 
     // Text dropped on the panel icon: open the popup on Ollama with it in the

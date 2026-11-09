@@ -167,4 +167,64 @@ TestCase {
         compare(SettingsLogic.normalizeAlertPercent(undefined), 20)
         compare(SettingsLogic.normalizeAlertPercent(NaN), 20)
     }
+
+    // --- Middle-click -------------------------------------------------------
+
+    readonly property var webIds: ["claude", "chatgpt", "local"]
+
+    function test_normalizeMiddleClick() {
+        compare(SettingsLogic.MIDDLE_CLICK_TARGETS, ["refresh", "usage", "ollama"])
+        compare(SettingsLogic.normalizeMiddleClick("refresh", webIds), "refresh")
+        compare(SettingsLogic.normalizeMiddleClick("usage", webIds), "usage")
+        compare(SettingsLogic.normalizeMiddleClick("ollama", webIds), "ollama")
+        compare(SettingsLogic.normalizeMiddleClick("claude", webIds), "claude")
+        compare(SettingsLogic.normalizeMiddleClick("local", webIds), "local")
+        compare(SettingsLogic.normalizeMiddleClick("chat", webIds), "refresh")
+        compare(SettingsLogic.normalizeMiddleClick("Claude", webIds), "refresh")
+        compare(SettingsLogic.normalizeMiddleClick("", webIds), "refresh")
+        compare(SettingsLogic.normalizeMiddleClick(undefined, webIds), "refresh")
+        compare(SettingsLogic.normalizeMiddleClick(3, webIds), "refresh")
+        compare(SettingsLogic.normalizeMiddleClick("claude", null), "refresh")
+    }
+
+    function clickState(extra) {
+        return Object.assign({expanded: false, tabs: {usage: true, chat: true},
+                              siteIds: ["claude", "ollama"], shownTab: "usage", siteId: "claude"}, extra)
+    }
+
+    function test_middleClickRefreshIgnoresThePopup() {
+        var refresh = {action: "refresh", tab: "", site: "", focusInput: false}
+        compare(SettingsLogic.middleClickPlan("refresh", clickState({})), refresh)
+        compare(SettingsLogic.middleClickPlan("refresh", clickState({expanded: true})), refresh)
+    }
+
+    function test_middleClickOpens() {
+        compare(SettingsLogic.middleClickPlan("usage", clickState({})),
+                {action: "open", tab: "usage", site: "", focusInput: false})
+        compare(SettingsLogic.middleClickPlan("claude", clickState({})),
+                {action: "open", tab: "chat", site: "claude", focusInput: false})
+        compare(SettingsLogic.middleClickPlan("ollama", clickState({})),
+                {action: "open", tab: "chat", site: "ollama", focusInput: true})
+    }
+
+    function test_middleClickClosesOnlyWhatItShows() {
+        var close = {action: "close", tab: "", site: "", focusInput: false}
+        compare(SettingsLogic.middleClickPlan("usage", clickState({expanded: true})), close)
+        compare(SettingsLogic.middleClickPlan("claude", clickState({expanded: true, shownTab: "chat"})), close)
+        // Open on something else: it switches.
+        compare(SettingsLogic.middleClickPlan("usage", clickState({expanded: true, shownTab: "chat"})).action, "open")
+        compare(SettingsLogic.middleClickPlan("claude", clickState({expanded: true})).action, "open")
+        var other = SettingsLogic.middleClickPlan("ollama", clickState({expanded: true, shownTab: "chat", siteId: "claude"}))
+        compare(other, {action: "open", tab: "chat", site: "ollama", focusInput: true})
+    }
+
+    function test_middleClickHiddenTargetIsANormalClick() {
+        var toggle = {action: "toggle", tab: "", site: "", focusInput: false}
+        compare(SettingsLogic.middleClickPlan("usage", clickState({tabs: {usage: false, chat: true}})), toggle)
+        compare(SettingsLogic.middleClickPlan("claude", clickState({tabs: {usage: true, chat: false}})), toggle)
+        compare(SettingsLogic.middleClickPlan("chatgpt", clickState({})), toggle)
+        compare(SettingsLogic.middleClickPlan("ollama", clickState({siteIds: ["claude"]})), toggle)
+        compare(SettingsLogic.middleClickPlan("usage", undefined), toggle)
+        compare(SettingsLogic.middleClickPlan("claude", {tabs: {chat: true}, siteIds: "claude"}), toggle)
+    }
 }

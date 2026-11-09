@@ -352,6 +352,142 @@ function nextReset(entries, nowMs) {
     return best
 }
 
+// --- Usage ring on the panel icon ------------------------------------------
+
+// panelRing: "off", "auto" or "<providerId>.<metricId>" of a catalog pair
+// that isn't extra_usage (money has no share of a limit to draw).
+
+// [{value, provider, metric}], one per pair in the order of providers;
+// provider and metric are the catalog's names, for the caller to show.
+function ringOptions(providers) {
+    var result = []
+    var list = toArray(providers)
+    for (var index = 0; index < list.length; index++) {
+        var provider = list[index]
+        if (!provider || typeof provider !== "object" || typeof provider.provider_id !== "string")
+            continue
+        var metrics = toArray(provider.metrics)
+        for (var metricIndex = 0; metricIndex < metrics.length; metricIndex++) {
+            var metric = metrics[metricIndex]
+            if (!metric || typeof metric.id !== "string" || metric.id === "extra_usage")
+                continue
+            result.push({
+                value: provider.provider_id + "." + metric.id,
+                provider: provider.display_name,
+                metric: metric.title
+            })
+        }
+    }
+    return result
+}
+
+// {mode, value, provider_id, metric_id}: mode is off, auto or pair (the two
+// ids filled in for pair). Anything else is auto, the default.
+function parsePanelRing(value, providers) {
+    var result = {mode: "auto", value: "auto", provider_id: "", metric_id: ""}
+    if (value === "off") {
+        result.mode = "off"
+        result.value = "off"
+        return result
+    }
+    if (typeof value !== "string" || value === "auto" || value.split(".").length !== 2)
+        return result
+    var known = ringOptions(providers).some(function (option) { return option.value === value })
+    if (!known)
+        return result
+    var parts = value.split(".")
+    result.mode = "pair"
+    result.value = value
+    result.provider_id = parts[0]
+    result.metric_id = parts[1]
+    return result
+}
+
+// Only providers with something to draw: their last good reading counts too.
+function ringUsable(provider) {
+    return !!provider && typeof provider === "object"
+        && (provider.status === "ok" || provider.status === "stale")
+}
+
+// The reading the ring shows, {reading, stale}, or null for none. choice is
+// parsePanelRing's result. Automatic takes the first reading of the first
+// usable group (the hover popup's groups, in its order); a pair reads its
+// provider from providers. readingOf(provider, metricId) is main.qml's
+// metricReading, so this stays pure.
+function ringReading(choice, groups, providers, readingOf) {
+    if (!choice || typeof choice !== "object" || typeof readingOf !== "function")
+        return null
+    var provider = null
+    var metricId = ""
+    if (choice.mode === "auto") {
+        var list = toArray(groups)
+        for (var index = 0; index < list.length && provider === null; index++) {
+            var metrics = list[index] ? toArray(list[index].metrics) : []
+            if (ringUsable(list[index] ? list[index].provider : null) && metrics.length > 0) {
+                provider = list[index].provider
+                metricId = metrics[0]
+            }
+        }
+    } else if (choice.mode === "pair") {
+        var shown = toArray(providers)
+        for (var at = 0; at < shown.length && provider === null; at++) {
+            if (ringUsable(shown[at]) && shown[at].provider_id === choice.provider_id) {
+                provider = shown[at]
+                metricId = choice.metric_id
+            }
+        }
+    }
+    if (provider === null)
+        return null
+    var reading = readingOf(provider, metricId)
+    return reading ? {reading: reading, stale: provider.status === "stale"} : null
+}
+
+// The share of the ring to draw, 0 to 1: with Left it drains as usage
+// grows, with Used it fills. null for anything but a percentage.
+function ringFraction(reading, mode) {
+    if (!reading || typeof reading !== "object" || reading.type !== "percentage"
+            || reading.raw_used === null || reading.raw_used === undefined)
+        return null
+    var used = Number(reading.raw_used)
+    if (!isFinite(used))
+        return null
+    used = Math.max(0, Math.min(100, used))
+    return (mode === "used" ? used : 100 - used) / 100
+}
+
+// --- Color preview (AI Provider Settings) -----------------------------------
+
+// The narrowest a sample bar gets, as a share of its track: a level near the
+// end of the scale must still show its color.
+var SAMPLE_MIN_SHARE = 0.25
+
+// One sample per level for the settings page: {level, used, shown}, used
+// inside that level's range for these thresholds, shown as the level boxes
+// read it (shownPercent).
+function levelSamples(thresholds, mode) {
+    var limits = thresholds && typeof thresholds === "object"
+        ? normalizeThresholds(thresholds.warn, thresholds.critical)
+        : normalizeThresholds(DEFAULT_WARN, DEFAULT_CRITICAL)
+    return [
+        {level: "normal", used: Math.round(limits.warn / 2)},
+        {level: "warning", used: Math.floor((limits.warn + limits.critical) / 2)},
+        {level: "critical", used: Math.ceil((limits.critical + 100) / 2)}
+    ].map(function (sample) {
+        sample.shown = shownPercent(sample.used, mode)
+        return sample
+    })
+}
+
+// A sample bar's fill as a share of its track: grows with shown, starting at
+// SAMPLE_MIN_SHARE, so the order of the levels still reads as Left or Used.
+function sampleShare(shown) {
+    var percent = Number(shown)
+    if (!isFinite(percent))
+        return SAMPLE_MIN_SHARE
+    return SAMPLE_MIN_SHARE + (1 - SAMPLE_MIN_SHARE) * Math.max(0, Math.min(100, percent)) / 100
+}
+
 // Settings schema 2 -> 3: providerMetrics used to choose only the hover
 // popup's readings (and the alerts'), and now filters the Usage tab. Returns
 // the strings to store: providerMetrics becomes "{}" (show every reading),

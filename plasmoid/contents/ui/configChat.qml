@@ -85,6 +85,10 @@ KCM.SimpleKCM {
     property string cfg_usageWarnColorDefault: ""
     property string cfg_usageCriticalColor: ""
     property string cfg_usageCriticalColorDefault: ""
+    property string cfg_panelRing: "auto"
+    property string cfg_panelRingDefault: "auto"
+    property string cfg_middleClickOpens: "refresh"
+    property string cfg_middleClickOpensDefault: "refresh"
 
     // Page-local only; the advanced section always starts collapsed.
     property bool showAdvanced: false
