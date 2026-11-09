@@ -113,7 +113,6 @@ def test_the_old_name_is_only_where_the_migration_needs_it():
     assert not problems, "the former name outside the migration:\n" + "\n".join(problems)
 
 
-@pytest.mark.xfail(strict=True, reason="plan R3 rewrites README.md and docs/*.md; remove this mark then")
 def test_the_docs_name_the_old_name_only_in_the_upgrade_section():
     problems = offenders(_hits(), docs=True)
     assert not problems, "the former name outside 'Upgrading from Hearthside':\n" + "\n".join(problems)

@@ -1,11 +1,12 @@
 <div align="center">
 
-<img src="assets/hearthside.svg" alt="Hearthside icon: a heart-shaped fireplace with a lit flame" width="96">
+<img src="assets/hearthwire.svg" alt="Hearthwire icon: a heart-shaped fireplace with a lit flame" width="96">
 
-# Hearthside — your AI companion
+# Hearthwire — your AI companion
 
 **Chat with AI, privately, right from your KDE Plasma panel — and keep an eye on your AI subscriptions.**
 
+[![Tests](https://github.com/flybytech-prog/hearthwire-ai-companion/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/flybytech-prog/hearthwire-ai-companion/actions/workflows/tests.yml)
 [![KDE Plasma 6](https://img.shields.io/badge/KDE%20Plasma-6-1d99f3?logo=kde&logoColor=white)](https://kde.org/plasma-desktop/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 ![stdlib only](https://img.shields.io/badge/deps-stdlib%20only-44cc11)
@@ -13,7 +14,7 @@
 
 </div>
 
-Hearthside sits in your Plasma panel as a small heart-shaped fireplace. Click
+Hearthwire sits in your Plasma panel as a small heart-shaped fireplace. Click
 it and a popup opens with two tabs:
 
 - **Chat** — use Claude, ChatGPT, Grok, Gemini, GitHub Copilot, Microsoft
@@ -30,11 +31,11 @@ plasmashell's memory.
 
 <table>
 <tr>
-<td align="center"><img src="docs/chat.png" alt="Chat tab showing ChatGPT inside the Hearthside popup" width="400"><br><sub>Chat sites in the popup</sub></td>
+<td align="center"><img src="docs/chat.png" alt="Chat tab showing ChatGPT inside the Hearthwire popup" width="400"><br><sub>Chat sites in the popup</sub></td>
 <td align="center"><img src="docs/ollama.png" alt="Built-in Ollama chat with the llama3 model" width="400"><br><sub>Built-in Ollama chat</sub></td>
 </tr>
 <tr>
-<td align="center" colspan="2"><img src="docs/chat-split.png" alt="Split view: Gemini and ChatGPT side by side in the Hearthside popup, both answering the same question" width="700"><br><sub>Split view: two chat sites side by side</sub></td>
+<td align="center" colspan="2"><img src="docs/chat-split.png" alt="Split view: Gemini and ChatGPT side by side in the Hearthwire popup, both answering the same question" width="700"><br><sub>Split view: two chat sites side by side</sub></td>
 </tr>
 <tr>
 <td align="center"><img src="docs/chat-locked.png" alt="Locked encrypted sign-ins card with Unlock and private-session buttons" width="400"><br><sub>Encrypted sign-ins, locked</sub></td>
@@ -97,8 +98,11 @@ plasmashell's memory.
   last for this session only. With Ollama a prompt goes into the message box
   and a saved personality can be a model's default; on a web site a click
   copies the prompt to the clipboard.
-- **Google sign-in** works on Google's sign-in page (Hearthside presents
+- **Google sign-in** works on Google's sign-in page (Hearthwire presents
   itself as Firefox there only, because Google refuses embedded browsers).
+- **Sign-in pop-ups** open only after a click: a sign-in window a page tries
+  to open by itself is dropped, so if nothing appears, click the site's
+  sign-in button.
 - **Keep open / Minimize**: the popup closes when you click elsewhere unless
   you turn on **Keep the popup open when clicking elsewhere**; the **Minimize**
   button hides it with chat pages, sign-ins and the Ollama conversation
@@ -135,7 +139,7 @@ plasmashell's memory.
   Linux/XDG data locations, and contacts only providers that are both
   installed and tracked.
 - Keeps successful readings in Plasma session memory when a temporary or
-  rate-limit error occurs; usage history is never written to disk.
+  rate-limit error occurs; the widget never writes usage history to disk.
 - **Notifications** (optional, off by default): a notification when a plan
   drops to a level of usage left you choose (5% to 50%), and when such a plan
   resets.
@@ -149,7 +153,7 @@ Plasma's standard configuration dialog with three pages of its own —
 **General** (popup, usage display, refresh and notifications, privacy),
 **AI Provider Settings** (providers and their order, the Usage tab's
 readings, layout and colours, and the hover popup) and **Chat** (sites and
-addresses) — plus Plasma's **Keyboard Shortcuts** and **About**. Longer explanations sit behind the small **?** buttons. Hearthside
+addresses) — plus Plasma's **Keyboard Shortcuts** and **About**. Longer explanations sit behind the small **?** buttons. Hearthwire
 starts with Plasma while it remains on a panel.
 
 ### Chat sites
@@ -184,13 +188,13 @@ starts with Plasma while it remains on a panel.
     (**Settings → General → Size: Large**), else one above the other.
   - **Drag and drop**: drag text, or one text file (up to 128 KB), from
     another program onto the chat or onto the panel icon, and it lands in the
-    message box (nothing is sent until you press Send). Hearthside never starts Ollama: if
+    message box (nothing is sent until you press Send). Hearthwire never starts Ollama: if
   it isn't running, the Chat tab says so and shows
   `systemctl start ollama` (or `ollama serve`). The address is
   `http://127.0.0.1:11434` unless you change it under **Show advanced
   settings → Ollama address**; only `http://` on this computer (`127.0.0.1`,
   `localhost`, `[::1]`) with a port is accepted. Before it sends anything,
-  Hearthside checks that the program on that port belongs to you or to the
+  Hearthwire checks that the program on that port belongs to you or to the
   system (the packaged `ollama` service), never to another user.
 - **Local web UI (Open WebUI)** shows a chat web interface running on this
   computer, by default `http://localhost:3000/`, for example
@@ -221,7 +225,8 @@ starts with Plasma while it remains on a panel.
   trusts (self-signed certificates are refused), or forward it to this
   computer with an SSH tunnel such as `ssh -N -L 3000:localhost:3000 server`
   (use `ssh -N -L 3000:server:3000 gateway` when it runs on a third machine)
-  and keep Local web UI at `http://localhost:3000/`.
+  and keep Local web UI at `http://localhost:3000/`. Without a tunnel, give
+  it a full name such as `nas.lan`: a short name counts as this computer.
 
 ### Settings → General
 
@@ -243,7 +248,7 @@ starts with Plasma while it remains on a panel.
   dropped that low). Plans are checked at each usage refresh while the Usage
   tab is shown; a plan already that low when Plasma starts doesn't notify.
   Mute or adjust them under **System Settings → Notifications →
-  Hearthside**.
+  Hearthwire**.
 - **Privacy**: **Stay signed in** (Off or Encrypted), **Lock automatically**,
   and under **Show folder actions** **Change passphrase…** and **Delete
   encrypted folder…**.
@@ -300,10 +305,12 @@ Usage tab. The hover popup shows the same readings unless you untick
 ## Install
 
 ```bash
+git clone --branch main https://github.com/flybytech-prog/hearthwire-ai-companion.git
+cd hearthwire-ai-companion
 ./scripts/install.sh --restart-plasma
 ```
 
-The script first checks what Hearthside needs. When you run it in a terminal
+The script first checks what Hearthwire needs. When you run it in a terminal
 on Arch, it offers (y/N) to install anything missing with `sudo pacman`:
 required Qt/KDE modules, Qt WebEngine for the Chat tab, and gocryptfs,
 kdialog and fuse3 for Stay signed in; otherwise it prints the command to run.
@@ -314,8 +321,10 @@ installs or upgrades the plasmoid, the colour app icon and the settings and
 tab icons, and optionally
 reloads Plasma.
 
-Then right-click the panel, choose **Add Widgets…**, search for **Hearthside**,
-and add it. The first launch opens Settings once.
+Then right-click the panel, choose **Add Widgets…**, search for **Hearthwire**,
+and add it. The first launch opens Settings once. A widget carried over from
+the previous name stays on the panel and isn't added again; see the upgrade
+section below.
 
 Manual installation remains available:
 
@@ -323,33 +332,35 @@ Manual installation remains available:
 python3 -m pip install --user --break-system-packages .
 kpackagetool6 -t Plasma/Applet -i plasmoid
 mkdir -p ~/.local/share/icons/hicolor/scalable/apps
-rm -f ~/.local/share/icons/hicolor/scalable/apps/hearthside{,-settings-general,-settings-ai,-settings-chat}.svg
-cp assets/hearthside.svg assets/hearthside-settings-{general,ai,chat}.svg ~/.local/share/icons/hicolor/scalable/apps/
+rm -f ~/.local/share/icons/hicolor/scalable/apps/hearthwire{,-settings-general,-settings-ai,-settings-chat}.svg
+cp assets/hearthwire.svg assets/hearthwire-settings-{general,ai,chat}.svg ~/.local/share/icons/hicolor/scalable/apps/
 ```
 
 Use `-u plasmoid` instead of `-i` when the package is already installed.
 The app icon and the settings and tab icons are loaded from
 `~/.local/share/icons/hicolor/scalable/apps/`, so copy them there too.
 
-To delete saved chat sign-ins when you stop using Hearthside, first lock the
+To delete saved chat sign-ins when you stop using Hearthwire, first lock the
 encrypted folder in the Chat tab (or turn Stay signed in off), then run:
 
 ```bash
 ./scripts/install.sh --uninstall-web-data
 ```
 
-It deletes the encrypted folder, the usage alert events file
-(`knotifications6/hearthside.notifyrc`) and the icons
-(`icons/hicolor/scalable/apps/hearthside*.svg`, the four listed above) and
-nothing else, and refuses while the folder is unlocked.
+It deletes the encrypted folder (with its KDE Wallet key, if you set that
+up), the usage history folder if there is one, the usage alert events file
+(`knotifications6/hearthwire.notifyrc`) and the icons
+(`icons/hicolor/scalable/apps/hearthwire*.svg`, the four listed above) and
+nothing else, and refuses while the folder is unlocked. A settings backup
+file (`~/.config/hearthwire/settings-backup.json`) stays in place.
 
 To remove a manual installation:
 
 ```bash
-kpackagetool6 -t Plasma/Applet -r io.github.flybytechprog.hearthside
-python3 -m pip uninstall --break-system-packages hearthside
-rm -f ~/.local/share/icons/hicolor/scalable/apps/hearthside{,-settings-general,-settings-ai,-settings-chat}.svg
-rm -f ~/.local/share/knotifications6/hearthside.notifyrc
+kpackagetool6 -t Plasma/Applet -r io.github.flybytechprog.hearthwire
+python3 -m pip uninstall --break-system-packages hearthwire
+rm -f ~/.local/share/icons/hicolor/scalable/apps/hearthwire{,-settings-general,-settings-ai,-settings-chat}.svg
+rm -f ~/.local/share/knotifications6/hearthwire.notifyrc
 ```
 
 When upgrading from AI Usage 2.x by hand, remove the old helper and widget
@@ -362,7 +373,7 @@ kpackagetool6 -t Plasma/Applet -r com.bgn.aiusage
 
 ## Upgrading from AI Usage 2.x
 
-Hearthside 1.0.0 is the renamed AI Usage 2.x. Run the installer once:
+Hearthwire 1.0.0 is the renamed AI Usage 2.x. Run the installer once:
 
 ```bash
 ./scripts/install.sh --restart-plasma
@@ -371,17 +382,75 @@ Hearthside 1.0.0 is the renamed AI Usage 2.x. Run the installer once:
 It removes the old `com.bgn.aiusage` widget, the old `ai-usage-kde` Python
 helper, and the old cache files in `$XDG_CACHE_HOME/ai-usage-kde`. After Plasma
 reloads, remove the old widget's placeholder from your panel if it is still
-there, then add **Hearthside** once through **Add Widgets…**. Settings start
+there, then add **Hearthwire** once through **Add Widgets…**. Settings start
 fresh because the widget has a new ID. Nothing needs to be re-authenticated:
-Hearthside reads the same provider sign-ins as before.
+Hearthwire reads the same provider sign-ins as before.
+
+## Upgrading from Hearthside
+
+Hearthwire is the new name of Hearthside. Your data moves over once, when
+`scripts/install.sh` runs. Only the installer does this: after a manual `pip`
+or `kpackagetool6` install nothing has moved, and the encrypted folder can't
+be created or opened until the installer has run (the Chat tab says so).
+
+What moves:
+
+- **The encrypted folder**: `~/.local/share/hearthside` becomes
+  `~/.local/share/hearthwire`, with your saved sign-ins and prompt library.
+  It is renamed in place, never copied.
+- **The KDE Wallet entry**, if you use Unlock with KDE Wallet: the key moves
+  from the wallet folder `Hearthside` to `Hearthwire`. The old entry is removed
+  only after the new one has really opened the encrypted folder.
+- **Your notification choices**: `~/.config/hearthside.notifyrc` becomes
+  `~/.config/hearthwire.notifyrc`.
+- **The panel widget and its settings**: it keeps its place, its settings,
+  its keyboard shortcut and its saved sign-ins.
+
+The old helper, widget package, icons and notification events file are removed.
+The Antigravity token cache is deleted rather than moved; it is rebuilt when
+needed.
+
+To upgrade:
+
+1. Lock the encrypted folder in the Chat tab. While it is unlocked the
+   installer stops before changing anything.
+2. Update your checkout to the latest `main` and run:
+
+   ```bash
+   ./scripts/install.sh --restart-plasma
+   ```
+
+   Plasma stops for a moment and starts again.
+3. If you use Unlock with KDE Wallet, KDE Wallet asks once whether to allow
+   Hearthwire. Allow it. If the wallet is locked or you refuse, the passphrase
+   still works, and running the installer again finishes moving the key.
+
+The widget does **not** need re-adding.
+
+Before it changes Plasma's widget configuration, the installer saves a copy
+as `~/.config/plasma-org.kde.plasma.desktop-appletsrc.hearthside-backup`. The
+next complete install deletes that copy automatically.
+
+The wallet folder `Hearthside` stays behind empty. You may delete it by hand
+in KWalletManager.
+
+To go back, lock the encrypted folder and run:
+
+```bash
+./scripts/install.sh --rollback-hearthwire
+```
+
+That moves everything back to the old names and uninstalls Hearthwire (add
+`--restart-plasma` if you don't want to be asked before Plasma stops). Then
+check out the `hearthside-final` tag and run its `scripts/install.sh`.
 
 ## Helper CLI
 
 ```bash
-hearthside --json
-hearthside --providers=claude,codex
-hearthside --catalog
-hearthside --detect
+hearthwire --json
+hearthwire --providers=claude,codex
+hearthwire --catalog
+hearthwire --detect
 ```
 
 The JSON v2 response includes the provider catalog, detected provider IDs,
@@ -411,10 +480,10 @@ usage, reset/retry times, and no credential data.
 
 ## Privacy
 
-No tokens, credential fingerprints, raw API responses, local transcripts, or
-usage history are printed or cached. Antigravity's derived access-token cache
-is the only authentication cache created by Hearthside; it is stored with mode
-`0600` under `$XDG_CACHE_HOME/hearthside` and keyed to a one-way refresh-token
+A usage refresh prints or caches no tokens, credential fingerprints, raw API
+responses, local transcripts, or usage history. Antigravity's derived access-token cache
+is the only authentication cache created by Hearthwire; it is stored with mode
+`0600` under `$XDG_CACHE_HOME/hearthwire` and keyed to a one-way refresh-token
 fingerprint.
 
 The Chat tab keeps cookies, sessions, and site data in memory only, denies
@@ -452,7 +521,7 @@ QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/qml
 
 ## Credits
 
-Hearthside began as a fork of
+Hearthwire began as a fork of
 [AI Usage for KDE](https://github.com/burakgon/ai-usage-kde-widget) by Burak
 ([@burakgon](https://github.com/burakgon)), whose usage-meter widget and helper
 are the foundation of the Usage tab. Thank you! The original MIT copyright

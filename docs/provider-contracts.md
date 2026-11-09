@@ -393,7 +393,7 @@ abort the request; a reply that was already partly shown is kept and marked
 stopped. Late events of any aborted or finished request are ignored.
 
 Owner check (see [below](#port-owner-helper)): `none` is "Ollama isn't
-running.", `other` "Another user's program is using port N. Hearthside won't
+running.", `other` "Another user's program is using port N. Hearthwire won't
 send anything to it.", any failure or a check that takes over 15 s
 "Couldn't check which program is using port N."; only `self` and `system`
 let a request through. Error texts never show the address, only its port.
@@ -427,35 +427,35 @@ fixed jobs. These commands touch no provider credentials, make no network
 requests, and pass no chat data; the wallet jobs read and write only the
 folder's own key entry in KDE Wallet. The plasmoid builds them in
 `plasmoid/contents/ui/ChatStorage.js` from fixed words and integers only, as
-`env HEARTHSIDE_RUN=<n> HEARTHSIDE_APPLET=<applet> python3 -P -m hearthside ...`
+`env HEARTHWIRE_RUN=<n> HEARTHWIRE_APPLET=<applet> python3 -P -m hearthwire ...`
 (`-P`: Python doesn't put the working folder on the module path).
-`HEARTHSIDE_RUN` is a run counter and `HEARTHSIDE_APPLET` the widget id; together
+`HEARTHWIRE_RUN` is a run counter and `HEARTHWIRE_APPLET` the widget id; together
 they keep command names unique across widgets and settings pages so replies are
 told apart. The helper ignores both.
 
 ### Layout
 
 - Encrypted folder (gocryptfs cipher directory):
-  `$XDG_DATA_HOME/hearthside/vault/` (`~/.local/share` when `XDG_DATA_HOME` is
+  `$XDG_DATA_HOME/hearthwire/vault/` (`~/.local/share` when `XDG_DATA_HOME` is
   unset or not absolute).
-- Mount: `$XDG_RUNTIME_DIR/hearthside/vault/`. `XDG_RUNTIME_DIR` must be set,
+- Mount: `$XDG_RUNTIME_DIR/hearthwire/vault/`. `XDG_RUNTIME_DIR` must be set,
   absolute, a real directory, owned by you and mode `0700`, else the reply is
   `no-runtime-dir`. The bare mountpoint is mode `0700` while mounting and
   `0500` while locked.
 - Profiles: `<mount>/web/applet-<N>-g<G>/`, one per widget id `N` and profile
   generation `G` (`chatProfileGeneration`, raised by Clear chat data). Folders
   are mode `0700`.
-- KDE Wallet key slot: `$XDG_DATA_HOME/hearthside/vault-keys/wallet.conf`
+- KDE Wallet key slot: `$XDG_DATA_HOME/hearthwire/vault-keys/wallet.conf`
   (folder `0700`, file `0400`, outside the cipher directory). It is a copy of
   `gocryptfs.conf` whose master key is wrapped with a random key
   (`openssl rand -hex 32`) kept in your KDE Wallet (`localWallet`, normally
-  `kdewallet`), folder `Hearthside`, entry `encrypted-chat-folder`. The
+  `kdewallet`), folder `Hearthwire`, entry `encrypted-chat-folder`. The
   passphrase slot (`gocryptfs.conf`) is never changed by it and stays the
   recovery slot. While being set up the copy is `wallet.conf.new` (gocryptfs
   itself writes `wallet.conf.new.tmp`) and its key is staged in the entry
   `encrypted-chat-folder.new`; while the new slot is swapped in, the previous
   one is `wallet.conf.old`. Leftovers of all of these are cleared.
-- Lock file: `$XDG_RUNTIME_DIR/hearthside/vault.lock` (`flock`). Jobs that
+- Lock file: `$XDG_RUNTIME_DIR/hearthwire/vault.lock` (`flock`). Jobs that
   may open a window (`create`, `unlock`, `change-passphrase`, `add-key`,
   `remove-key`) wait for it as long as needed; all others (including
   `auto-unlock`) give up after 5 seconds with `busy`.
@@ -525,10 +525,10 @@ timeout, answers are booleans, the wallet's name or a handle):
    element). Anything but `false` is `wallet-closed`. kwalletd6 `isOpen` is
    never used: it is false right after a PAM login even with the wallet
    unlocked.
-4. `keyDoesNotExist(<wallet>, Hearthside, encrypted-chat-folder)` (answers
+4. `keyDoesNotExist(<wallet>, Hearthwire, encrypted-chat-folder)` (answers
    while locked, without a prompt); true → `not-set-up`.
 5. `gocryptfs -q -nosyslog -config <slot> -extpass kwallet-query -extpass
-   --folder -extpass Hearthside -extpass --read-password -extpass
+   --folder -extpass Hearthwire -extpass --read-password -extpass
    encrypted-chat-folder -extpass <wallet> <cipher> <mount>`, then the usual
    mount checks.
 
@@ -536,7 +536,7 @@ Setting up (`add-key`) is staged, so a failed re-setup (Cancel, a wrong
 passphrase, a wallet error) leaves an existing slot and entry working:
 
 1. After the same step 1, `gocryptfs.conf` is copied to `wallet.conf.new`.
-2. `openssl rand -hex 32` writes into `kwallet-query --folder Hearthside
+2. `openssl rand -hex 32` writes into `kwallet-query --folder Hearthwire
    --write-password encrypted-chat-folder.new <wallet>` through a pipe. If
    openssl fails after kwallet-query stored what it got (an empty value),
    that staging entry is deleted again (`wallet-write-failed`).
@@ -565,9 +565,9 @@ first in every case; if it then fails (`missing-tool`, `wallet-disabled`,
 `wallet-failed`), only wallet entries may remain. It removes both the entry
 and a leftover staging entry: each is overwritten with a fresh value (only
 when openssl is there), then deleted through
-`org.kde.KWallet.open(<wallet>, 0, Hearthside)` → handle,
-`removeEntry(handle, Hearthside, <entry>, Hearthside)`,
-`close(handle, false, Hearthside)`, and checked with `keyDoesNotExist`.
+`org.kde.KWallet.open(<wallet>, 0, Hearthwire)` → handle,
+`removeEntry(handle, Hearthwire, <entry>, Hearthwire)`,
+`close(handle, false, Hearthwire)`, and checked with `keyDoesNotExist`.
 `destroy` and `purge` delete the files first and the entries last (openssl
 is not needed), and touch the wallet only when this data folder's
 `vault-keys/` held a wallet slot of ours (a regular file `wallet.conf`, or the
@@ -587,9 +587,9 @@ never reads, and never appears in argv, the environment or a reply.
 
 Argument rules (argparse exits 2 with a usage message on stderr otherwise):
 
-- `--web-data`, `--vault`, `--prompts`, `--read-dropped`, and `--port-owner`
-  cannot be combined with each other or with `--json`, `--providers`,
-  `--catalog`, or `--detect`.
+- `--web-data`, `--vault`, `--prompts`, `--read-dropped`, `--port-owner`,
+  `--usage-history`, `--settings-backup`, and `--migrate` cannot be combined
+  with each other or with `--json`, `--providers`, `--catalog`, or `--detect`.
 - `--method passphrase|wallet` needs `--vault unlock`, `add-key`, or
   `remove-key`; `add-key` and `remove-key` need `--method wallet`; `unlock`
   defaults to `passphrase`.
@@ -616,12 +616,13 @@ are checked against an allow-list before it starts: gocryptfs gets only
 its phase, plus a lone `-version`) and absolute paths; `-config` only with the
 one slot path the helper computed (`wallet.conf` to mount, `wallet.conf.new`
 to re-key); the `-extpass` program is kdialog, the relay, or exactly
-`kwallet-query --folder Hearthside --read-password encrypted-chat-folder
+`kwallet-query --folder Hearthwire --read-password encrypted-chat-folder
 <wallet>` (never the staging entry); `fusermount3` only `-u <mountpoint>`;
 kdialog only the new-passphrase dialog; `openssl` only `rand -hex 32`;
 `kwallet-query` only `--read-password` or `--write-password` of
 `encrypted-chat-folder` or `encrypted-chat-folder.new` in folder
-`Hearthside`; `qdbus6` only the kwalletd6 methods `isEnabled`, `localWallet`,
+`Hearthwire` (the one-time migration has its own rule, in the last section of
+this page; it never applies to `-extpass`); `qdbus6` only the kwalletd6 methods `isEnabled`, `localWallet`,
 `keyDoesNotExist`, `open`, `removeEntry`, `close` with our folder, those two
 entries and app id, and the Secret Service properties
 `Label` and `Locked`. Anything else (for example `-passfile`, `-masterkey`,
@@ -662,6 +663,7 @@ A failure is `{"ok":false,"error":"<code>"}`:
 | `wallet-failed` | Wallet jobs: `kwallet-query` exited non-zero or did not finish within 120 s (denied, cancelled, locked and not answered, no entry), a `qdbus6` query failed or timed out, `localWallet` is not a valid name, or (gocryptfs exit 9 with the wallet extpass) an empty value; for `remove-key`, `destroy`, `purge`: the wallet entry may remain |
 | `wallet-mismatch` | `unlock --method wallet`, `auto-unlock`: the wallet's value does not open the slot (gocryptfs exit 12); set the wallet up again |
 | `wallet-write-failed` | `add-key`: openssl failed, gocryptfs could not write the slot (exit 24 or another code) or the slot could not be saved |
+| `legacy-data` | `create`, `unlock`, `auto-unlock`, `add-key`, `--web-data purge`: the previous version's data folder still exists and only the installer may move it; nothing else was done. The Chat tab and settings page show one fixed message, and `scripts/install.sh --uninstall-web-data` stops with one |
 | `os-error` | Any other failure, including unexpected errors (no traceback is printed) |
 
 The plasmoid accepts only these codes (plus `empty-passphrase`, which the
@@ -702,7 +704,7 @@ then the wallet unlock.
 ## Prompt library helper
 
 Saved prompts and personas live only inside the unlocked encrypted folder
-(`src/hearthside/core/promptstore.py`):
+(`src/hearthwire/core/promptstore.py`):
 
 - `<mount>/library/` (`0700`) holds `prompt-<id>.txt` and `persona-<id>.txt`
   (`0600`, UTF-8) and `personas.json` (`0600`, `{"<model>": <persona id>}`,
@@ -715,7 +717,7 @@ Saved prompts and personas live only inside the unlocked encrypted folder
 | Command | Does | Success reply |
 | --- | --- | --- |
 | `--prompts list` | Returns every saved item, sorted by id, and the per-model persona defaults (only those pointing at a listed persona). Files that are not regular files of yours, symlinks, odd names, invalid UTF-8 or over the cap are skipped | `{"ok":true,"items":[{"id":N,"kind":"prompt"\|"persona","text":"..."}],"personas":{"<model>":N}}` |
-| `--prompts add --kind prompt\|persona` | Opens `kdialog --title Hearthside --textinputbox "<fixed label>"` (no initial text) with its stdout on a new `O_EXCL` file inside `library/`; files it as the next id | `{"ok":true,"id":N}` |
+| `--prompts add --kind prompt\|persona` | Opens `kdialog --title Hearthwire --textinputbox "<fixed label>"` (no initial text) with its stdout on a new `O_EXCL` file inside `library/`; files it as the next id | `{"ok":true,"id":N}` |
 | `--prompts replace --id N` | The same dialog; replaces item `N` (same id and kind) | `{"ok":true,"id":N}` |
 | `--prompts remove --id N` | Deletes item `N` (and every persona default pointing at it) | `{"ok":true}` |
 | `--prompts set-persona --model <name> --id N` | Makes persona `N` the default for `<name>` | `{"ok":true}` |
@@ -745,8 +747,8 @@ lock held), `missing-tool` (no kdialog), `os-error` (anything else, including
 a symlink or non-folder in place of `library/`).
 
 The plasmoid builds these commands only in `PromptLibrary.js`
-(`promptsCommand`), with the same `env HEARTHSIDE_RUN=… HEARTHSIDE_APPLET=…
-python3 -P -m hearthside` prefix, from fixed words, ids (1 to 2147483648) and a
+(`promptsCommand`), with the same `env HEARTHWIRE_RUN=… HEARTHWIRE_APPLET=…
+python3 -P -m hearthwire` prefix, from fixed words, ids (1 to 2147483648) and a
 model name checked against the helper's rule; anything else builds nothing.
 main.qml runs one job at a time, lists the library whenever the folder turns
 unlocked and after every change, and drops its copy (and queued changes) as
@@ -762,7 +764,7 @@ For a single local `file://` URL dropped on the Ollama chat, the plasmoid
 runs `--read-dropped <HEX>`, where `<HEX>` is the path's UTF-8 bytes as
 lowercase hex (`^([0-9a-f]{2}){1,4096}$`; the decoded path must be absolute
 and contain no NUL; otherwise argparse exits 2). It stands alone like the
-other helper modes (`src/hearthside/core/droppedfile.py`). It runs no
+other helper modes (`src/hearthwire/core/droppedfile.py`). It runs no
 program and writes nothing.
 
 - `lstat` first: anything but a regular file (symlink in the last
@@ -803,14 +805,14 @@ before each main-frame navigation to this computer
 (`plasmoid/contents/ui/LocalOwnerCheck.qml`). The command is built only in
 `plasmoid/contents/ui/OllamaChat.js` (`ownerCommand`), from integers only:
 
-    env HEARTHSIDE_RUN=<n> HEARTHSIDE_APPLET=<applet> python3 -P -m hearthside --port-owner <port>
+    env HEARTHWIRE_RUN=<n> HEARTHWIRE_APPLET=<applet> python3 -P -m hearthwire --port-owner <port>
 
 The env words only keep DataSource names unique (as for the Stay signed in
 helper); the helper ignores them. The command carries no prompt, model name,
 or address, touches no credentials, and makes no network request.
 
 - Reads only `/proc/net/tcp` and `/proc/net/tcp6`; opens no socket and starts
-  no program (`src/hearthside/core/portowner.py`).
+  no program (`src/hearthwire/core/portowner.py`).
 - Counts sockets in state LISTEN (`0A`) on `<port>` whose local address a
   connection to `127.0.0.1`, `localhost`, or `[::1]` can reach: `127.0.0.1`,
   `0.0.0.0`, `::1`, `::`, `::ffff:127.0.0.1`, `::ffff:0.0.0.0`. Other bind
@@ -846,12 +848,12 @@ the milliseconds between the check and the request; see `docs/privacy.md`.
 
 ## Usage history helper
 
-Opt-in (plan D70, off by default): the plasmoid records only while
-`usageHistoryEnabled` is on, and clears the history when it is turned off
-(`src/hearthside/core/usagehistory.py`). No network, no credentials, no
-provider data other than percentages.
+Opt-in (plan D70), and only a helper command in this version: no widget code
+runs it and there is no setting for it yet, so nothing is recorded unless the
+command is run by hand (`src/hearthwire/core/usagehistory.py`). No network, no
+credentials, no provider data other than percentages.
 
-- `$XDG_DATA_HOME` (when absolute, else `~/.local/share`)`/hearthside/usage-history/`
+- `$XDG_DATA_HOME` (when absolute, else `~/.local/share`)`/hearthwire/usage-history/`
   (`0700`) holds `history.json` and `history.lock` (both `0600`). Every folder
   is opened through `webdata.open_base` / `open_child_dir` (no symlinks,
   owner checked).
@@ -891,16 +893,17 @@ once the chat sign-in data is gone.
 
 ## Settings backup helper
 
-Settings → General → Backup saves the widget's settings to one fixed file and
-reads them back (plan D71; no file dialog;
-`src/hearthside/core/settingsbackup.py`). No network, no credentials.
+Saves the widget's settings to one fixed file and reads them back (plan D71;
+no file dialog; `src/hearthwire/core/settingsbackup.py`). Only a helper command
+in this version: the widget has no backup controls yet and doesn't run it. No
+network, no credentials.
 
-- `$XDG_CONFIG_HOME` (when absolute, else `~/.config`)`/hearthside/settings-backup.json`.
+- `$XDG_CONFIG_HOME` (when absolute, else `~/.config`)`/hearthwire/settings-backup.json`.
   The folder is `0700` and made only by `export` (which also tightens a safe
   existing one to `0700`); the file is `0600`, written as an
   `O_EXCL|O_NOFOLLOW` temporary, fsynced and `os.replace`d with directory
   descriptors. Export refuses to replace a symlink or someone else's file.
-- Format: `{"format":"hearthside-settings","version":1,"config_schema":3,"exported_at":"YYYY-MM-DDTHH:MM:SSZ","settings":{...}}`,
+- Format: `{"format":"hearthwire-settings","version":1,"config_schema":3,"exported_at":"YYYY-MM-DDTHH:MM:SSZ","settings":{...}}`,
   exactly these keys. Another `version` or `config_schema` is `unsupported`.
 
 | Command | Success reply |
@@ -946,6 +949,15 @@ and no C0/C1 controls or lone surrogates; a boolean is never an integer.
 | `middleClickOpens` | `refresh`, `usage`, `ollama` or a web site id |
 | `chatCustomUrls` | JSON object `{webSiteId: address}` (D74); every address non-empty and valid under the rules of `ChatSites.validateCustomUrl` (https only, http only for Local and only to loopback, at most 2048 UTF-16 units, no whitespace or control characters, no user info, no local address except for Local). One bad entry drops the whole key |
 
+`panelRing` and `middleClickOpens` are accepted ahead of the widget settings
+that will use them; they are not in `main.xml` yet.
+
+The helper is stricter than the widget about custom addresses: it rejects
+every C0 and C1 control character in them, while
+`ChatSites.validateCustomUrl` refuses only JavaScript whitespace, C0 and
+U+007F. An address the widget accepted with U+0085 or another C1 character
+therefore drops the whole `chatCustomUrls` key on export.
+
 JSON settings are stored re-serialized as `JSON.stringify` writes them, in
 catalog order. An export that keeps nothing is `bad-data` (an existing
 backup is never replaced with an empty one).
@@ -955,4 +967,75 @@ Errors (`{"ok":false,"error":"<code>"}`, exit 0): `absent` (no backup;
 version or schema), `too-large` (file over 64 KiB, or an export that would
 be), `bad-data` (export input), `symlink`, `not-owned`, `unsafe-mode` (the
 folder or file is group- or other-writable), `os-error`. Replies never carry
-a path. The widget re-checks every imported value before it applies it.
+a path.
+
+## Upgrading from Hearthside
+
+`hearthwire --migrate status|run|applets|rollback` is the one-time move from
+the former name (`src/hearthwire/core/legacy.py`, the only Python file with the
+old names apart from `LEGACY_FOLDER` in `walletkey.py`). Only
+`scripts/install.sh` runs it; the widget never does. It uses no network and no
+provider credentials, and stands alone like the other helper modes (argparse
+exits 2 otherwise). Every reply is one JSON object on stdout with exit 0, and
+holds only category names and fixed codes, never a path, count, name or key.
+
+Categories, always in this order: `data`, `config`, `notifyrc`, `cache`,
+`wallet-entry`, `applets`.
+
+| Category | What happens |
+| --- | --- |
+| `data` | `$XDG_DATA_HOME/hearthside` becomes `.../hearthwire` by one rename; never merged, and an empty target is removed first |
+| `config` | `$XDG_CONFIG_HOME/hearthside` likewise |
+| `notifyrc` | `$XDG_CONFIG_HOME/hearthside.notifyrc` becomes `hearthwire.notifyrc`; an existing new file is kept and the old one dropped |
+| `cache` | `$XDG_CACHE_HOME/hearthside/antigravity-auth.json` and its temporaries are deleted, not moved; the folder goes only if that leaves it empty |
+| `wallet-entry` | Only when the moved folder has a wallet slot (`vault-keys/wallet.conf`, a regular file of yours); see the wallet rule below |
+| `applets` | With plasmashell stopped, exact `plugin=io.github.flybytechprog.hearthside` lines directly under `[Containments][N][Applets][M]` get the new id; every other byte stays |
+
+| Command | Does | Success reply |
+| --- | --- | --- |
+| `--migrate status` | Read only. `pending` is what still has to move, `present` what already uses the new name (`data`, `config`, `notifyrc`, `wallet-entry`, `applets`). With work pending it also refuses a mounted vault, a held lock and data under both names; with nothing pending a mounted vault is fine | `{"ok":true,"pending":[...],"present":[...]}` |
+| `--migrate run` | Moves the first five categories. `migrated` is what this call moved, `pending` what is still left afterwards (including `applets`, which is its own step). With none of the five pending it returns at once and takes no lock | `{"ok":true,"migrated":[...],"pending":[...]}` |
+| `--migrate applets` | Writes `<appletsrc>.hearthside-backup` (mode `0600`, once; an existing one is kept), then replaces appletsrc atomically, keeping its mode, after checking again that plasmashell is stopped and the file is unchanged | `{"ok":true,"migrated":[...],"pending":[...]}` |
+| `--migrate rollback` | The inverse of `run` and `applets`, except that the token cache is not restored. `pending` can only be `["wallet-entry"]` or empty | `{"ok":true,"restored":[...],"pending":[...]}` |
+
+A failure is `{"ok":false,"error":CODE}`, with `"category":NAME` added when one
+category's step failed. The checks that come before the steps (the mounted
+vault and the locks, and plasmashell for `run` and `rollback`) have no
+category; `plasma-running` from the appletsrc step itself has
+`"category":"applets"`.
+
+| Code | Meaning |
+| --- | --- |
+| `not-locked` | A vault is mounted under either name |
+| `busy` | The vault lock of either name is held (5 second wait) |
+| `symlink`, `not-directory`, `not-owned` | Something in the way is a symlink, the wrong kind of file, or not yours; nothing is followed |
+| `conflict` | `data` or `config` holds files under both names, or a rename target appeared |
+| `plasma-running` | A plasmashell process of this user exists (`/proc/<pid>/comm`) |
+| `invalid` | appletsrc is over 16 MiB, not a regular file, not UTF-8, holds NUL, has a malformed group header, or names either id in an inexact `plugin` line of an applet group |
+| `os-error` | Anything else, including no usable runtime directory or an appletsrc that changed during the rewrite |
+
+Every step is idempotent, so a run that stopped half-way is finished by the
+next. The old and then the new vault lock are held. Names are opened one
+component at a time without following links and must be yours; renames use
+directory descriptors and `renameat2(RENAME_NOREPLACE)` where available; nothing
+is deleted recursively.
+
+Wallet rule (`walletkey.LEGACY_FOLDER`, `Hearthside`, migration only):
+`kwallet-query` may read or write `encrypted-chat-folder` there, and `qdbus6`
+may call `keyDoesNotExist` or `removeEntry` for `encrypted-chat-folder` and
+`encrypted-chat-folder.new`. It is never an `-extpass` value, and the folder
+itself is never removed (`removeFolder` is not an allowed method). In `run`, an
+entry in the new folder that already opens the slot is kept; otherwise the old
+entry is copied with `kwallet-query -r` into a pipe and `-w` from it. The copy
+is proven by a real mount with the wallet slot, then unmounted, and only then
+are the old entry and any old staging entry removed. If the proof fails the
+copy is removed and `wallet-entry` stays pending. Without an enabled wallet,
+its tools, gocryptfs or fusermount3 the step also stays pending.
+
+The installer checks `status` before changing anything, needs
+`--restart-plasma` or a yes in a terminal, stops plasmashell (an exit trap
+starts it again), runs `run` then `applets`, and removes the old package,
+widget, icons and events file. A later complete install that finds nothing
+pending and `applets` in `present` deletes the appletsrc backup (an owned
+regular file only, never through a symlink). `--rollback-hearthwire` runs
+`rollback` and uninstalls this release.

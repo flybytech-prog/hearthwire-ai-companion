@@ -112,6 +112,21 @@ migration_error() {
     esac
 }
 
+# The helper's plasma-running reply, bare or with one of its category names
+# (the applets step adds its own); nothing else counts.
+is_plasma_running_reply() {
+    case "$1" in
+        '{"ok":false,"error":"plasma-running"}') return 0 ;;
+        '{"ok":false,"error":"plasma-running","category":"'*'"}')
+            reply_category=${1#'{"ok":false,"error":"plasma-running","category":"'}
+            case "${reply_category%'"}'}" in
+                data|config|notifyrc|cache|wallet-entry|applets) return 0 ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
 # One --migrate step while Plasma stops; plasma-running is retried for ~10 s.
 migrate_step() {
     attempts=0
@@ -120,14 +135,10 @@ migrate_step() {
             step_reply=""
             break
         fi
-        case "$step_reply" in
-            '{"ok":false,"error":"plasma-running"}')
-                attempts=$((attempts + 1))
-                [ "$attempts" -lt 20 ] || break
-                sleep 0.5
-                ;;
-            *) break ;;
-        esac
+        is_plasma_running_reply "$step_reply" || break
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 20 ] || break
+        sleep 0.5
     done
 }
 # <<< legacy-migration
@@ -233,7 +244,7 @@ if [ "$rollback" = true ]; then
     if ! step_reply=$(helper --migrate rollback); then
         step_reply=""
     fi
-    if [ "$step_reply" = '{"ok":false,"error":"plasma-running"}' ]; then
+    if is_plasma_running_reply "$step_reply"; then
         confirm_plasma_stop "Going back to Hearthside renames your Hearthwire widgets in the panel layout."
         stop_plasma
         migrate_step rollback

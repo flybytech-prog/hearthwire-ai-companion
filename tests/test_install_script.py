@@ -799,4 +799,50 @@ def test_in_a_terminal_the_move_asks_before_stopping_plasma(tmp_path, answer, co
     assert b"stops Plasma for a moment and starts it again. Continue? [y/N]" in output
     stopped = "kquitapp6 plasmashell" in flow.steps()
     assert stopped == (code == 0)
+
+
+PLASMA_RUNNING_IN_APPLETS = '{"ok":false,"error":"plasma-running","category":"applets"}'
+
+
+def test_plasma_running_with_a_category_is_retried_too(tmp_path):
+    """The applets step answers with its category when it still sees plasmashell."""
+    flow = Flow(tmp_path)
+    flow.reply("status", PENDING)
+    flow.reply("run", RUN_DONE)
+    flow.reply("applets", PLASMA_RUNNING_IN_APPLETS, 1)
+    flow.reply("applets", PLASMA_RUNNING_IN_APPLETS, 2)
+    flow.reply("applets", APPLETS_DONE)
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 0, completed.stderr
+    assert "Plasma did not stop" not in completed.stderr
+    assert [step for step in flow.steps() if step.startswith("helper")] == [
+        "helper status", "helper run", "helper applets", "helper applets", "helper applets"]
+
+
+def test_rollback_stops_plasma_and_retries_on_the_late_applets_check(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("rollback", PLASMA_RUNNING_IN_APPLETS, 1)
+    flow.reply("rollback", PLASMA_RUNNING_IN_APPLETS, 2)
+    flow.reply("rollback", '{"ok":true,"restored":["applets"],"pending":[]}')
+    completed = flow.run("--rollback-hearthwire", "--restart-plasma")
+    assert completed.returncode == 0, completed.stderr
+    assert flow.steps() == ["helper rollback", "kquitapp6 plasmashell", "helper rollback", "helper rollback",
+                            "kstart plasmashell"]
+
+
+@pytest.mark.parametrize("reply", [
+    '{"ok":false,"error":"busy","category":"plasma-running"}',
+    '{"ok":false,"error":"plasma-running","category":"other"}',
+    '{"ok":false,"error":"plasma-running","category":"applets","x":"y"}',
+    '{"ok":false,"error":"plasma-running","category":""}',
+    '{"ok":false,"error":"plasma-running-not"}',
+])
+def test_other_replies_are_not_retried(tmp_path, reply):
+    flow = Flow(tmp_path)
+    flow.reply("status", PENDING)
+    flow.reply("run", RUN_DONE)
+    flow.reply("applets", reply)
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 1
+    assert [step for step in flow.steps() if step.startswith("helper")] == ["helper status", "helper run", "helper applets"]
 # <<< legacy-migration

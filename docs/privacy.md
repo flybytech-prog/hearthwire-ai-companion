@@ -1,11 +1,11 @@
 # Privacy
 
-Hearthside reads existing local sign-in state only for providers the user tracks
+Hearthwire reads existing local sign-in state only for providers the user tracks
 and that are detected as installed. Credentials are sent only to the matching
 provider's first-party OAuth and usage endpoints. The helper never follows
 HTTP redirects: a 3xx from a provider is reported as a failed request
 (`invalid-response`), so a token is never sent on to the redirect's address.
-The widget always starts the helper as `python3 -P -m hearthside`, so
+The widget always starts the helper as `python3 -P -m hearthwire`, so
 Python doesn't load modules from Plasma's working folder.
 
 The helper does not print or log access tokens, refresh tokens, API keys,
@@ -19,21 +19,21 @@ text only. Text such as `<img src="...">` in a provider's reply appears
 literally and can't make the widget load an image or a link.
 
 Usage snapshots, stale readings, and rate-limit cooldowns live only in the
-Plasma widget process. They disappear when Plasma restarts. Hearthside does not
-read local chat transcripts and does not keep usage history.
+Plasma widget process. They disappear when Plasma restarts. Hearthwire does not
+read local chat transcripts, and the widget does not keep usage history.
 
 Usage notifications (**Settings → General → Usage → Notifications**, off by
 default) are sent to Plasma's notification server through KDE's notification
-library as the `hearthside` application. Each one names a provider, a plan
+library as the `hearthwire` application. Each one names a provider, a plan
 (for example "Claude Code" and "Weekly") and a whole percentage left, nothing
 else: no account, plan name from the provider, error text or link, and no
 buttons. Plasma may keep it in its notification history like any other
 notification. They can be muted or changed under **System Settings →
-Notifications → Hearthside**, which saves that choice in
-`~/.config/hearthside.notifyrc`. Which plans already notified is kept only
+Notifications → Hearthwire**, which saves that choice in
+`~/.config/hearthwire.notifyrc`. Which plans already notified is kept only
 in the widget's memory, so after a Plasma restart the first reading counts
 as a starting point again and never notifies. `scripts/install.sh` installs
-`hearthside.notifyrc` to `${XDG_DATA_HOME:-~/.local/share}/knotifications6/`
+`hearthwire.notifyrc` to `${XDG_DATA_HOME:-~/.local/share}/knotifications6/`
 so the two events appear in System Settings; it holds names and settings
 only.
 
@@ -60,7 +60,7 @@ an account, a plan name, a reading or an error from a provider.
 
 Antigravity is the one provider that requires a derived access-token cache
 because its Secret Service entry can contain only a refresh token. That cache
-is written to `$XDG_CACHE_HOME/hearthside/antigravity-auth.json` (falling back
+is written to `$XDG_CACHE_HOME/hearthwire/antigravity-auth.json` (falling back
 to `~/.cache`) with mode `0600`. It contains a short-lived access token, expiry,
 and a SHA-256 refresh-token fingerprint. It never contains the refresh token.
 When upgrading from the previous release, `scripts/install.sh` deletes the old
@@ -72,8 +72,8 @@ file it points to with mode `0600`, and only if that file already exists, is a
 regular file, and is owned by the current user.
 
 To keep two helper runs from refreshing the same token, the helper creates
-empty lock files named `<provider>.lock` in `$XDG_RUNTIME_DIR/hearthside/`
-(falling back to `<temp dir>/hearthside-<uid>/`). The directory is mode
+empty lock files named `<provider>.lock` in `$XDG_RUNTIME_DIR/hearthwire/`
+(falling back to `<temp dir>/hearthwire-<uid>/`). The directory is mode
 `0700` and each file is mode `0600`. The files hold no data; only their
 advisory lock is used.
 
@@ -83,10 +83,22 @@ shell once per run. That shell prints only the allow-listed variables
 `XDG_DATA_HOME`, and `PATH`. The values stay in memory and are never cached to
 disk.
 
-Hearthside makes no network requests other than to the tracked providers'
+Hearthwire makes no network requests other than to the tracked providers'
 endpoints and the chat websites you open, plus whatever those sites load, and,
 if you use the built-in Ollama chat, requests over loopback to the Ollama
 server on this computer. No analytics or telemetry are collected.
+
+The helper has two more commands that the widget doesn't use yet: there is no
+button or setting for them in this version, so their files exist only if you
+run the commands by hand. `--usage-history` is opt-in and keeps seven days of
+hourly usage percentages in `~/.local/share/hearthwire/usage-history/`.
+`--settings-backup export` writes your widget settings, without sign-ins or
+passphrases, to `~/.config/hearthwire/settings-backup.json` (mode `0600`).
+`scripts/install.sh --uninstall-web-data` deletes the usage history but leaves
+`~/.config/hearthwire/settings-backup.json` in place.
+
+The project's `.claude/` folder (local development notes and settings) is never
+part of the repository or of the packages.
 
 ## Chat tab
 
@@ -99,7 +111,7 @@ does not use Qt WebEngine (see [Ollama](#ollama-built-in-chat) below).
 
 Google's sign-in page (accounts.google.com) refuses embedded browsers
 ("This browser or app may not be secure"). While a chat page or sign-in
-window is on that page, Hearthside identifies itself as Firefox on Linux and
+window is on that page, Hearthwire identifies itself as Firefox on Linux and
 sends no browser brand in its client hints, so Google allows the sign-in;
 everywhere else it reports its real Chromium-based engine. Google may change
 this check at any time, and sign-in with Google could stop working.
@@ -115,7 +127,7 @@ this check at any time, and sign-in with Google could stop working.
 **Split view** (the Chat toolbar's Split button, not saved in the settings)
 shows a second site in a second page of the same profile: same sign-ins,
 same rules (Off or Encrypted, permissions, external-link prompts, sign-in
-windows over the pane that opened them, plain-text notices), and Hearthside
+windows over the pane that opened them, plain-text notices), and Hearthwire
 never scripts either page. The notices and toolbar act on the pane you last
 clicked into. Two sites use about twice the memory of one (each page has
 its own web engine process); turning Split off closes the second page. When
@@ -126,7 +138,7 @@ off. A download prompt names the site whose page asked.
 
 There is no plain "save to disk" choice. Qt WebEngine never encrypts cookies
 or site storage itself (it does not use KDE Wallet for them), so a saved
-sign-in would sit on disk as readable text. Hearthside therefore saves
+sign-in would sit on disk as readable text. Hearthwire therefore saves
 sign-ins only inside the encrypted folder.
 
 ### Off: private in-memory profile
@@ -155,10 +167,10 @@ private session.
 
 How it works:
 
-- The encrypted files are in `$XDG_DATA_HOME/hearthside/vault/` (usually
-  `~/.local/share/hearthside/vault/`). While unlocked, gocryptfs shows their
-  readable view at `$XDG_RUNTIME_DIR/hearthside/vault/` (usually
-  `/run/user/<uid>/hearthside/vault/`), which lives in memory. Each widget
+- The encrypted files are in `$XDG_DATA_HOME/hearthwire/vault/` (usually
+  `~/.local/share/hearthwire/vault/`). While unlocked, gocryptfs shows their
+  readable view at `$XDG_RUNTIME_DIR/hearthwire/vault/` (usually
+  `/run/user/<uid>/hearthwire/vault/`), which lives in memory. Each widget
   keeps its profile in its own subfolder there.
 - What is encrypted: cookies, local storage, IndexedDB, session storage and
   every other file the sites write, including the file names. The HTTP cache
@@ -173,17 +185,17 @@ How it works:
   check guards against mistakes and against other users. It does not protect
   against programs running as you: those can already read your files, and
   could mount a look-alike FUSE folder that passes the same check.
-- One encrypted folder with one passphrase is shared by all Hearthside widgets
+- One encrypted folder with one passphrase is shared by all Hearthwire widgets
   on your account. Unlocking it in one widget unlocks it for all of them.
 
 Your passphrase:
 
 - You type it only into a KDE dialog (kdialog) that gocryptfs itself starts;
-  kdialog hands it straight to gocryptfs. It never passes through Hearthside
+  kdialog hands it straight to gocryptfs. It never passes through Hearthwire
   and is never in process arguments, environment variables, logs, or the
   widget's configuration.
 - Creating the folder asks twice: once to choose the passphrase, then once
-  more to unlock it. Hearthside cannot enforce a strong passphrase; the
+  more to unlock it. Hearthwire cannot enforce a strong passphrase; the
   dialog shows a strength meter.
 - There is no recovery key. If you forget the passphrase, the saved sign-ins
   are lost: delete the folder and start again.
@@ -195,7 +207,7 @@ The folder stays unlocked until you press the lock button (**Lock saved
 sign-ins**) in the Chat tab, it is locked automatically (below), you choose
 **Clear chat data**, turn Stay signed in Off, Plasma restarts, you log out, or
 the computer restarts. Lock closes the chat pages first, then
-locks the folder; if another Hearthside widget is still using it, the folder
+locks the folder; if another Hearthwire widget is still using it, the folder
 is not locked and the Chat tab says so. It is never forced.
 
 **Lock automatically** (Settings → General → Privacy; only with
@@ -205,7 +217,7 @@ site hasn't been shown: the popup is closed, or Usage or Ollama is shown.
 Every time Chat is shown again the time starts over, and it never locks while
 Chat is shown. It counts clock time, so time the computer was asleep counts
 too. It works like the lock button, but it waits while a passphrase window or
-another folder step is running, and if another Hearthside widget is using the
+another folder step is running, and if another Hearthwire widget is using the
 folder it quietly keeps it open and tries again after the next idle period.
 Afterwards the Chat tab says "Locked automatically".
 
@@ -221,7 +233,7 @@ a minute after signing in before restarting Plasma or logging out.
 deletes this widget's saved sign-ins inside the folder, and locks the folder.
 
 Turning Stay signed in **Off** (after a confirmation in settings) deletes the
-whole encrypted folder, with every sign-in saved in it, for all Hearthside
+whole encrypted folder, with every sign-in saved in it, for all Hearthwire
 widgets. If another widget still has it open, it is not deleted and the Chat
 tab tells you; delete it later under Settings → General → Privacy → Show
 folder actions.
@@ -235,11 +247,11 @@ While Chat is hidden no chat page, web engine or Ollama chat starts.
 Settings → General → Privacy → **Unlock with** chooses **Passphrase** (the
 default) or **KDE Wallet**. Choosing KDE Wallet sets it up at once: the helper
 makes a second key slot (a copy of the folder's `gocryptfs.conf`, in
-`~/.local/share/hearthside/vault-keys/wallet.conf`) that opens with a random
-256-bit key, stores that key in your KDE Wallet (folder `Hearthside`, entry
+`~/.local/share/hearthwire/vault-keys/wallet.conf`) that opens with a random
+256-bit key, stores that key in your KDE Wallet (folder `Hearthwire`, entry
 `encrypted-chat-folder`), and asks for the passphrase once to do it. The key
 moves only between KDE's and gocryptfs's own programs through pipes; it never
-passes through Hearthside, process arguments, the environment, logs or the
+passes through Hearthwire, process arguments, the environment, logs or the
 widget's configuration (only the word `wallet` is saved, as
 `chatVaultUnlock`).
 
@@ -295,7 +307,7 @@ the widget's configuration (that file is readable by other users here).
   the page is never scripted. A clipboard manager such as Klipper may keep
   what you copy (see below).
 
-Small files in `$XDG_RUNTIME_DIR/hearthside/` (in memory, mode `0600`):
+Small files in `$XDG_RUNTIME_DIR/hearthwire/` (in memory, mode `0600`):
 `vault.lock`, an empty lock file, and briefly `passwd.status`, which holds only
 the exit status of the first passphrase dialog while you change the
 passphrase.
@@ -343,10 +355,13 @@ The configuration file is readable by other users on many systems (mode
 `0644`), so the enabled sites and their zoom levels can be seen by anyone who
 can log in to this computer.
 
-Apart from your settings and approved downloads, Hearthside writes to disk
-only in two places: the Antigravity token cache described above, and, only if
+Apart from your settings and approved downloads, Hearthwire writes to disk
+only in three places: the Antigravity token cache described above; only if
 you choose Encrypted, the encrypted folder (written by Qt WebEngine through
-gocryptfs).
+gocryptfs) and, with Unlock with KDE Wallet, its key slot next to it; and, only
+after the one-time upgrade from the previous name, a backup of Plasma's panel
+layout (see the last section of this page). The two helper commands described
+near the top of this page add their files only if you run them by hand.
 
 The widget never runs scripts in, reads from, or injects anything into the
 pages, sets no `QTWEBENGINE_*` variables or Chromium flags, and does not pass
@@ -405,7 +420,9 @@ WebSocket, images and similar) to this computer or to names that resolve to it
   loaded, and embedded frames, are not checked again.
 - A server on another machine needs `https:` with a certificate your system
   trusts; pages with self-signed or otherwise invalid certificates are not
-  loaded. Alternatively, reach it through an SSH tunnel to a local port.
+  loaded. Address it by a full name such as `nas.lan`: a short name without a
+  dot counts as this computer. Alternatively, reach it through an SSH tunnel
+  to a local port.
 
 ### Ollama (built-in chat)
 
@@ -416,7 +433,7 @@ none of the web profile rules above apply to it; these do:
 - **Where your messages go.** Each message, with the conversation so far, is
   sent in the body of a `POST /api/chat` request over plain `http://` on
   loopback to the address you set (default `http://127.0.0.1:11434`; only
-  `127.0.0.1`, `localhost`, or `[::1]` with a port is accepted). Hearthside
+  `127.0.0.1`, `localhost`, or `[::1]` with a port is accepted). Hearthwire
   itself sends it nowhere else, and it is readable by the program that
   answers on that port. With the packaged `ollama.service` that is a process
   of the system `ollama` account, so the `ollama` account's processes, and
@@ -457,9 +474,11 @@ none of the web profile rules above apply to it; these do:
 - **Dropped files.** One local text file (at most 128 KB, UTF-8) can be
   dropped too: the helper reads it (`--read-dropped`) and hands back only its
   text, which goes into the message box the same way. Its path is passed to
-  the helper as hexadecimal digits, so for that moment it is visible in the
-  helper's process arguments (other users can't see them with the usual
-  `hidepid`, but programs running as you can). Symlinks, pipes, devices,
+  the helper as hexadecimal digits, which anyone can decode. While the helper
+  runs, that path is visible in the process list to programs running as you
+  and, because `/proc` is usually not mounted with `hidepid`, to other local
+  users too. Only the path is exposed, never the file's contents (see
+  [Recommended system settings](#recommended-system-settings)). Symlinks, pipes, devices,
   `/proc` and `/sys` files, empty or larger files and anything that isn't
   text are refused, as are several files at once and links ("Drop text, not
   files.").
@@ -475,11 +494,11 @@ none of the web profile rules above apply to it; these do:
   `OLLAMA_DEBUG` for the service: debug logging can write more.
 - **Ollama's own history.** Prompts you type into `ollama run` in a terminal
   are saved by Ollama's command line tool in `~/.ollama/history`. That is not
-  Hearthside, and the widget never writes there, but it is a place your
+  Hearthwire, and the widget never writes there, but it is a place your
   prompts may end up on disk.
 - **Cloud models are hidden.** Ollama can list cloud models (names ending in
   `:cloud` or `-cloud`, or with a remote host) that forward your messages to
-  ollama.com. Hearthside drops them from the model list and never sends to
+  ollama.com. Hearthwire drops them from the model list and never sends to
   them. Embedding-only models are hidden too.
 - **The port's owner is checked.** If Ollama is stopped, another program can
   take its port. Before each model-list load and each send or unload, the
@@ -490,8 +509,8 @@ none of the web profile rules above apply to it; these do:
   using port …". If the check can't be done, nothing is sent either. The
   check cannot tell your own programs apart, so a program running as you can
   still pose as Ollama, and a listener could change in the milliseconds
-  between the check and the request. Hearthside never starts Ollama.
-- **Nothing on disk from Hearthside.** The conversation lives only in Plasma's
+  between the check and the request. Hearthwire never starts Ollama.
+- **Nothing on disk from Hearthwire.** The conversation lives only in Plasma's
   memory: no file, log, journal message, process argument, environment
   variable, helper call, or setting holds it. Nothing is in the request
   address either; only the body carries text. The model you pick is not saved.
@@ -566,7 +585,8 @@ pile up prompts. Windows a page opens by itself are dropped without a
 prompt. **Open in browser** in the toolbar, your own click, opens the
 current site's page directly. Your browser may keep an opened address in its
 history, and the address briefly appears in the browser's process arguments.
-Sign-in popups stay inside the widget, in a sign-in overlay that uses the same
+Sign-in popups open only after a click; one a page tries to open by itself is
+dropped. They stay inside the widget, in a sign-in overlay that uses the same
 profile as the chat page (private in Off, the saved one in Encrypted). Its
 title always names a host: "Sign-in window: accounts.google.com", or while
 the window is still blank (`about:blank`, or text a page wrote into it)
@@ -593,7 +613,7 @@ The Chat tab protects against:
   own (apart from the Ollama chat's requests to Ollama on this computer), and
   it never reads or changes the pages;
 - with the Ollama chat: other users' programs on the Ollama port, cloud
-  models, and leftovers of the conversation on disk from Hearthside;
+  models, and leftovers of the conversation on disk from Hearthwire;
 - with Local web UI: other users' programs on its port;
 - provider replies or pages that try to slip markup into the widget's own
   text, hide direction characters in replies or download names, or move a
@@ -618,7 +638,9 @@ It does not protect against:
   Chromium, which often lags weeks behind Chrome's security fixes, and a
   page that exploits such a bug runs inside Plasma (see below);
 - swap, hibernation, core dumps, or clipboard managers, unless configured as
-  below.
+  below;
+- other local users seeing, in the process list, the path of a file dropped
+  on the Ollama chat, unless `/proc` is mounted with `hidepid` as below.
 
 ### Recommended system settings
 
@@ -647,3 +669,41 @@ It does not protect against:
   cannot read the clipboard.
 - Never set `QTWEBENGINE_REMOTE_DEBUGGING` for Plasma; it would expose every
   open page, including your sessions, to local connections.
+- On a computer shared with other users, mounting `/proc` with
+  `hidepid=invisible` hides your processes, and with them the path of a
+  dropped file, from those users. This needs root and is your choice; some
+  system services expect to see every process, so check your distribution's
+  notes first.
+
+## Upgrading from Hearthside
+
+The move from the former name is done once, by `scripts/install.sh` only; the
+widget never does it. It copies no data:
+
+- `~/.local/share/hearthside` (the encrypted folder, its key slots and any
+  usage history) and `~/.config/hearthside` are renamed in place to their
+  `hearthwire` names, and never merged: when both names hold data the installer
+  stops. `~/.config/hearthside.notifyrc` is renamed too; if
+  `~/.config/hearthwire.notifyrc` already exists it is kept and the old file is
+  dropped.
+- The Antigravity token cache in `~/.cache/hearthside` is deleted, not moved.
+- The KDE Wallet key goes pipe to pipe between KDE's own programs, from wallet
+  folder `Hearthside` to `Hearthwire`; it never passes through Hearthwire,
+  process arguments, the environment, logs or a file. While it moves, both
+  folders hold it. The old entry is removed only after the new one has opened
+  the encrypted folder in a real unlock; if that fails, the new copy is removed
+  and the old one stays. The empty `Hearthside` wallet folder stays until you
+  delete it in KWalletManager.
+
+One new item appears on disk, created by this move:
+`~/.config/plasma-org.kde.plasma.desktop-appletsrc.hearthside-backup`, a copy
+of Plasma's panel layout as it was before the widgets got their new id. It
+holds what that file holds, including custom chat addresses in plain text, but
+with mode `0600` so only you can read it. It is written once, and only if a
+widget with the old id was found. It is removed automatically on the next
+complete install that finds the move finished and a widget using the new id. A
+rollback (`scripts/install.sh --rollback-hearthwire`) leaves it in place, or
+writes one if there was none.
+
+While the move runs the helper also holds the old name's lock file,
+`/run/user/<uid>/hearthside/vault.lock`, which is in memory and holds no data.
