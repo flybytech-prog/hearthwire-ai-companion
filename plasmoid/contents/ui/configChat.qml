@@ -89,6 +89,8 @@ KCM.SimpleKCM {
     property string cfg_panelRingDefault: "auto"
     property string cfg_middleClickOpens: "refresh"
     property string cfg_middleClickOpensDefault: "refresh"
+    property bool cfg_usageHistoryEnabled: false
+    property bool cfg_usageHistoryEnabledDefault: false
 
     // Page-local only; the advanced section always starts collapsed.
     property bool showAdvanced: false

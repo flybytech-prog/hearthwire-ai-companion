@@ -7,6 +7,7 @@ import org.kde.plasma.plasmoid
 import org.kde.plasma.plasma5support as Plasma5Support
 import "ChatStorage.js" as ChatStorage
 import "ChatSites.js" as ChatSites
+import "UsageHistory.js" as UsageHistory
 import "SettingsLogic.js" as SettingsLogic
 import "ProviderCatalog.js" as Catalog
 
@@ -92,6 +93,8 @@ KCM.SimpleKCM {
     property string cfg_panelRingDefault: "auto"
     property string cfg_middleClickOpens: "refresh"
     property string cfg_middleClickOpensDefault: "refresh"
+    property bool cfg_usageHistoryEnabled: false
+    property bool cfg_usageHistoryEnabledDefault: false
 
     // Page-local only; the folder actions always start collapsed.
     property bool showFolderActions: false
@@ -267,6 +270,36 @@ KCM.SimpleKCM {
         page.runVault("status")
     }
 
+    // Delete usage history: "", busy, ok or an error code; the text is
+    // fixed, the helper's own text is never shown.
+    property string historyClearState: ""
+    property string historyClearName: ""
+    property int historyClearRun: 0
+
+    function clearHistory() {
+        if (page.historyClearState === "busy")
+            return
+        page.historyClearRun = ChatStorage.nextRun(page.historyClearRun)
+        var command = UsageHistory.historyCommand("clear", page.historyClearRun)
+        page.historyClearState = "busy"
+        page.historyClearName = command
+        historyClearSource.connectSource(command)
+    }
+
+    function historyClearText(state) {
+        switch (state) {
+        case "":
+        case "busy":
+            return ""
+        case "ok":
+            return i18n("Usage history deleted.")
+        case "legacy-data":
+            return i18n("Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
+        default:
+            return i18n("Couldn't delete the usage history. Try again in a moment.")
+        }
+    }
+
     function vaultText(code) {
         switch (code) {
         case "":
@@ -331,6 +364,7 @@ KCM.SimpleKCM {
         page.savedSignInMode = page.signInMode
         page.syncSignInChoice()
         page.vaultRun = ChatStorage.firstRun(Date.now(), Math.random())
+        page.historyClearRun = ChatStorage.firstRun(Date.now(), Math.random())
         page.runVault("status")
     }
 
@@ -355,6 +389,20 @@ KCM.SimpleKCM {
             if (source !== page.vaultSourceName)
                 return
             page.finishVault(page.vaultOp, ChatStorage.replyFor(data["exit code"], data["stdout"]))
+        }
+    }
+
+    Plasma5Support.DataSource {
+        id: historyClearSource
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            historyClearSource.disconnectSource(source)
+            if (source !== page.historyClearName)
+                return
+            page.historyClearName = ""
+            var reply = UsageHistory.parseReply("clear", data["exit code"], data["stdout"], Catalog.providers)
+            page.historyClearState = reply.ok ? "ok" : reply.error
         }
     }
 
@@ -554,6 +602,45 @@ KCM.SimpleKCM {
         Kirigami.Separator {
             Kirigami.FormData.isSection: true
             Kirigami.FormData.label: i18n("Privacy")
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Usage history:")
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.CheckBox {
+                objectName: "usageHistoryChoice"
+                text: i18n("Keep 7 days of usage for the Usage tab's graphs")
+                checked: page.cfg_usageHistoryEnabled
+                onToggled: page.cfg_usageHistoryEnabled = checked
+            }
+        }
+        QQC2.Label {
+            objectName: "usageHistoryExplanation"
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            opacity: 0.72
+            text: i18n("Off by default. When on, the percent used of each reading is saved once per hour for 7 days, only on this computer, in the hearthwire/usage-history folder of your data folder (usually ~/.local/share). No names, plans, amounts or accounts are saved. Turning it off and applying deletes it.")
+        }
+        RowLayout {
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.Button {
+                objectName: "usageHistoryDelete"
+                text: i18n("Delete usage history")
+                icon.name: "edit-delete"
+                enabled: page.historyClearState !== "busy"
+                onClicked: page.clearHistory()
+            }
+            QQC2.Label {
+                objectName: "usageHistoryStatus"
+                Layout.fillWidth: true
+                visible: text !== ""
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                text: page.historyClearText(page.historyClearState)
+            }
         }
 
         RowLayout {

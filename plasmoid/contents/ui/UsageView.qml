@@ -6,6 +6,7 @@ import org.kde.plasma.extras as PlasmaExtras
 import org.kde.kirigami as Kirigami
 import "SnapshotLogic.js" as SnapshotLogic
 import "UsageLogic.js" as UsageLogic
+import "UsageHistory.js" as UsageHistory
 import "ProviderCatalog.js" as Catalog
 import "ProviderAccent.js" as ProviderAccent
 
@@ -76,6 +77,18 @@ ColumnLayout {
         opacity: 0.6
         font: Kirigami.Theme.smallFont
         elide: Text.ElideRight
+    }
+
+    // History can't be saved yet; a fixed message, never the helper's text.
+    PlasmaComponents.Label {
+        objectName: "usageHistoryNotice"
+        Layout.fillWidth: true
+        visible: text !== ""
+        textFormat: Text.PlainText
+        text: root.historyNotice
+        wrapMode: Text.Wrap
+        opacity: 0.75
+        font: Kirigami.Theme.smallFont
     }
 
     PlasmaExtras.PlaceholderMessage {
@@ -378,6 +391,51 @@ ColumnLayout {
                                                 NumberAnimation {
                                                     duration: 250
                                                     easing.type: Easing.OutCubic
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Seven days of this reading (opt-in, see main.qml).
+                                    // Decorative; visible follows the points only: an
+                                    // invisible item in a layout never gets a width.
+                                    Canvas {
+                                        id: sparkline
+                                        objectName: "usageSparkline"
+                                        readonly property real lineWidth: Math.round(Kirigami.Units.smallSpacing / 2)
+                                        readonly property var points: root.historyPoints(
+                                            providerSection.modelData.provider_id, quotaCard.modelData.kind)
+                                        readonly property var segments: UsageHistory.sparkSegments(
+                                            sparkline.points, root.historyNow, root.usageMode,
+                                            sparkline.width, sparkline.height, sparkline.lineWidth)
+                                        readonly property var segmentColors: sparkline.segments.map(function (segment) {
+                                            return root.barColor(segment.used)
+                                        })
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: Kirigami.Units.gridUnit
+                                        visible: sparkline.points.length > 0
+                                        Accessible.ignored: true
+                                        onSegmentColorsChanged: sparkline.requestPaint()
+                                        onAvailableChanged: sparkline.requestPaint()
+                                        onPaint: {
+                                            var context = sparkline.getContext("2d")
+                                            if (!context)
+                                                return
+                                            context.reset()
+                                            context.lineWidth = sparkline.lineWidth
+                                            context.lineCap = "round"
+                                            for (var index = 0; index < sparkline.segments.length; index++) {
+                                                var segment = sparkline.segments[index]
+                                                context.beginPath()
+                                                if (segment.dot) {
+                                                    context.fillStyle = sparkline.segmentColors[index]
+                                                    context.arc(segment.x1, segment.y1, sparkline.lineWidth, 0, Math.PI * 2)
+                                                    context.fill()
+                                                } else {
+                                                    context.strokeStyle = sparkline.segmentColors[index]
+                                                    context.moveTo(segment.x1, segment.y1)
+                                                    context.lineTo(segment.x2, segment.y2)
+                                                    context.stroke()
                                                 }
                                             }
                                         }

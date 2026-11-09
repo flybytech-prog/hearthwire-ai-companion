@@ -57,7 +57,11 @@ TestCase {
         function providerIconSource(providerId) { return "" }
         function displayedPercent(value) { return value }
         function valueColor(value) { return "black" }
-        function barColor(value) { return "black" }
+        function barColor(value) { return value >= 50 ? "#ff0000" : "black" }
+        property string historyNotice: ""
+        property double historyNow: 0
+        property var historyData: ({})
+        function historyPoints(providerId, metricId) { return historyData[providerId + "." + metricId] || [] }
 
         UsageView {
             id: usage
@@ -503,5 +507,131 @@ TestCase {
         compare(marked.length, 1)
         compare(marked[0].textFormat, Text.PlainText)
         compare(marked[0].text, testCase.marker)
+    }
+
+    // --- Sparkline ----------------------------------------------------------
+
+    readonly property int historyHour: 1700000000 - 1700000000 % 3600
+
+    function historySnapshot() {
+        return {
+            installed_provider_ids: ["claude"],
+            providers: [{provider_id: "claude", display_name: "Claude", status: "ok",
+                         windows: [{kind: "weekly", caption: "Weekly", used_percent: 40, resets_at: null}]}]
+        }
+    }
+
+    function sparklines() {
+        var items = []
+        collect(usage, items)
+        return items.filter(function (item) { return item.objectName === "usageSparkline" })
+    }
+
+    function showSparkline(points) {
+        root.usageCompact = false
+        root.historyNow = historyHour
+        root.historyData = {"claude.weekly": points}
+        root.snapshot = historySnapshot()
+        wait(20)
+        var found = sparklines()
+        compare(found.length, 1, "one per reading card")
+        return found[0]
+    }
+
+    function cleanup() {
+        root.usageCompact = false
+        root.usageMode = "used"
+        root.historyData = ({})
+        root.historyNotice = ""
+    }
+
+    function test_sparklineHiddenWithoutPoints() {
+        var spark = showSparkline([])
+        compare(spark.visible, false)
+        compare(spark.segments, [])
+    }
+
+    function test_sparklineOnePoint() {
+        var spark = showSparkline([[historyHour, 30]])
+        compare(spark.visible, true)
+        tryVerify(function () { return spark.width > 0 }, 5000, "laid out")
+        tryCompare(spark.segments, "length", 1)
+        compare(spark.segments[0].dot, true)
+    }
+
+    function test_sparklineIsDecorative() {
+        var spark = showSparkline([[historyHour, 30]])
+        compare(spark.Accessible.ignored, true)
+        compare(spark.text, undefined, "no text")
+        compare(spark.children.length, 0, "no labels inside")
+    }
+
+    function test_sparklineGap() {
+        var spark = showSparkline([[historyHour - 3 * 3600, 30], [historyHour - 2 * 3600, 35], [historyHour, 40]])
+        tryCompare(spark.segments, "length", 2)
+        compare(spark.segments[0].dot, false)
+        compare(spark.segments[1].dot, true)
+    }
+
+    // The strokes really draw, in the level color barColor gives.
+    function test_sparklinePaintsTheLevelColor() {
+        var spark = showSparkline([[historyHour - 3600, 80], [historyHour, 80]])
+        tryCompare(spark.segments, "length", 1)
+        compare(spark.segmentColors.length, 1)
+        verify(Qt.colorEqual(spark.segmentColors[0], "#ff0000"), "barColor of percent used")
+        var segment = spark.segments[0]
+        var x = Math.round((segment.x1 + segment.x2) / 2)
+        var y = Math.floor((segment.y1 + segment.y2) / 2)
+        tryVerify(function () {
+            var data = spark.getContext("2d").getImageData(x, y, 1, 1).data
+            return data[0] === 255 && data[1] === 0 && data[3] > 128
+        }, 5000, "a red pixel on the stroke")
+    }
+
+    function strokePixel(spark) {
+        var segment = spark.segments[0]
+        return {x: Math.round((segment.x1 + segment.x2) / 2), y: Math.floor((segment.y1 + segment.y2) / 2)}
+    }
+
+    function alphaAt(spark, spot) {
+        return spark.getContext("2d").getImageData(spot.x, spot.y, 1, 1).data[3]
+    }
+
+    // The old stroke goes and the new one is drawn, not only computed.
+    function test_sparklineRepaintsWhenItsPointsChange() {
+        var spark = showSparkline([[historyHour - 3600, 80], [historyHour, 80]])
+        tryCompare(spark.segments, "length", 1)
+        var before = strokePixel(spark)
+        tryVerify(function () { return alphaAt(spark, before) > 128 }, 5000, "first stroke drawn")
+        root.historyData = {"claude.weekly": [[historyHour - 3600, 20], [historyHour, 20]]}
+        tryVerify(function () { return strokePixel(spark).y !== before.y }, 5000, "new geometry")
+        var after = strokePixel(spark)
+        tryVerify(function () { return alphaAt(spark, before) === 0 && alphaAt(spark, after) > 128 }, 5000, "repainted")
+    }
+
+    // Left drains, Used fills, like the bars.
+    function test_sparklineFollowsLeftAndUsed() {
+        var spark = showSparkline([[historyHour, 25]])
+        tryCompare(spark.segments, "length", 1)
+        var used = spark.segments[0].y1
+        root.usageMode = "remaining"
+        tryVerify(function () { return spark.segments[0].y1 < used }, 5000, "75% left sits higher than 25% used")
+    }
+
+    function test_sparklineAbsentInCompact() {
+        showSparkline([[historyHour, 30]])
+        root.usageCompact = true
+        wait(20)
+        compare(sparklines().length, 0)
+    }
+
+    function test_historyNoticeIsPlainTextAndHiddenWhenEmpty() {
+        var items = []
+        collect(usage, items)
+        var label = items.filter(function (item) { return item.objectName === "usageHistoryNotice" })[0]
+        compare(label.visible, false)
+        root.historyNotice = testCase.marker
+        tryCompare(label, "visible", true)
+        compare(label.textFormat, Text.PlainText)
     }
 }

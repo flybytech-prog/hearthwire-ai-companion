@@ -7,10 +7,13 @@ QtObject {
 
     property string engine
     property var connectedSources: []
+    // Every command this source was asked to run, for the wiring tests.
+    property var commands: []
 
     signal newData(string source, var data)
 
     function connectSource(source) {
+        commands = commands.concat([source])
         connectedSources = connectedSources.concat([source])
     }
 

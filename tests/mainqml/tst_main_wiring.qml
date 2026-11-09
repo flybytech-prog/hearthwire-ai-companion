@@ -83,7 +83,7 @@ TestCase {
             else if (typeof object.createObject === "function")
                 notifications.push(object)
         }
-        compare(sources.length, 4, "usage, library, dropped and storage sources")
+        compare(sources.length, 5, "usage, history, library, dropped and storage sources")
         sources.forEach(function (source) { compare(source.isStub, true, "a stub DataSource") })
         compare(notifications.length, 1, "the alert notification's Component")
         var notification = notifications[0].createObject(main, {})
@@ -689,5 +689,399 @@ TestCase {
         page.cfg_middleClickOpens = "chat"
         compare(choiceBox(page, "middleClickChoice").currentValue, "refresh")
         compare(page.cfg_middleClickOpens, "chat", "untouched until a pick")
+    }
+
+    // --- Usage history ------------------------------------------------------
+
+    // A settings page keeps its sources deeper down than main.qml does.
+    function sourcesOf(owner, found, seen) {
+        found = found || []
+        seen = seen || []
+        if (!owner || seen.indexOf(owner) >= 0)
+            return found
+        seen.push(owner)
+        if (typeof owner.connectSource === "function")
+            found.push(owner)
+        var lists = [owner.data, owner.children, owner.contentItem ? [owner.contentItem] : []]
+        lists.forEach(function (list) {
+            for (var index = 0; list && index < list.length; index++)
+                sourcesOf(list[index], found, seen)
+        })
+        return found
+    }
+
+    function everyCommand(owner) {
+        var found = []
+        sourcesOf(owner).forEach(function (source) { found = found.concat(source.commands) })
+        return found
+    }
+
+    // Every command the owner's sources were asked to run; none ever starts.
+    function historyCommands(owner) {
+        wait(0)
+        var found = []
+        sourcesOf(owner).forEach(function (source) {
+            source.commands.forEach(function (command) {
+                if (command.indexOf("--usage-history") >= 0)
+                    found.push(command)
+            })
+        })
+        return found
+    }
+
+    function ops(commands) {
+        return commands.map(function (command) {
+            return command.split("--usage-history ")[1].split(" ")[0]
+        })
+    }
+
+    // The helper answering its running step.
+    function answer(owner, reply, exitCode) {
+        wait(0)
+        var running = null
+        sourcesOf(owner).forEach(function (source) {
+            source.connectedSources.forEach(function (command) {
+                if (command.indexOf("--usage-history") >= 0) {
+                    running = {source: source, command: command}
+                }
+            })
+        })
+        verify(running, "a history step is running")
+        running.source.newData(running.command, {"exit code": exitCode === undefined ? 0 : exitCode, "stdout": reply})
+        wait(0)
+    }
+
+    function nowSeconds() {
+        var seconds = Math.floor(Date.now() / 1000)
+        return seconds - seconds % 3600
+    }
+
+    function historyReply(points) {
+        return JSON.stringify({ok: true, history_version: 1, bucket_seconds: 3600, now: nowSeconds(),
+                               series: [{provider_id: "claude", metric_id: "weekly", points: points}]})
+    }
+
+    function goodSnapshot(main, providers) {
+        main.applySnapshot({schema_version: 2, generated_at: "2026-11-09T12:01:00Z", catalog: Catalog.providers,
+                            installed_provider_ids: ["claude"], providers: providers})
+    }
+
+    function okClaude() {
+        return [{provider_id: "claude", status: "ok", windows: [{kind: "weekly", used_percent: 50, resets_at: null}]}]
+    }
+
+    readonly property string firstSample: "--sample claude.session=97,claude.weekly=70,claude.sonnet=40"
+
+    function test_historyOffByDefaultRunsNothing() {
+        var main = loadMain({})
+        compare(Plasmoid.configuration.usageHistoryEnabled, false)
+        compare(main.usageHistoryEnabled, false)
+        goodSnapshot(main, okClaude())
+        wait(20)
+        compare(historyCommands(main), [])
+        compare(main.historyPoints("claude", "weekly"), [])
+    }
+
+    function test_historyOnReadsOnceAndRecords() {
+        var main = loadMain({usageHistoryEnabled: true})
+        var commands = historyCommands(main)
+        compare(ops(commands), ["read"], "one at a time")
+        answer(main, historyReply([[nowSeconds(), 70]]))
+        commands = historyCommands(main)
+        compare(ops(commands), ["read", "record"])
+        verify(commands[1].indexOf(firstSample) > 0, commands[1])
+        verify(commands[1].indexOf("env HEARTHWIRE_RUN=") === 0, "the fixed helper command")
+        verify(commands[1].indexOf("python3 -P -m hearthwire --usage-history record") > 0, commands[1])
+        answer(main, historyReply([[nowSeconds(), 70]]))
+        compare(ops(historyCommands(main)), ["read", "record"], "reads only once")
+    }
+
+    function test_historyReplyFeedsTheSeries() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([[nowSeconds(), 12]]))
+        compare(main.historyPoints("claude", "weekly"), [[nowSeconds(), 12]])
+        compare(main.historyNow, nowSeconds())
+    }
+
+    function test_historyNothingRecordedForStaleOrError() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([]))
+        answer(main, historyReply([]))
+        compare(ops(historyCommands(main)), ["read", "record"])
+        main.historyLastRecord = 0
+        goodSnapshot(main, [{provider_id: "claude", status: "error", failure_kind: "transient"}])
+        compare(main.snapshot.providers[0].status, "stale", "the last good reading stays shown")
+        wait(20)
+        compare(ops(historyCommands(main)), ["read", "record"], "stale records nothing")
+        goodSnapshot(main, [{provider_id: "claude", status: "error", failure_kind: "auth"}])
+        wait(20)
+        compare(ops(historyCommands(main)), ["read", "record"], "error records nothing")
+    }
+
+    function test_historyMinGap() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([]))
+        answer(main, historyReply([]))
+        goodSnapshot(main, okClaude())
+        wait(20)
+        compare(ops(historyCommands(main)), ["read", "record"], "inside the gap")
+        main.historyLastRecord = Date.now() - 890000
+        goodSnapshot(main, okClaude())
+        wait(20)
+        compare(ops(historyCommands(main)), ["read", "record"], "still inside the gap")
+        main.historyLastRecord = Date.now() - 900000
+        goodSnapshot(main, okClaude())
+        compare(ops(historyCommands(main)), ["read", "record", "record"], "after the gap")
+    }
+
+    function test_historyOffClearsAndHidesAtOnce() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([[nowSeconds(), 12]]))
+        answer(main, historyReply([[nowSeconds(), 12]]))
+        compare(main.historyPoints("claude", "weekly").length, 1)
+        Plasmoid.configuration.usageHistoryEnabled = false
+        compare(main.historyPoints("claude", "weekly"), [], "gone at once")
+        compare(main.historySeries, {})
+        compare(ops(historyCommands(main)), ["read", "record", "clear"])
+        answer(main, JSON.stringify({ok: true}))
+        goodSnapshot(main, okClaude())
+        wait(20)
+        compare(ops(historyCommands(main)), ["read", "record", "clear"], "nothing after off")
+    }
+
+    // Back on: a new read, and the next good snapshot records at once.
+    function test_historyOnAgainStartsOver() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([]))
+        answer(main, historyReply([]))
+        Plasmoid.configuration.usageHistoryEnabled = false
+        answer(main, JSON.stringify({ok: true}))
+        Plasmoid.configuration.usageHistoryEnabled = true
+        compare(ops(historyCommands(main)), ["read", "record", "clear", "read"])
+        answer(main, historyReply([]))
+        goodSnapshot(main, okClaude())
+        compare(ops(historyCommands(main)), ["read", "record", "clear", "read", "record"])
+    }
+
+    // A record still running when history goes off can't land after the clear.
+    function test_historyClearWaitsForTheRunningStep() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([]))
+        compare(ops(historyCommands(main)), ["read", "record"])
+        Plasmoid.configuration.usageHistoryEnabled = false
+        wait(20)
+        compare(ops(historyCommands(main)), ["read", "record"], "the clear waits")
+        answer(main, historyReply([[nowSeconds(), 12]]))
+        compare(main.historyPoints("claude", "weekly"), [], "the late reply is not shown")
+        compare(main.historySeries, {})
+        compare(ops(historyCommands(main)), ["read", "record", "clear"])
+    }
+
+    function test_historyQueuedStepsDroppedWhenOff() {
+        var main = loadMain({usageHistoryEnabled: true})
+        // The read runs; the first snapshot's record waits behind it.
+        compare(ops(historyCommands(main)), ["read"])
+        compare(main.historyQueue.length, 1)
+        Plasmoid.configuration.usageHistoryEnabled = false
+        answer(main, historyReply([]))
+        compare(ops(historyCommands(main)), ["read", "clear"], "the queued record is dropped")
+    }
+
+    function test_historyNotReadWithoutTheUsageTab() {
+        var main = loadMain({usageHistoryEnabled: true, showUsageTab: false})
+        compare(main.usageShown, false)
+        goodSnapshot(main, okClaude())
+        wait(20)
+        compare(historyCommands(main), [])
+    }
+
+    function test_historyReadsWhenTheUsageTabComesBack() {
+        var main = loadMain({usageHistoryEnabled: true, showUsageTab: false})
+        compare(historyCommands(main), [])
+        Plasmoid.configuration.showUsageTab = true
+        compare(main.usageShown, true)
+        compare(ops(historyCommands(main)), ["read"])
+    }
+
+    // Only this run's results: a provider left out of it keeps showing "ok"
+    // from an earlier run, and its old reading must not be recorded as new.
+    function test_historyRecordsOnlyThisRunsResults() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([]))
+        answer(main, historyReply([]))
+        main.historyLastRecord = 0
+        main.applySnapshot({schema_version: 2, generated_at: "2026-11-09T12:01:00Z", catalog: Catalog.providers,
+                            installed_provider_ids: ["claude", "codex"],
+                            providers: [{provider_id: "codex", status: "ok",
+                                         windows: [{kind: "weekly", used_percent: 5, resets_at: null}]}]})
+        compare(main.snapshot.providers.length, 2, "Claude is still shown")
+        var commands = historyCommands(main)
+        compare(ops(commands), ["read", "record", "record"])
+        verify(commands[2].indexOf("--sample codex.weekly=5") > 0 && commands[2].indexOf("claude") < 0, commands[2])
+    }
+
+    function test_historyMalformedReplyIsNoHistory() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([[nowSeconds(), 12]]))
+        compare(main.historyPoints("claude", "weekly").length, 1)
+        answer(main, JSON.stringify({ok: true, history_version: 1, bucket_seconds: 3600, now: nowSeconds(),
+                                     series: [{provider_id: "claude", metric_id: "weekly", points: [[nowSeconds(), 900]]}]}))
+        compare(main.historyPoints("claude", "weekly"), [], "never rendered")
+    }
+
+    function test_historyHelperErrorKeepsTheLastGoodLines() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([[nowSeconds(), 12]]))
+        answer(main, JSON.stringify({ok: false, error: "busy"}))
+        compare(main.historyPoints("claude", "weekly").length, 1)
+        compare(main.historyNotice, "", "busy shows nothing")
+    }
+
+    function test_historyLegacyDataShowsTheFixedMessage() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([]))
+        answer(main, JSON.stringify({ok: false, error: "legacy-data"}))
+        compare(main.historyNotice, "Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
+        Plasmoid.configuration.usageHistoryEnabled = false
+        compare(main.historyNotice, "", "cleared with the history")
+    }
+
+    function test_historyGivesUpOnAStepThatNeverAnswers() {
+        var main = loadMain({usageHistoryEnabled: true})
+        compare(ops(historyCommands(main)), ["read"])
+        main.historyStartedAt = Date.now() - 200000
+        main.historyNext()
+        compare(ops(historyCommands(main)), ["read", "record"])
+    }
+
+    function allNamed(item, objectName, found) {
+        found = found || []
+        if (!item || found.indexOf(item) >= 0)
+            return found
+        if (item.objectName === objectName)
+            found.push(item)
+        var kids = item.children || []
+        for (var index = 0; index < kids.length; index++)
+            allNamed(kids[index], objectName, found)
+        if (item.contentItem)
+            allNamed(item.contentItem, objectName, found)
+        return found
+    }
+
+    function sparklineMain(settings) {
+        var main = loadMain(Object.assign({usageHistoryEnabled: true, showChatTab: false,
+                                           providerMetrics: "{}"}, settings))
+        answer(main, historyReply([[nowSeconds() - 3600, 70], [nowSeconds(), 70]]))
+        answer(main, historyReply([[nowSeconds() - 3600, 70], [nowSeconds(), 70]]))
+        var full = createTemporaryObject(main.fullRepresentation, main, {width: 600, height: 800})
+        verify(full, "the real popup")
+        return {main: main, full: full}
+    }
+
+    // The real popup: a sparkline for the reading with history, colored by
+    // the level of percent used, gone at once when history goes off.
+    function test_sparklineInTheRealPopup() {
+        var shown = sparklineMain({usageWarnColor: warningPick})
+        var sparks = []
+        tryVerify(function () {
+            sparks = allNamed(shown.full, "usageSparkline").filter(function (item) { return item.visible })
+            return sparks.length === 1
+        }, 5000, "one reading has history")
+        tryCompare(sparks[0].segments, "length", 1)
+        sameColor(sparks[0].segmentColors[0], warningPick, "70% used is the warning level")
+        Plasmoid.configuration.usageHistoryEnabled = false
+        compare(sparks[0].visible, false, "gone at once")
+    }
+
+    function test_sparklineAbsentInCompactInTheRealPopup() {
+        var shown = sparklineMain({usageCompact: true})
+        wait(50)
+        verify(allNamed(shown.full, "usageHistoryNotice").length === 1, "the Usage tab is built")
+        compare(allNamed(shown.full, "usageSparkline").length, 0)
+    }
+
+    // --- Usage history settings ---------------------------------------------
+
+    function generalPage() {
+        var page = load(testCase.generalPageFile, {})
+        // Its first vault status check is not part of these tests.
+        wait(0)
+        return page
+    }
+
+    function generalPart(page, objectName) {
+        var part = null
+        tryVerify(function () {
+            part = namedInPage(page, objectName)
+            return part !== null
+        }, 5000, objectName + " exists")
+        return part
+    }
+
+    function test_settingsHistoryBoxIsOffAndRunsNothing() {
+        var page = generalPage()
+        compare(page.cfg_usageHistoryEnabled, false)
+        compare(generalPart(page, "usageHistoryChoice").checked, false)
+        compare(sourcesOf(page).length, 2, "the vault's and the delete button's")
+        verify(everyCommand(page).length > 0, "its other source is really seen")
+        compare(historyCommands(page), [])
+    }
+
+    function test_settingsHistoryBoxSaves() {
+        var page = generalPage()
+        var box = generalPart(page, "usageHistoryChoice")
+        box.toggle()
+        box.toggled()
+        compare(page.cfg_usageHistoryEnabled, true)
+        compare(historyCommands(page), [], "ticking runs nothing by itself")
+    }
+
+    function test_settingsExplanationIsPlainAndSaysWhere() {
+        var label = generalPart(generalPage(), "usageHistoryExplanation")
+        compare(label.textFormat, Text.PlainText)
+        verify(label.text.indexOf("usage-history") >= 0, "where")
+        verify(label.text.indexOf("percent used") >= 0, "what")
+    }
+
+    function pressDelete(page) {
+        var button = generalPart(page, "usageHistoryDelete")
+        verify(button.enabled)
+        button.clicked()
+        compare(ops(historyCommands(page)), ["clear"])
+        compare(button.enabled, false, "busy while it runs")
+        return button
+    }
+
+    function test_settingsDeleteSuccess() {
+        var page = generalPage()
+        var button = pressDelete(page)
+        var status = generalPart(page, "usageHistoryStatus")
+        answer(page, JSON.stringify({ok: true}))
+        compare(status.text, "Usage history deleted.")
+        compare(status.textFormat, Text.PlainText)
+        compare(button.enabled, true)
+    }
+
+    function test_settingsDeleteFailureIsAFixedMessage() {
+        var page = generalPage()
+        pressDelete(page)
+        answer(page, JSON.stringify({ok: false, error: "not-owned"}))
+        compare(generalPart(page, "usageHistoryStatus").text, "Couldn't delete the usage history. Try again in a moment.")
+    }
+
+    function test_settingsDeleteNeverShowsHelperText() {
+        var page = generalPage()
+        pressDelete(page)
+        answer(page, "/home/soul/.local/share boom <b>secret</b>", 1)
+        var text = generalPart(page, "usageHistoryStatus").text
+        compare(text, "Couldn't delete the usage history. Try again in a moment.")
+    }
+
+    function test_settingsDeleteLegacyData() {
+        var page = generalPage()
+        pressDelete(page)
+        answer(page, JSON.stringify({ok: false, error: "legacy-data"}))
+        compare(generalPart(page, "usageHistoryStatus").text,
+                "Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
     }
 }

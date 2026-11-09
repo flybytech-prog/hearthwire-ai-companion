@@ -17,6 +17,7 @@ import "SettingsLogic.js" as SettingsLogic
 import "AlertLogic.js" as AlertLogic
 import "TooltipLogic.js" as TooltipLogic
 import "UsageLogic.js" as UsageLogic
+import "UsageHistory.js" as UsageHistory
 
 PlasmoidItem {
     id: root
@@ -259,6 +260,25 @@ PlasmoidItem {
         return UsageLogic.defaultNormalColor(background.r, background.g, background.b)
     }
 
+    // Settings → General → Privacy: the opt-in usage history. In memory only
+    // what the helper last replied, and nothing while it is off.
+    readonly property bool usageHistoryEnabled: Plasmoid.configuration.usageHistoryEnabled === true
+    // {"provider.metric": [[t, used], ...]}
+    property var historySeries: ({})
+    property double historyNow: 0
+    property double historyLastRecord: 0
+    property bool historyReadDone: false
+    // The last reply's error code; only legacy-data is shown.
+    property string historyError: ""
+    readonly property string historyNotice: root.historyError === "legacy-data"
+        ? i18n("Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.") : ""
+    // Helper steps, one at a time: a clear never overtakes a running record.
+    property var historyQueue: []
+    property string historyOp: ""
+    property string historySourceName: ""
+    property double historyStartedAt: 0
+    property int historyRun: 0
+
     // AI Provider Settings → Usage ring. Same reading rules and colors as
     // the hover popup and the bars.
     readonly property var ringChoice: UsageLogic.parsePanelRing(
@@ -368,6 +388,101 @@ PlasmoidItem {
             return root.warnUsageColor
         return Kirigami.Theme.textColor
     }
+
+    // A reading's points for its sparkline; [] without history.
+    function historyPoints(providerId, metricId) {
+        return root.historySeries[providerId + "." + metricId] || []
+    }
+
+    function historyRequest(op, sample) {
+        root.historyQueue = root.historyQueue.concat([{ op: op, sample: sample || "" }])
+        Qt.callLater(root.historyNext)
+    }
+
+    function historyNext() {
+        if (root.historyQueue.length === 0
+                || RefreshGate.decide(root.historyOp !== "", root.historyStartedAt, Date.now()) === "queue")
+            return
+        // A step that never reported back is given up on.
+        if (root.historySourceName !== "")
+            historySource.disconnectSource(root.historySourceName)
+        var job = root.historyQueue[0]
+        root.historyQueue = root.historyQueue.slice(1)
+        root.historyOp = ""
+        root.historySourceName = ""
+        root.historyRun = ChatStorage.nextRun(root.historyRun)
+        var command = UsageHistory.historyCommand(job.op, root.historyRun, job.sample)
+        if (command === "") {
+            Qt.callLater(root.historyNext)
+            return
+        }
+        root.historyOp = job.op
+        root.historyStartedAt = Date.now()
+        root.historySourceName = command
+        historySource.connectSource(command)
+    }
+
+    function historyFinish(op, exitCode, stdout) {
+        root.historyOp = ""
+        root.historySourceName = ""
+        // A clear's reply changes nothing shown, and history turned off
+        // meanwhile stays off.
+        if (op !== "clear" && root.usageHistoryEnabled) {
+            var reply = UsageHistory.parseReply(op, exitCode, stdout, Catalog.providers)
+            if (reply.ok) {
+                root.historySeries = reply.series
+                root.historyNow = reply.now
+                root.historyError = ""
+            } else {
+                root.historyError = reply.error
+                if (reply.error === "invalid")
+                    root.historySeries = ({})
+            }
+        }
+        Qt.callLater(root.historyNext)
+    }
+
+    // The first read of this session, once history is on and usage is shown.
+    function historyStart() {
+        if (root.usageHistoryEnabled && root.usageShown && !root.historyReadDone) {
+            root.historyReadDone = true
+            root.historyRequest("read")
+        }
+    }
+
+    // After a good snapshot: this run's ok readings, at most once per gap.
+    function historyRecord(results) {
+        if (!root.usageHistoryEnabled || !root.usageShown)
+            return
+        var now = Date.now()
+        if (!UsageHistory.recordDue(root.historyLastRecord, now))
+            return
+        var tracked = (Array.isArray(results) ? results : []).filter(function (result) {
+            return !!result && root.trackedProviders.indexOf(result.provider_id) >= 0
+        })
+        var sample = UsageHistory.sampleArg(tracked, Catalog.providers)
+        if (sample === "")
+            return
+        root.historyLastRecord = now
+        root.historyRequest("record", sample)
+    }
+
+    // Off: everything shown goes at once, queued steps are dropped, and the
+    // helper deletes the file after any step still running.
+    onUsageHistoryEnabledChanged: {
+        if (root.usageHistoryEnabled) {
+            root.historyStart()
+            return
+        }
+        root.historySeries = ({})
+        root.historyNow = 0
+        root.historyError = ""
+        root.historyLastRecord = 0
+        root.historyReadDone = false
+        root.historyQueue = []
+        root.historyRequest("clear")
+    }
+    onUsageShownChanged: root.historyStart()
 
     function providerIconSource(providerId) {
         var descriptor = Catalog.byId(providerId)
@@ -480,6 +595,7 @@ PlasmoidItem {
         root.hasData = true
         root.lastError = ""
         root.lastUpdate = new Date()
+        root.historyRecord(payload.providers)
     }
 
     function rebuildVisibleProviders() {
@@ -1132,6 +1248,19 @@ PlasmoidItem {
         }
     }
 
+    // Usage history steps; only stdout's checked fields are used.
+    Plasma5Support.DataSource {
+        id: historySource
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            historySource.disconnectSource(source)
+            if (source !== root.historySourceName)
+                return
+            root.historyFinish(root.historyOp, data["exit code"], data["stdout"])
+        }
+    }
+
     // Prompt library jobs; only stdout's checked fields are used.
     Plasma5Support.DataSource {
         id: librarySource
@@ -1271,6 +1400,8 @@ PlasmoidItem {
         root.chatOpRun = ChatStorage.firstRun(Date.now(), Math.random())
         root.libraryRun = ChatStorage.firstRun(Date.now(), Math.random())
         root.droppedRun = ChatStorage.firstRun(Date.now(), Math.random())
+        root.historyRun = ChatStorage.firstRun(Date.now(), Math.random())
+        root.historyStart()
         root.chatZoom = SettingsLogic.parseZoomMap(Plasmoid.configuration.chatSiteZoom, root.chatZoomIds)
         // Plasma start, Unlock with KDE Wallet: open the folder silently when
         // the wallet is already open (the helper never prompts here). The

@@ -91,6 +91,8 @@ KCM.ScrollViewKCM {
     property string cfg_panelRingDefault: "auto"
     property string cfg_middleClickOpens: "refresh"
     property string cfg_middleClickOpensDefault: "refresh"
+    property bool cfg_usageHistoryEnabled: false
+    property bool cfg_usageHistoryEnabledDefault: false
 
     property var catalogModel: Catalog.providers
     // Off, Automatic, then every reading in the Usage tab's order.
