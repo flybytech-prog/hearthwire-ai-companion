@@ -1080,13 +1080,41 @@ def test_a_symlinked_backup_does_not_block_a_finished_move(home, capsys, tmp_pat
     assert migrate("status", capsys)["pending"] == []
 
 
-def test_rollback_checks_the_backup_and_appletsrc_before_moving_anything(home, capsys, tmp_path):
+def test_rollback_checks_the_temporary_name_and_appletsrc_before_moving_anything(home, capsys):
     home.old_install()
     full_migration(home, capsys)
-    _replace_with_link(home.backup, _precious(tmp_path) / "file")
+    (home.config / legacy.TEMPORARY_NAME).mkdir()
     before = home.tree()
-    assert migrate("rollback", capsys) == {"ok": False, "error": "symlink", "category": "applets"}
+    assert migrate("rollback", capsys) == {"ok": False, "error": "not-directory", "category": "applets"}
     assert home.tree() == before and home.wallet() == {NEW_KEY: MARKER_KEY}
+
+
+def test_rollback_never_touches_the_backup_path(home, capsys, tmp_path):
+    home.old_install()
+    full_migration(home, capsys)
+    target = _precious(tmp_path) / "file"
+    _replace_with_link(home.backup, target)
+    assert "applets" in migrate("rollback", capsys)["restored"]
+    assert home.backup.is_symlink() and target.read_text() == "keep"
+
+
+def test_rollback_writes_no_backup_so_the_next_move_saves_the_real_layout(home, capsys):
+    """A backup from rollback would hold the new id and pass for the layout before the move."""
+    home.old_install()
+    full_migration(home, capsys)
+    home.backup.unlink()
+    assert "applets" in migrate("rollback", capsys)["restored"]
+    assert not home.backup.exists()
+    assert migrate("run", capsys)["pending"] == ["applets"]
+    assert migrate("applets", capsys)["migrated"] == ["applets"]
+    assert_migrated(home)
+
+
+def test_rollback_keeps_the_backup_the_move_wrote(home, capsys):
+    home.old_install()
+    full_migration(home, capsys)
+    migrate("rollback", capsys)
+    assert home.backup.read_bytes() == APPLETSRC
 
 
 # L2: the new entry stays until the old copy is proven.

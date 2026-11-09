@@ -702,8 +702,8 @@ holds what that file holds, including custom chat addresses in plain text, but
 with mode `0600` so only you can read it. It is written once, and only if a
 widget with the old id was found. It is removed automatically on the next
 complete install that finds the move finished and a widget using the new id. A
-rollback (`scripts/install.sh --rollback-hearthwire`) leaves it in place, or
-writes one if there was none.
+rollback (`scripts/install.sh --rollback-hearthwire`) leaves it in place and
+never writes one.
 
 While the move runs the helper also holds the old name's lock file,
 `/run/user/<uid>/hearthside/vault.lock`, which is in memory and holds no data.

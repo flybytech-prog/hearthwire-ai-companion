@@ -90,7 +90,14 @@ confirm_plasma_stop() {
 migration_error() {
     case "$1" in
         *'"error":"not-locked"'*)
-            echo "Lock the encrypted chat folder first: run PYTHONPATH=\"$project_directory/src\" python3 -P -m hearthwire --vault lock (if the old Hearthside widget still has it open, lock it there), then run this again. $2" >&2 ;;
+            # Each helper locks only its own name's mount; the other one replies ok.
+            # Forward, a run killed during the wallet proof leaves the new name mounted.
+            if [ "$rollback" = true ]; then
+                echo "Lock the encrypted chat folder first: run PYTHONPATH=\"$project_directory/src\" python3 -P -m hearthwire --vault lock, then run this again. $2" >&2
+            else
+                echo "Lock the encrypted chat folder in the old Hearthside widget's Chat tab, or run python3 -P -m hearthside --vault lock; after an interrupted install, run PYTHONPATH=\"$project_directory/src\" python3 -P -m hearthwire --vault lock instead. Then run this again. $2" >&2
+            fi
+            ;;
         *'"error":"busy"'*)
             echo "The encrypted chat folder is in use right now. Try again in a moment. $2" >&2 ;;
         *'"error":"conflict","category":"data"'*)

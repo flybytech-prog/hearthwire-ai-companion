@@ -575,7 +575,7 @@ def test_the_move_runs_in_order_with_plasma_stopped(tmp_path, systemd):
 
 
 @pytest.mark.parametrize(("reply", "message"), [
-    ('{"ok":false,"error":"not-locked"}', "Lock the encrypted chat folder"),
+    ('{"ok":false,"error":"not-locked"}', "Lock the encrypted chat folder in the old Hearthside widget"),
     ('{"ok":false,"error":"busy"}', "in use right now"),
     ('{"ok":false,"error":"conflict","category":"data"}', "hearthwire folder exist in"),
     ('{"ok":false,"error":"conflict","category":"config"}', "/.config; refusing to merge"),
@@ -896,11 +896,25 @@ def test_a_full_move_with_the_wallet_unavailable_gets_the_same_note(tmp_path):
     assert WALLET_NOTE in completed.stdout
 
 
-def test_not_locked_names_the_helper_command_that_can_lock_it(tmp_path):
+def test_a_forward_not_locked_leads_with_the_old_widget(tmp_path):
     flow = Flow(tmp_path)
     flow.reply("status", '{"ok":false,"error":"not-locked"}')
     completed = flow.run("--restart-plasma")
     assert completed.returncode == 1
-    assert f'PYTHONPATH="{flow.project}/src" python3 -P -m hearthwire --vault lock' in completed.stderr
+    # Forward, the mount is usually under the old name, where the new helper would find
+    # nothing and say ok; only an interrupted install leaves the new name mounted.
+    message = completed.stderr
+    assert message.index("old Hearthside widget's Chat tab") < message.index("python3 -P -m hearthside --vault lock") \
+        < message.index("after an interrupted install") \
+        < message.index(f'PYTHONPATH="{flow.project}/src" python3 -P -m hearthwire --vault lock')
     assert "Nothing was changed." in completed.stderr
+
+
+def test_a_rollback_not_locked_names_the_new_helper(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("rollback", '{"ok":false,"error":"not-locked"}')
+    completed = flow.run("--rollback-hearthwire", "--restart-plasma")
+    assert completed.returncode == 1
+    assert f'PYTHONPATH="{flow.project}/src" python3 -P -m hearthwire --vault lock' in completed.stderr
+    assert "-m hearthside --vault lock" not in completed.stderr
 # <<< legacy-migration

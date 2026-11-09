@@ -549,12 +549,14 @@ def _applets_state(config: Optional[int]) -> tuple[bool, bool]:
     return found_old > 0, found_new > 0
 
 
-def _switch_applets(config: Optional[int], old: str, new: str) -> bool:
+def _switch_applets(config: Optional[int], old: str, new: str, *, backup: bool = True) -> bool:
     """Rewrite appletsrc from ``old`` to ``new`` while plasmashell is stopped.
 
-    Backup first, then the rewritten copy is written next to it and renamed
-    over appletsrc (same mode), after checking again that plasmashell is
-    still stopped and appletsrc is still the file that was read.
+    Backup first (the forward move only: the backup means "the layout before
+    the move", which a copy taken by a rollback would not be), then the
+    rewritten copy is written next to it and renamed over appletsrc (same
+    mode), after checking again that plasmashell is still stopped and
+    appletsrc is still the file that was read.
     """
     if config is None:
         return False
@@ -566,7 +568,8 @@ def _switch_applets(config: Optional[int], old: str, new: str) -> bool:
     rewritten, found_old, _ = rewrite_applets(content, old, new)
     if not found_old:
         return False
-    _write_backup(config, content)
+    if backup:
+        _write_backup(config, content)
     _drop_temporary(config)
     try:
         _write_new(config, TEMPORARY_NAME, rewritten, stat.S_IMODE(info.st_mode))
@@ -925,7 +928,7 @@ def rollback(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
                     _entry(bases["config"], LEGACY_NAME + NOTIFYRC_SUFFIX, directory=False)
             with _category("applets"):
                 if _applets_state(bases["config"])[1]:
-                    _check_applets_paths(bases["config"])
+                    _entry(bases["config"], TEMPORARY_NAME, directory=False)
             _refuse_plasma()
             with _category("wallet-entry"):
                 # Either name: an earlier rollback may have moved the data but kept the entry.
@@ -943,7 +946,7 @@ def rollback(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
                 if _move_directory(bases["data"], APP_DIR, LEGACY_NAME):
                     restored.append("data")
             with _category("applets"):
-                if _switch_applets(bases["config"], PLUGIN, LEGACY_PLUGIN):
+                if _switch_applets(bases["config"], PLUGIN, LEGACY_PLUGIN, backup=False):
                     restored.append("applets")
     return {"ok": True, "restored": _ordered(restored), "pending": _ordered(pending)}
 
