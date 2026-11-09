@@ -1,0 +1,3 @@
+module org.kde.plasma.plasmoid
+plugin plasmoidstub
+PlasmoidItem 1.0 PlasmoidItem.qml

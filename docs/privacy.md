@@ -50,7 +50,7 @@ an account, a plan name, a reading or an error from a provider.
 | `providerOrder` | AI Provider Settings → Move up / Move down | The provider order, for example `["codex","claude"]`; empty (the default) is the built-in order |
 | `usageCompact` | AI Provider Settings → Layout: Compact | `true` or `false` (the default) |
 | `usageWarnPercent`, `usageCriticalPercent` | AI Provider Settings → Warning / Critical color from | Percent used in steps of 5: warning 50 to 90 (60 by default), critical 55 to 95 (85 by default); the page shows them as left or used, like General → Display |
-| `usageNormalColor`, `usageWarnColor`, `usageCriticalColor` | AI Provider Settings → the color boxes | A color such as `#e07b1a`, or empty (the default) for the default color; anything else is read as empty |
+| `usageNormalColor`, `usageWarnColor`, `usageCriticalColor` | AI Provider Settings → the color boxes | A color such as `#e07b1a`, or empty (the default) for the default color (an empty Critical box uses a custom Warning color if there is one); anything else is read as empty |
 | `configSchemaVersion` | Written by the widget | The settings format, now `3`; it makes the upgrade step above run once |
 | `tooltipShowsUsage` | AI Provider Settings → Hover popup | `true` (the default) or `false`. (An older `tooltipShowsReset` entry is no longer read.) |
 | `tooltipMetrics` | AI Provider Settings → Hover popup → Readings | The hover popup's own readings, for example `{"claude":["session","weekly"]}`, or empty (the default) for Same as the Usage tab. On the first start after the upgrade that made the reading boxes filter the Usage tab, a saved `providerMetrics` choice moves here (unless this already had one), and `providerMetrics` becomes `{}` |

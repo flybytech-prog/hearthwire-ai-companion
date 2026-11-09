@@ -193,6 +193,50 @@ TestCase {
         root.shownProviders = Qt.binding(function () { return root.snapshot.providers || [] })
     }
 
+    function fillSnapshot(used) {
+        return {
+            installed_provider_ids: ["cursor"],
+            providers: [{
+                provider_id: "cursor",
+                status: "ok",
+                windows: [{ kind: "total_usage", caption: "Month", used_percent: used, resets_at: null }]
+            }]
+        }
+    }
+
+    // Above 0% the fill is wide enough to see; the number stays what it was.
+    function checkFill(name, used, expected) {
+        root.snapshot = fillSnapshot(used)
+        // Looked up each time: a new snapshot rebuilds the bar, and the card's
+        // fill animates to its width.
+        var fill = null
+        tryVerify(function () {
+            fill = findNamed(name)
+            return fill !== null && fill.parent.width > 0
+                && Math.abs(fill.width - expected(fill.parent.width)) < 0.5
+        }, 5000, name + " at " + used + "%")
+        verify(fill.width <= fill.parent.width)
+        verify(shownTexts().indexOf(Math.round(used) + "%") >= 0, shownTexts())
+    }
+
+    function checkFills(name) {
+        var minimum = usage.minimumFillWidth
+        compare(minimum, Kirigami.Units.gridUnit * 0.75)
+        checkFill(name, 1, function () { return minimum })
+        checkFill(name, 0, function () { return 0 })
+        checkFill(name, 100, function (track) { return track })
+        checkFill(name, 50, function (track) { return track / 2 })
+    }
+
+    function test_cardBarHasAMinimumFill() {
+        checkFills("usageBarFill")
+    }
+
+    function test_compactBarHasAMinimumFill() {
+        root.usageCompact = true
+        checkFills("usageCompactFill")
+    }
+
     function test_compactShowsTitlesNotCaptionsOrPlans() {
         root.usageCompact = true
         root.snapshot = claudeSnapshot()

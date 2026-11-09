@@ -264,7 +264,8 @@ The hover popup's settings are under **Settings → AI Provider Settings**
   read as left or used, as **General → Display** shows (with Left the
   defaults read 40% and 15%); when one pick passes the other level, that
   other level moves so the critical one stays further along. The reset button
-  next to a color box goes back to the default color. The **Refresh
+  next to a color box goes back to the default color; a Critical box left
+  empty uses your Warning color, if you chose one. The **Refresh
   status** button checks the tracked providers once.
 - **Providers and readings**: one row per provider, in the order the Usage
   tab, the hover popup and the notifications list them. The **Move up** and

@@ -239,10 +239,12 @@ PlasmoidItem {
         Plasmoid.configuration.usageWarnPercent, Plasmoid.configuration.usageCriticalPercent)
     readonly property var tooltipGroups: TooltipLogic.applyChoice(
         root.tooltipProviderGroups(), root.tooltipChoice)
-    // AI Provider Settings → the color boxes; "" keeps the default color.
+    // AI Provider Settings → the color boxes; "" keeps the default color. An
+    // empty Critical box follows a custom Warning color.
     readonly property string customNormalColor: UsageLogic.normalizeColor(Plasmoid.configuration.usageNormalColor)
     readonly property string customWarnColor: UsageLogic.normalizeColor(Plasmoid.configuration.usageWarnColor)
-    readonly property string customCriticalColor: UsageLogic.normalizeColor(Plasmoid.configuration.usageCriticalColor)
+    readonly property string customCriticalColor: UsageLogic.effectiveCriticalColor(
+        Plasmoid.configuration.usageCriticalColor, Plasmoid.configuration.usageWarnColor)
     readonly property color warnUsageColor: root.customWarnColor !== ""
         ? root.customWarnColor : Kirigami.Theme.neutralTextColor
     readonly property color criticalUsageColor: root.customCriticalColor !== ""

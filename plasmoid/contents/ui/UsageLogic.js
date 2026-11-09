@@ -254,6 +254,26 @@ function normalizeColor(value) {
     return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : ""
 }
 
+// The custom color the critical level uses: its own, else the custom
+// warning color; "" means the theme's color.
+function effectiveCriticalColor(critical, warning) {
+    var own = normalizeColor(critical)
+    return own !== "" ? own : normalizeColor(warning)
+}
+
+// A bar's fill in the width of its track: its share of the track, but at
+// least minimumWidth so the color can be seen, and never wider than the
+// track. 0 for a percent of 0 or less, or anything that isn't a number.
+function fillWidth(trackWidth, displayedPercent, minimumWidth) {
+    var track = Number(trackWidth)
+    var percent = Number(displayedPercent)
+    var minimum = Number(minimumWidth)
+    if (!isFinite(track) || track <= 0 || !isFinite(percent) || percent <= 0)
+        return 0
+    var share = track * Math.min(1, percent / 100)
+    return Math.min(track, Math.max(share, isFinite(minimum) ? minimum : 0))
+}
+
 // A level in percent used as the settings page shows it: as used, or in
 // Left mode ("remaining") as what is left at that level.
 function shownPercent(percentUsed, mode) {

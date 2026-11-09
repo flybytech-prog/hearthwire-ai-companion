@@ -311,6 +311,47 @@ TestCase {
         compare(UsageLogic.normalizeColor(0xa1b2c3), "")
     }
 
+    function test_effectiveCriticalColor() {
+        compare(UsageLogic.effectiveCriticalColor("#0000AA", "#aa0000"), "#0000aa")
+        compare(UsageLogic.effectiveCriticalColor("", "#AA0000"), "#aa0000")
+        compare(UsageLogic.effectiveCriticalColor("#0000aa", ""), "#0000aa")
+        compare(UsageLogic.effectiveCriticalColor("", ""), "")
+        // Unreadable values count as empty.
+        compare(UsageLogic.effectiveCriticalColor("red", "#aa0000"), "#aa0000")
+        compare(UsageLogic.effectiveCriticalColor("", "nope"), "")
+        compare(UsageLogic.effectiveCriticalColor(undefined, undefined), "")
+        compare(UsageLogic.effectiveCriticalColor(null, 0xaa0000), "")
+    }
+
+    function test_fillWidth() {
+        // The share of the track, once past the minimum.
+        compare(UsageLogic.fillWidth(200, 50, 12), 100)
+        compare(UsageLogic.fillWidth(200, 100, 12), 200)
+        compare(UsageLogic.fillWidth(200, 6, 12), 12)
+        // Tiny readings still show; the 3% left that was easy to miss.
+        compare(UsageLogic.fillWidth(200, 3, 12), 12)
+        compare(UsageLogic.fillWidth(200, 0.1, 12), 12)
+        // Exactly 0% and nonsense stay empty.
+        compare(UsageLogic.fillWidth(200, 0, 12), 0)
+        compare(UsageLogic.fillWidth(200, -5, 12), 0)
+        compare(UsageLogic.fillWidth(200, NaN, 12), 0)
+        compare(UsageLogic.fillWidth(200, Infinity, 12), 0)
+        compare(UsageLogic.fillWidth(200, undefined, 12), 0)
+        compare(UsageLogic.fillWidth(200, "x", 12), 0)
+        // Never past the track, even above 100% or with a tiny track.
+        compare(UsageLogic.fillWidth(200, 150, 12), 200)
+        compare(UsageLogic.fillWidth(8, 3, 12), 8)
+        compare(UsageLogic.fillWidth(8, 100, 12), 8)
+        compare(UsageLogic.fillWidth(0, 50, 12), 0)
+        compare(UsageLogic.fillWidth(-10, 50, 12), 0)
+        compare(UsageLogic.fillWidth(NaN, 50, 12), 0)
+        compare(UsageLogic.fillWidth(undefined, 50, 12), 0)
+        // A missing or odd minimum falls back to the plain share.
+        compare(UsageLogic.fillWidth(200, 3, undefined), 6)
+        compare(UsageLogic.fillWidth(200, 3, NaN), 6)
+        compare(UsageLogic.fillWidth(200, 3, -4), 6)
+    }
+
     function test_shownPercent() {
         compare(UsageLogic.shownPercent(60, "used"), 60)
         compare(UsageLogic.shownPercent(60, "remaining"), 40)

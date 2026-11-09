@@ -255,8 +255,17 @@ KCM.ScrollViewKCM {
         return String(Qt.rgba(color.r, color.g, color.b, 1))
     }
 
+    // {level: the color its box shows}, kept by the boxes for setUsageColor.
+    property var shownColors: ({})
+
     function setUsageColor(level, color) {
         var value = UsageLogic.normalizeColor(color)
+        var current = UsageLogic.normalizeColor(level === "normal" ? page.cfg_usageNormalColor
+            : level === "warning" ? page.cfg_usageWarnColor : page.cfg_usageCriticalColor)
+        // The dialog opens on the color shown: OK without picking another
+        // keeps an empty box empty, so it goes on following its default.
+        if (value !== "" && current === "" && Qt.colorEqual(value, page.shownColors[level]))
+            return
         if (level === "normal")
             page.cfg_usageNormalColor = value
         else if (level === "warning")
@@ -277,6 +286,8 @@ KCM.ScrollViewKCM {
         spacing: Kirigami.Units.smallSpacing
 
         readonly property color shown: colorChoice.chosen !== "" ? colorChoice.chosen : colorChoice.fallback
+        onShownChanged: page.shownColors[colorChoice.level] = String(colorChoice.shown)
+        Component.onCompleted: page.shownColors[colorChoice.level] = String(colorChoice.shown)
 
         QQC2.Button {
             objectName: colorChoice.level + "ColorButton"
@@ -541,7 +552,9 @@ KCM.ScrollViewKCM {
                     ColorChoice {
                         level: "critical"
                         chosen: UsageLogic.normalizeColor(page.cfg_usageCriticalColor)
-                        fallback: Kirigami.Theme.negativeTextColor
+                        // Shown while empty, as main.qml uses it; never saved.
+                        fallback: UsageLogic.effectiveCriticalColor("", page.cfg_usageWarnColor)
+                            || Kirigami.Theme.negativeTextColor
                     }
                 }
             }

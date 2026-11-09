@@ -27,6 +27,8 @@ ColumnLayout {
     // The leading accent strip of each provider section, and its gap.
     readonly property real accentWidth: Math.max(2, Math.round(Kirigami.Units.smallSpacing * 0.75))
     readonly property real accentGap: Kirigami.Units.smallSpacing
+    // The narrowest fill of a bar above 0%, so its color can be seen.
+    readonly property real minimumFillWidth: Kirigami.Units.gridUnit * 0.75
 
     Timer {
         interval: 30000
@@ -359,16 +361,13 @@ ColumnLayout {
                                         )
 
                                         Rectangle {
-                                            width: parent.width * Math.max(
-                                                0,
-                                                Math.min(
-                                                    1,
-                                                    root.displayedPercent(
-                                                        Number(
-                                                            quotaCard.modelData.used_percent
-                                                        )
-                                                    ) / 100
-                                                )
+                                            objectName: "usageBarFill"
+                                            width: UsageLogic.fillWidth(
+                                                parent.width,
+                                                root.displayedPercent(
+                                                    Number(quotaCard.modelData.used_percent)
+                                                ),
+                                                usage.minimumFillWidth
                                             )
                                             height: parent.height
                                             radius: height / 2
@@ -480,8 +479,10 @@ ColumnLayout {
                                     )
 
                                     Rectangle {
-                                        width: parent.width * Math.max(0, Math.min(1,
-                                            root.displayedPercent(compactRow.rawUsed) / 100))
+                                        objectName: "usageCompactFill"
+                                        width: UsageLogic.fillWidth(parent.width,
+                                            root.displayedPercent(compactRow.rawUsed),
+                                            usage.minimumFillWidth)
                                         height: parent.height
                                         radius: height / 2
                                         color: root.barColor(compactRow.rawUsed)
