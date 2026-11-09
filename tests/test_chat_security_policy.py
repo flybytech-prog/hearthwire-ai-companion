@@ -6002,3 +6002,120 @@ def test_plasmoid_never_runs_the_migration():
 ])
 def test_proof_migrate_rule_catches(name, snippet):
     assert _migrate_offenders({name: _strip_comments(snippet)})
+
+
+# --- LOW-2 (pentest 2026-11-05): exact settings values, no other settings, WebAuthn cancelled ---
+#
+# The M1 rules pin that each listed setting is bound once and never assigned,
+# but not its value, and a new `settings.X: true` binding for an unlisted
+# setting (say localContentCanAccessRemoteUrls) passed. Now every `settings`
+# token in the WebEngine files must be one of these exact bindings in
+# ChatWebView.qml, and the passkey (WebAuthn) request is always cancelled.
+
+PINNED_SETTING_VALUES = {
+    "screenCaptureEnabled": "false",
+    "pluginsEnabled": "false",
+    "dnsPrefetchEnabled": "false",
+    "navigateOnDropEnabled": "false",
+    "localContentCanAccessFileUrls": "false",
+    "allowRunningInsecureContent": "false",
+    "javascriptCanAccessClipboard": "false",
+    "javascriptCanPaste": "false",
+    "focusOnNavigationEnabled": "false",
+    "unknownUrlSchemePolicy": "WebEngineSettings.DisallowUnknownUrlSchemes",
+}
+PINNED_SETTING_LINES = tuple(f"settings.{name}: {value}" for name, value in PINNED_SETTING_VALUES.items())
+
+
+def test_pinned_setting_values_cover_exactly_the_pinned_settings():
+    assert tuple(PINNED_SETTING_VALUES) == PINNED_SETTINGS
+
+
+def _settings_problems(sources):
+    """Every `settings` / `WebEngineSettings` token is one of the pinned binding lines."""
+    problems = []
+    web_name = _rel(CHAT_WEB_VIEW)
+    for path in WEBENGINE_FILES:
+        name = _rel(path)
+        code = sources.get(name, "")
+        blanked = _strip_comments(code, blank_strings=True)
+        lines = code.splitlines()
+        for match in re.finditer(r"\b(?:WebEngine)?[Ss]ettings\b", blanked):
+            line = _line_of(blanked, match.start())
+            text = _normalized(lines[line - 1])
+            if name != web_name or text not in PINNED_SETTING_LINES:
+                problems.append(f"{name}:{line}: WebEngine setting outside the pinned bindings: `{text}`")
+    web_lines = [_normalized(line) for line in sources.get(web_name, "").splitlines()]
+    for expected in PINNED_SETTING_LINES:
+        if web_lines.count(expected) != 1:
+            problems.append(f"ChatWebView.qml must bind `{expected}` exactly once")
+    return problems
+
+
+def _webauth_problems(web):
+    bodies = [body for _, body in _handler_bodies(web, "onWebAuthUxRequested")]
+    if len(bodies) != 1:
+        return [f"exactly one onWebAuthUxRequested handler, found {len(bodies)}"]
+    body = _normalized(bodies[0])
+    problems = []
+    if not body.startswith("{ request.cancel() "):
+        problems.append(f"onWebAuthUxRequested must start with `request.cancel()`, got `{body}`")
+    if len(_hits(r"\brequest\b", body)) != 1:
+        problems.append("onWebAuthUxRequested may use request only for request.cancel()")
+    return problems
+
+
+def test_webengine_settings_are_exactly_the_pinned_bindings():
+    problems = _settings_problems(_all_code())
+    assert not problems, problems
+
+
+def test_passkey_requests_are_always_cancelled():
+    problems = _webauth_problems(_read_code(CHAT_WEB_VIEW))
+    assert not problems, problems
+
+
+LOW2_SETTINGS_MUTATIONS = [
+    (CHAT_WEB_VIEW, "WebEngineSettings.DisallowUnknownUrlSchemes", "WebEngineSettings.AllowAllUnknownUrlSchemes"),
+    (CHAT_WEB_VIEW, "WebEngineSettings.DisallowUnknownUrlSchemes",
+     "WebEngineSettings.AllowUnknownUrlSchemesFromUserInteraction"),
+    (CHAT_WEB_VIEW, "            settings.unknownUrlSchemePolicy: WebEngineSettings.DisallowUnknownUrlSchemes\n", ""),
+    (CHAT_WEB_VIEW, "            settings.focusOnNavigationEnabled: false\n",
+     "            settings.focusOnNavigationEnabled: false\n            settings.localContentCanAccessRemoteUrls: true\n"),
+    (CHAT_WEB_VIEW, "            settings.pluginsEnabled: false\n", "            settings.pluginsEnabled: true\n"),
+    (CHAT_WEB_VIEW, "            settings.pluginsEnabled: false\n",
+     "            settings.pluginsEnabled: false || chatWeb.staySignedIn\n"),
+    (CHAT_WEB_VIEW, "            settings.focusOnNavigationEnabled: false\n",
+     "            settings.focusOnNavigationEnabled: false\n            settings { javascriptEnabled: true }\n"),
+    (CHAT_WEB_VIEW, "            settings.focusOnNavigationEnabled: false\n",
+     "            settings.focusOnNavigationEnabled: false\n            settings.autoLoadImages: false\n"),
+    (CHAT_VIEW, "onTriggered: chatView.web.cancelDownload()",
+     "onTriggered: chatView.web.currentView.settings.localContentCanAccessRemoteUrls = true"),
+    (FULL_REPRESENTATION, "onClicked: chatView.openExternally()",
+     "onClicked: chatView.web.currentView.settings.unknownUrlSchemePolicy = WebEngineSettings.AllowAllUnknownUrlSchemes"),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), LOW2_SETTINGS_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(LOW2_SETTINGS_MUTATIONS)])
+def test_proof_settings_rule_catches(path, old, new):
+    assert _settings_problems(_sources_with(path, old, new))
+
+
+LOW2_WEBAUTH_MUTATIONS = [
+    ("                request.cancel()\n                chatWeb.passkeyNotice = true\n",
+     "                chatWeb.passkeyNotice = true\n"),
+    ("                request.cancel()\n                chatWeb.passkeyNotice = true\n",
+     "                chatWeb.passkeyNotice = true\n                request.cancel()\n"),
+    ("                request.cancel()\n                chatWeb.passkeyNotice = true\n",
+     "                if (chatWeb.passkeyNotice)\n                    request.cancel()\n"),
+    ("                request.cancel()\n                chatWeb.passkeyNotice = true\n",
+     "                request.cancel()\n                request.retry()\n"),
+    ("            onWebAuthUxRequested: (request) => {\n",
+     "            onWebAuthUxRequested: (request) => {}\n            onWebAuthUxRequested: (request) => {\n"),
+]
+
+
+@pytest.mark.parametrize(("old", "new"), LOW2_WEBAUTH_MUTATIONS)
+def test_proof_webauth_rule_catches(old, new):
+    assert _webauth_problems(_mutated(CHAT_WEB_VIEW, old, new))

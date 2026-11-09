@@ -407,6 +407,21 @@ TestCase {
         compare(card.message, "Locked automatically.")
     }
 
+    // Fixed text only: no path, and only the installer flag.
+    function test_legacyDataCard() {
+        var view = make({
+            current: true,
+            storageMode: "encrypted",
+            card: {view: "unlock", message: "legacy-data"}
+        })
+        var card = findChild(view, "storageCard")
+        verify(card.visible)
+        compare(card.message, "Saved sign-ins from the previous version haven't been moved yet. "
+                + "Run the installer again with --restart-plasma.")
+        compare(view.storageText("legacy-data"), card.message)
+        compare(card.message.indexOf("/"), -1)
+    }
+
     // --- Local owner check messages (M2) -------------------------------------
 
     function test_localOwnerMessages() {

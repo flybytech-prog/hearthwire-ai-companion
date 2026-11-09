@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 
 from . import __version__
-from .core import droppedfile, portowner, promptstore, settingsbackup, usagehistory, vault, webdata
+from .core import droppedfile, legacy, portowner, promptstore, settingsbackup, usagehistory, vault, webdata
 from .core.catalog import PROVIDER_IDS
 from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
 
@@ -138,6 +138,12 @@ def parser() -> argparse.ArgumentParser:
         metavar="HEX",
         help="Settings as lowercase hex of a UTF-8 JSON object, for --settings-backup export.",
     )
+    result.add_argument(
+        "--migrate",
+        choices=legacy.OPERATIONS,
+        help="One-time move of the former release's data, wallet key and widgets "
+        "(run by scripts/install.sh only; no network, no credentials).",
+    )
     result.add_argument("--version", action="version", version=__version__)
     return result
 
@@ -177,8 +183,8 @@ def _check_history_and_backup_arguments(args: argparse.Namespace, argument_parse
 
 
 def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.ArgumentParser) -> None:
-    """--web-data, --vault, --prompts, --read-dropped, --port-owner, --usage-history and
-    --settings-backup stand alone."""
+    """--web-data, --vault, --prompts, --read-dropped, --port-owner, --usage-history,
+    --settings-backup and --migrate stand alone."""
     if args.method is not None and args.vault is None:
         argument_parser.error("--method needs --vault")
     if args.vault is not None:
@@ -197,6 +203,7 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
             ("--port-owner", args.port_owner is not None),
             ("--usage-history", args.usage_history is not None),
             ("--settings-backup", args.settings_backup is not None),
+            ("--migrate", args.migrate is not None),
         ) if used
     ]
     if len(modes) > 1:
@@ -218,7 +225,8 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
         ) if used
     ]
     if (args.port_owner is not None or args.prompts is not None or args.read_dropped is not None
-            or args.usage_history is not None or args.settings_backup is not None):
+            or args.usage_history is not None or args.settings_backup is not None
+            or args.migrate is not None):
         others = snapshot_options + web_options
         if others:
             argument_parser.error(f"{others[0]} cannot be combined with {modes[0]}")
@@ -284,6 +292,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload = _helper_reply(lambda: usagehistory.run(args.usage_history, sample=args.sample))
     elif args.settings_backup is not None:
         payload = _helper_reply(lambda: settingsbackup.run(args.settings_backup, data=args.data))
+    elif args.migrate is not None:
+        payload = _helper_reply(lambda: legacy.run_operation(args.migrate))
     elif args.catalog:
         payload = catalog_snapshot()
     elif args.detect:

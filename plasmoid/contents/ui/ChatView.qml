@@ -325,6 +325,8 @@ ColumnLayout {
             return i18n("Locked automatically.")
         case "damaged":
             return i18n("The encrypted folder is damaged and can't be opened.")
+        case "legacy-data":
+            return i18n("Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
         case "delete-failed":
             return i18n("Couldn't delete the encrypted folder because it is still in use. Close Chat in other Hearthwire widgets, then delete it in Settings → Chat → Advanced.")
         case "":

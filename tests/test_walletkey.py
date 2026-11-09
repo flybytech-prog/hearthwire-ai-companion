@@ -961,3 +961,71 @@ def test_staging_entry_never_reaches_gocryptfs_as_extpass():
             *[item for value in staged for item in ("-extpass", value)], cipher, mountpoint]
     with pytest.raises(webdata.HelperError):
         vault._check_argv(argv, config=config)
+
+
+# >>> legacy-migration: the former name's wallet folder (plan R2) ----------------------------------
+
+LEGACY = "Hearthside"
+
+
+def test_legacy_folder_is_accepted_only_for_the_migration_shapes():
+    assert walletkey.LEGACY_FOLDER == LEGACY
+    for argv in (
+        walletkey.read_argv(KQ, "kdewallet", folder=LEGACY),
+        walletkey.write_argv(KQ, "kdewallet", folder=LEGACY),
+        *(walletkey.kwallet_argv(QD, "keyDoesNotExist", "kdewallet", LEGACY, entry) for entry in walletkey.ENTRIES),
+        *(walletkey.kwallet_argv(QD, "removeEntry", "12", LEGACY, entry, "Hearthwire") for entry in walletkey.ENTRIES),
+    ):
+        walletkey.check_argv(argv)
+        vault._check_argv(argv)
+
+
+@pytest.mark.parametrize("argv", [
+    # kwallet-query: only the real entry, never the staging one, in the old folder.
+    [KQ, "--folder", LEGACY, "--read-password", "encrypted-chat-folder.new", "kdewallet"],
+    [KQ, "--folder", LEGACY, "--write-password", "encrypted-chat-folder.new", "kdewallet"],
+    [KQ, "--folder", LEGACY, "--read-password", "other", "kdewallet"],
+    # qdbus6: never removeFolder, never open/close with the old name as the app id.
+    [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.removeFolder", "1", LEGACY, "Hearthwire"],
+    [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.open", "kdewallet", "0", LEGACY],
+    [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.close", "1", "false", LEGACY],
+    [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.removeEntry", "1", LEGACY, "other", "Hearthwire"],
+    [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.keyDoesNotExist", "kdewallet", LEGACY, "x"],
+    [QD, "org.kde.kwalletd6", "/modules/kwalletd6", "org.kde.KWallet.removeEntry", "1", "hearthside",
+     "encrypted-chat-folder", "Hearthwire"],
+])
+def test_legacy_folder_is_refused_in_every_other_shape(argv):
+    with pytest.raises(webdata.HelperError):
+        walletkey.check_argv(argv)
+
+
+def test_the_old_folder_is_never_an_extpass():
+    cipher, mountpoint, config = "/d/hearthwire/vault", "/r/hearthwire/vault", "/d/hearthwire/vault-keys/wallet.conf"
+    extpass = walletkey.read_argv(KQ, "kdewallet", folder=LEGACY)
+    assert not walletkey.is_read_argv(extpass)
+    argv = ["/usr/bin/gocryptfs", "-q", "-nosyslog", "-config", config,
+            *[item for value in extpass for item in ("-extpass", value)], cipher, mountpoint]
+    with pytest.raises(webdata.HelperError):
+        vault._check_argv(argv, config=config)
+
+
+def test_copy_entry_between_folders_goes_pipe_to_pipe(stubs):
+    stubs.wallet.write_text(json.dumps({LEGACY + "/encrypted-chat-folder": "dummy-value"}))
+    tools, _ = walletkey.find_tools()
+    walletkey.copy_entry(tools, "kdewallet", walletkey.ENTRY, walletkey.ENTRY, source_folder=LEGACY)
+    assert wallet_state(stubs)[KEY] == "dummy-value"
+    read, write = stubs.calls("kwallet-query")
+    assert read["argv"][:2] == ["--folder", LEGACY] and write["argv"][:2] == ["--folder", "Hearthwire"]
+    assert read["fds"][1].startswith("pipe:") and write["fds"][0].startswith("pipe:")
+    walletkey.remove_legacy_entry(tools, "kdewallet", walletkey.ENTRY)
+    assert wallet_state(stubs) == {KEY: "dummy-value"}
+
+
+@pytest.mark.parametrize("operation", ["add-key", "auto-unlock"])
+def test_wallet_operations_refuse_while_old_data_waits(stubs, capsys, operation):
+    stubs.make_locked()
+    (Path(os.path.realpath(stubs.data)) / "hearthside").mkdir()
+    assert reply(operation, capsys) == {"ok": False, "error": "legacy-data"}
+    assert unlock_wallet(capsys) == {"ok": False, "error": "legacy-data"}
+    assert [call for call in stubs.calls() if call["tool"] in ("gocryptfs", "kwallet-query", "openssl")] == []
+# <<< legacy-migration

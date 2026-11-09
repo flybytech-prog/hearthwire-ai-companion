@@ -534,13 +534,13 @@ def _require_tools(ctx: Context, *names: str) -> None:
 
 
 @contextmanager
-def _runtime_app_dir(ctx: Context) -> Iterator[int]:
+def _runtime_app_dir(ctx: Context, app_dir: str = APP_DIR) -> Iterator[int]:
     with _descriptors() as opened:
         runtime = open_base(ctx.runtime, create=False)
         if runtime is None:
             raise HelperError("no-runtime-dir")
         opened.append(runtime)
-        app = open_child_dir(runtime, APP_DIR, create=True)
+        app = open_child_dir(runtime, app_dir, create=True)
         opened.append(app)
         yield app
 
@@ -552,13 +552,16 @@ def vault_lock(
     wait: bool = False,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    app_dir: str = APP_DIR,
 ) -> Iterator[int]:
     """Hold ``$XDG_RUNTIME_DIR/hearthwire/vault.lock``; yields that directory's fd.
 
     With ``wait`` it blocks as long as needed (an unlock dialog may be open in
     another widget); otherwise a lock held past ``LOCK_TIMEOUT`` gives "busy".
+    ``app_dir`` is only for the installer's migration (core/legacy.py), which
+    also holds the former name's lock.
     """
-    with _runtime_app_dir(ctx) as app:
+    with _runtime_app_dir(ctx, app_dir) as app:
         flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
         try:
             descriptor = os.open(LOCK_FILE, flags, 0o600, dir_fd=app)
@@ -804,6 +807,18 @@ def verified_mount(environ: Optional[Mapping[str, str]] = None) -> Iterator[int]
 
 
 # --- operations --------------------------------------------------------------------------------
+
+
+def _refuse_legacy_data(environ: Optional[Mapping[str, str]]) -> None:
+    """legacy-data while the former name's data folder is still there (plan D5).
+
+    Setting up, unlocking or purging now would create or use a second folder
+    next to the one the installer still has to move; only the installer migrates.
+    """
+    from . import legacy  # Imported here: legacy itself builds on this module.
+
+    if legacy.legacy_data_present(environ):
+        raise HelperError("legacy-data")
 
 
 def status(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
@@ -1059,6 +1074,7 @@ def add_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     ctx = context(environ)
     _require_tools(ctx, "gocryptfs", "kdialog")
     _wallet_tools(ctx, keygen=True)
+    _refuse_legacy_data(environ)
     with vault_lock(ctx, wait=True) as app:
         state = settle(ctx, app)
         if state in ("absent", "damaged"):
@@ -1144,6 +1160,7 @@ def auto_unlock(environ: Optional[Mapping[str, str]] = None) -> dict[str, object
     ctx = context(environ)
     _require_tools(ctx, "gocryptfs", "fusermount3")
     _wallet_tools(ctx, keygen=False)
+    _refuse_legacy_data(environ)
     with vault_lock(ctx) as app:
         state = settle(ctx, app)
         if state in ("absent", "damaged"):
@@ -1151,6 +1168,38 @@ def auto_unlock(environ: Optional[Mapping[str, str]] = None) -> dict[str, object
         if state == "locked":
             _unlock_with_wallet(ctx, app, automatic=True)
     return {"ok": True}
+
+
+def verify_wallet_slot(ctx: Context, app: int, wallet: str) -> bool:
+    """Mount with the wallet slot, then unmount again; True when both worked.
+
+    For the installer's migration only (core/legacy.py), which already holds the
+    vault lock (``app`` is its directory) and checked that nothing is mounted.
+    It proves that the wallet entry opens this folder's slot: a real unlock,
+    as the widget would do it. Any failure is False, never a reply of its own;
+    raises os-error only when the folder stays mounted.
+    """
+    if settle(ctx, app) != "locked":
+        return False
+    try:
+        with _keys_dir(ctx, create=False) as keys:
+            if keys is None or not _slot_ready(keys):
+                return False
+        _mount(ctx, app, wallet)
+    except HelperError:
+        if mount_entry(ctx.mountpoint) is not None:
+            _drop_mount(ctx, app)
+            if mount_entry(ctx.mountpoint) is not None:
+                raise HelperError("os-error") from None
+        return False
+    for delay in (*UNMOUNT_RETRY_DELAYS, None):
+        if _unmount(ctx) == 0 and mount_entry(ctx.mountpoint) is None:
+            _seal_mountpoint(ctx, app)
+            return True
+        if delay is None:
+            break
+        time.sleep(delay)
+    raise HelperError("os-error")
 
 
 # Leftovers the bare mountpoint may hold: profile folders a widget's chat created in
@@ -1310,6 +1359,7 @@ def _forget_cipher_dir(ctx: Context) -> None:
 def create(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     ctx = context(environ)
     _require_tools(ctx)
+    _refuse_legacy_data(environ)
     with vault_lock(ctx, wait=True) as app:
         state = settle(ctx, app)
         if state == "damaged":
@@ -1337,6 +1387,7 @@ def unlock(environ: Optional[Mapping[str, str]] = None, method: str = "passphras
         _wallet_tools(ctx, keygen=False)
     else:
         _require_tools(ctx)
+    _refuse_legacy_data(environ)
     with vault_lock(ctx, wait=True) as app:
         state = settle(ctx, app)
         if state in ("absent", "damaged"):
@@ -1578,6 +1629,23 @@ def _purge_runtimes(environ: Optional[Mapping[str, str]]) -> list[str]:
     return runtimes
 
 
+def mounted_any(environ: Optional[Mapping[str, str]] = None, app_dirs: Sequence[str] = (APP_DIR,)) -> bool:
+    """Any mount (ours, foreign or stale) of a cipher dir or at a mountpoint of ``app_dirs``.
+
+    Looks at every runtime dir purge would (``$XDG_RUNTIME_DIR`` and the
+    systemd default) and at the data base as given and resolved. The
+    installer's migration passes the former and the current name.
+    """
+    runtimes = _purge_runtimes(environ)
+    base_path = data_base(environ)
+    cipher_paths = {
+        os.path.join(base, name, VAULT_DIR)
+        for base in (base_path, os.path.realpath(base_path)) for name in app_dirs
+    }
+    mountpoints = {os.path.join(runtime, name, VAULT_DIR) for runtime in runtimes for name in app_dirs}
+    return _vault_mounted(cipher_paths, mountpoints)
+
+
 def _vault_mounted(cipher_paths: set[str], mountpoints: set[str]) -> bool:
     """Any mount (ours, foreign or stale) at our mountpoint or of our cipher dir."""
     try:
@@ -1645,6 +1713,7 @@ def purge(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     """
     try:
         _require_safe_rmtree()
+        _refuse_legacy_data(environ)
         runtimes = _purge_runtimes(environ)
         if not runtimes:
             return {"ok": True, "removed": _purge_tree(environ, runtimes)}
@@ -1698,4 +1767,5 @@ def run(
         return {"ok": False, "error": "os-error"}
 
 
-__all__ = ["METHODS", "OPERATIONS", "PRIVATE_MODE", "purge", "run", "status", "verified_mount"]
+__all__ = ["METHODS", "OPERATIONS", "PRIVATE_MODE", "mounted_any", "purge", "run", "status", "verified_mount",
+           "verify_wallet_slot"]

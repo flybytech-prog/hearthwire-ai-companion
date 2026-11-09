@@ -1414,3 +1414,64 @@ def test_vault_and_webdata_use_only_the_standard_library():
         modules = re.findall(r"^\s*(?:from|import)\s+([\w.]+)", code, re.MULTILINE)
         external = [name for name in modules if not name.startswith(".") and name.split(".")[0] not in allowed]
         assert not external, (path.name, external)
+
+
+# >>> legacy-migration: D5 and the helpers the installer's migration uses (plan R2) -----------------
+
+
+def _old_data(stubs):
+    old = Path(os.path.realpath(stubs.data)) / "hearthside"
+    old.mkdir(parents=True)
+    return old
+
+
+@pytest.mark.parametrize("operation", ["create", "unlock"])
+def test_setup_and_unlock_refuse_while_old_data_waits(stubs, capsys, operation):
+    if operation == "unlock":
+        stubs.make_locked()
+    _old_data(stubs)
+    assert reply(operation, capsys) == {"ok": False, "error": "legacy-data"}
+    assert [call for call in stubs.calls() if call["tool"] in ("gocryptfs", "kdialog")] == []
+    assert not stubs.mounted()
+
+
+def test_status_lock_and_destroy_still_work_while_old_data_waits(stubs, capsys):
+    stubs.make_locked()
+    _old_data(stubs)
+    assert reply("status", capsys)["state"] == "locked"
+    assert reply("lock", capsys) == {"ok": True}
+
+
+def test_purge_refuses_while_old_data_waits(stubs, capsys, monkeypatch, tmp_path):
+    stubs.make_locked()
+    old = _old_data(stubs)
+    monkeypatch.setattr(vault, "DEFAULT_RUNTIME", str(tmp_path / "none-{uid}"))
+    assert cli.main(["--web-data", "purge"]) == 0
+    assert capsys.readouterr().out == '{"ok":false,"error":"legacy-data"}\n'
+    assert stubs.cipher.is_dir() and old.is_dir()
+
+
+def test_mounted_any_checks_every_name_and_runtime(stubs, monkeypatch, tmp_path):
+    monkeypatch.setattr(vault, "DEFAULT_RUNTIME", str(tmp_path / "none-{uid}"))
+    runtime = Path(os.path.realpath(stubs.runtime))
+    data = Path(os.path.realpath(stubs.data))
+    assert vault.mounted_any(None, ("hearthside", "hearthwire")) is False
+    with open(stubs.mountinfo, "a") as handle:
+        handle.write(f"901 30 0:99 / {runtime}/hearthside/vault rw - fuse.x src rw\n")
+    assert vault.mounted_any() is False
+    assert vault.mounted_any(None, ("hearthside", "hearthwire")) is True
+    stubs.mountinfo.write_text(BASE_MOUNTINFO + f"902 30 0:98 / /elsewhere rw - fuse.gocryptfs {data}/hearthside/vault rw\n")
+    assert vault.mounted_any(None, ("hearthside",)) is True
+
+
+def test_vault_lock_of_another_name_is_a_separate_lock(stubs):
+    ctx = vault.context(find_tools=False)
+    with vault.vault_lock(ctx, app_dir="hearthside"):
+        with vault.vault_lock(ctx):
+            pass
+        with pytest.raises(webdata.HelperError) as raised:
+            with vault.vault_lock(ctx, app_dir="hearthside"):
+                pass
+    assert raised.value.code == "busy"
+    assert stat.S_IMODE(os.lstat(Path(os.path.realpath(stubs.runtime)) / "hearthside").st_mode) == 0o700
+# <<< legacy-migration

@@ -5,17 +5,132 @@ script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_directory=$(CDPATH= cd -- "$script_directory/.." && pwd)
 restart_plasma=false
 uninstall_web_data=false
+rollback=false
 
-# One option at most: --uninstall-web-data only deletes data, it never installs.
-case "$#:${1:-}" in
-    0:) ;;
-    1:--restart-plasma) restart_plasma=true ;;
-    1:--uninstall-web-data) uninstall_web_data=true ;;
+# --uninstall-web-data only deletes data, it never installs. --rollback-hearthwire
+# undoes the one-time migration (see below); --restart-plasma may follow it.
+case "$#:${1:-}:${2:-}" in
+    0::) ;;
+    1:--restart-plasma:) restart_plasma=true ;;
+    1:--uninstall-web-data:) uninstall_web_data=true ;;
+    1:--rollback-hearthwire:) rollback=true ;;
+    2:--rollback-hearthwire:--restart-plasma) rollback=true; restart_plasma=true ;;
     *)
-        echo "Usage: $0 [--restart-plasma | --uninstall-web-data]" >&2
+        echo "Usage: $0 [--restart-plasma | --uninstall-web-data | --rollback-hearthwire [--restart-plasma]]" >&2
         exit 2
         ;;
 esac
+
+case "${XDG_CONFIG_HOME:-}" in
+    /*) config_home=$XDG_CONFIG_HOME ;;
+    *) config_home=$HOME/.config ;;
+esac
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+icon_directory="$data_home/icons/hicolor/scalable/apps"
+notifyrc_directory="$data_home/knotifications6"
+
+# The helper from this checkout, never an installed one (it may be older or
+# gone). -P (Python 3.11+, which Hearthwire requires) keeps the working folder
+# off sys.path, so a stray json.py there is never imported; PYTHONPATH points
+# at this checkout instead. Its replies are fixed JSON: codes and category
+# names only.
+helper() {
+    PYTHONPATH="$project_directory/src" PYTHONDONTWRITEBYTECODE=1 python3 -P -m hearthwire "$@" </dev/null
+}
+
+# Plasma is stopped only for the one-time move below, and an EXIT trap always
+# starts it again, also when a step fails or the script is interrupted.
+plasma_stopped=false
+plasma_by_systemd=false
+start_plasma() {
+    if [ "$plasma_stopped" = true ]; then
+        plasma_stopped=false
+        if [ "$plasma_by_systemd" = true ]; then
+            systemctl --user start plasma-plasmashell.service >/dev/null 2>&1 || kstart plasmashell >/dev/null 2>&1 || true
+        else
+            kstart plasmashell >/dev/null 2>&1 || true
+        fi
+    fi
+}
+stop_plasma() {
+    trap 'start_plasma' EXIT
+    trap 'exit 130' INT TERM HUP
+    plasma_stopped=true
+    if systemctl --user is-active plasma-plasmashell.service >/dev/null 2>&1; then
+        plasma_by_systemd=true
+        systemctl --user stop plasma-plasmashell.service >/dev/null 2>&1 || true
+    else
+        kquitapp6 plasmashell >/dev/null 2>&1 || true
+    fi
+}
+plasma_started_again() {
+    start_plasma
+    trap - EXIT INT TERM HUP
+}
+
+# Ask before stopping Plasma, unless --restart-plasma said yes already. Without
+# a terminal there is nobody to ask: stop with nothing changed.
+confirm_plasma_stop() {
+    [ "$restart_plasma" = true ] && return 0
+    if [ -t 0 ] && [ -t 1 ]; then
+        printf '%s [y/N] ' "$1 This stops Plasma for a moment and starts it again. Continue?"
+        read -r answer || answer=""
+        case "$answer" in
+            y|Y|yes|Yes|YES) return 0 ;;
+        esac
+        echo "Nothing was changed." >&2
+        exit 1
+    fi
+    echo "$1 This stops Plasma for a moment, so run this again with --restart-plasma. Nothing was changed." >&2
+    exit 1
+}
+
+# >>> legacy-migration: the one-time move from Hearthside (plan R2, D1-D8)
+# One fixed message per --migrate error code; $2 says what happened to the rest.
+migration_error() {
+    case "$1" in
+        *'"error":"not-locked"'*)
+            echo "Lock the encrypted chat folder in Hearthside (or Hearthwire) first, then run this again. $2" >&2 ;;
+        *'"error":"busy"'*)
+            echo "The encrypted chat folder is in use right now. Try again in a moment. $2" >&2 ;;
+        *'"error":"conflict","category":"data"'*)
+            echo "Both a hearthside and a hearthwire folder exist in $data_home; refusing to merge them. Move the one you do not need away, then run this again. $2" >&2 ;;
+        *'"error":"conflict","category":"config"'*)
+            echo "Both a hearthside and a hearthwire folder exist in $config_home; refusing to merge them. Move the one you do not need away, then run this again. $2" >&2 ;;
+        *'"error":"conflict"'*)
+            echo "Hearthside and Hearthwire files are both present; refusing to merge them. $2" >&2 ;;
+        *'"error":"symlink"'*)
+            echo "A Hearthside or Hearthwire file or folder is a symbolic link; refusing to move through it. $2" >&2 ;;
+        *'"error":"not-directory"'*|*'"error":"not-owned"'*)
+            echo "A Hearthside or Hearthwire file or folder is not the kind expected or not yours; refusing to move it. $2" >&2 ;;
+        *'"error":"invalid"'*)
+            echo "The Plasma panel layout file could not be read safely, so it was not changed. $2" >&2 ;;
+        *'"error":"plasma-running"'*)
+            echo "Plasma did not stop. $2" >&2 ;;
+        *)
+            echo "Could not move the Hearthside data to Hearthwire. $2" >&2 ;;
+    esac
+}
+
+# One --migrate step while Plasma stops; plasma-running is retried for ~10 s.
+migrate_step() {
+    attempts=0
+    while :; do
+        if ! step_reply=$(helper --migrate "$1"); then
+            step_reply=""
+            break
+        fi
+        case "$step_reply" in
+            '{"ok":false,"error":"plasma-running"}')
+                attempts=$((attempts + 1))
+                [ "$attempts" -lt 20 ] || break
+                sleep 0.5
+                ;;
+            *) break ;;
+        esac
+    done
+}
+# <<< legacy-migration
 
 # Delete the Chat tab's encrypted folder, which holds every saved chat sign-in
 # (there is no unencrypted copy). The helper from this checkout does the work
@@ -48,12 +163,11 @@ if [ "$uninstall_web_data" = true ]; then
     # The usage alert events file and the app and settings icons go too, but
     # only once the data is gone. rm unlinks a symlink, never its target.
     remove_installed_files() {
-        rm -f -- "${XDG_DATA_HOME:-$HOME/.local/share}/knotifications6/hearthwire.notifyrc"
-        uninstall_icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
-        rm -f -- "$uninstall_icons/hearthwire.svg" \
-            "$uninstall_icons/hearthwire-settings-general.svg" \
-            "$uninstall_icons/hearthwire-settings-ai.svg" \
-            "$uninstall_icons/hearthwire-settings-chat.svg"
+        rm -f -- "$notifyrc_directory/hearthwire.notifyrc"
+        rm -f -- "$icon_directory/hearthwire.svg" \
+            "$icon_directory/hearthwire-settings-general.svg" \
+            "$icon_directory/hearthwire-settings-ai.svg" \
+            "$icon_directory/hearthwire-settings-chat.svg"
     }
     case "$reply" in
         '{"ok":true,"removed":[]}')
@@ -77,6 +191,12 @@ if [ "$uninstall_web_data" = true ]; then
             echo "Lock the encrypted folder in Hearthwire first, then run this again. Nothing was deleted." >&2
             exit 1
             ;;
+        # >>> legacy-migration
+        '{"ok":false,"error":"legacy-data"}')
+            echo "Your Hearthside data has not been moved to Hearthwire yet. Run ./scripts/install.sh first, then this again. Nothing was deleted." >&2
+            exit 1
+            ;;
+        # <<< legacy-migration
         '{"ok":false,"error":"busy"}')
             echo "Hearthwire is using the encrypted folder right now. Try again in a moment. Nothing was deleted." >&2
             exit 1
@@ -97,6 +217,58 @@ if [ "$uninstall_web_data" = true ]; then
     exit 0
 fi
 
+# >>> legacy-migration: --rollback-hearthwire
+# Undo the move from Hearthside: the data, settings, notification choices,
+# KDE Wallet key and widgets go back to the Hearthside names, then this
+# release is uninstalled. The helper refuses (nothing changed) while a vault is
+# mounted or in use, or when both names hold data; it answers plasma-running
+# only after those checks passed, so Plasma is stopped only when it can work.
+if [ "$rollback" = true ]; then
+    for executable in python3 kpackagetool6; do
+        if ! command -v "$executable" >/dev/null 2>&1; then
+            echo "Required command not found: $executable" >&2
+            exit 1
+        fi
+    done
+    if ! step_reply=$(helper --migrate rollback); then
+        step_reply=""
+    fi
+    if [ "$step_reply" = '{"ok":false,"error":"plasma-running"}' ]; then
+        confirm_plasma_stop "Going back to Hearthside renames your Hearthwire widgets in the panel layout."
+        stop_plasma
+        migrate_step rollback
+    fi
+    case "$step_reply" in
+        '{"ok":true,"restored":['*) ;;
+        *)
+            migration_error "$step_reply" "Nothing more was changed; run this again once that is fixed."
+            exit 1
+            ;;
+    esac
+    if python3 -P -m pip show hearthwire >/dev/null 2>&1; then
+        python3 -P -m pip uninstall -y --break-system-packages hearthwire >/dev/null 2>&1 \
+            || echo "Could not remove the hearthwire helper with pip; remove it by hand." >&2
+    fi
+    if kpackagetool6 -t Plasma/Applet -s io.github.flybytechprog.hearthwire >/dev/null 2>&1; then
+        kpackagetool6 -t Plasma/Applet -r io.github.flybytechprog.hearthwire >/dev/null 2>&1 \
+            || echo "Could not remove the Hearthwire widget package; remove it by hand." >&2
+    fi
+    rm -f -- "$icon_directory/hearthwire.svg" \
+        "$icon_directory/hearthwire-settings-general.svg" \
+        "$icon_directory/hearthwire-settings-ai.svg" \
+        "$icon_directory/hearthwire-settings-chat.svg" \
+        "$notifyrc_directory/hearthwire.notifyrc"
+    plasma_started_again
+    case "$step_reply" in
+        *'"pending":["wallet-entry"]'*)
+            echo "The KDE Wallet key of the encrypted chat folder could not be moved back (the wallet may be locked). Unlock with the passphrase still works." >&2 ;;
+    esac
+    echo "Hearthwire was rolled back to the Hearthside names and uninstalled."
+    echo "To use Hearthside again, check out tag hearthside-final and run its install.sh"
+    exit 0
+fi
+# <<< legacy-migration
+
 for executable in python3 kpackagetool6; do
     if ! command -v "$executable" >/dev/null 2>&1; then
         echo "Required command not found: $executable" >&2
@@ -116,6 +288,36 @@ if ! python3 -P -m pip --version >/dev/null 2>&1; then
     echo "Required Python module not found: pip (Arch: sudo pacman -S --needed python-pip)" >&2
     exit 1
 fi
+
+# >>> legacy-migration: what is left to move from Hearthside (read only)
+# Checked before anything is installed or changed: a mounted or busy vault,
+# or data under both names, stops the script here with nothing changed.
+if ! migration_reply=$(helper --migrate status); then
+    echo "Could not run the Hearthwire helper from this checkout. Nothing was changed." >&2
+    exit 1
+fi
+case "$migration_reply" in
+    '{"ok":true,"pending":[],"present":['*) migration_pending=false ;;
+    '{"ok":true,"pending":["'*) migration_pending=true ;;
+    *)
+        migration_error "$migration_reply" "Nothing was changed."
+        exit 1
+        ;;
+esac
+# User decision Q4: the panel layout backup from the move is deleted by the
+# next successful install that finds the move complete and the widgets
+# already using the new id.
+applets_backup="$config_home/plasma-org.kde.plasma.desktop-appletsrc.hearthside-backup"
+remove_applets_backup=false
+if [ "$migration_pending" = false ]; then
+    case "$migration_reply" in
+        *'"present":['*'"applets"'*) remove_applets_backup=true ;;
+    esac
+fi
+if [ "$migration_pending" = true ]; then
+    confirm_plasma_stop "Your Hearthside data, settings and widgets will be moved to Hearthwire (they keep their settings and sign-ins)."
+fi
+# <<< legacy-migration
 
 # Offer to install missing Arch packages, only when run in a terminal. pacman
 # itself asks for the password through sudo; nothing is installed without a "y".
@@ -206,6 +408,56 @@ if [ -d "$build_directory" ]; then
     rm -rf -- "$build_directory"
 fi
 
+# >>> legacy-migration: move from Hearthside, then remove the old install
+# Plasma is stopped (it rewrites its panel layout on exit), the helper moves
+# the data and then the widgets' plugin id; finished steps are never repeated.
+migration_wallet_pending=false
+migration_moved_applets=false
+if [ "$migration_pending" = true ]; then
+    stop_plasma
+    migrate_step run
+    case "$step_reply" in
+        '{"ok":true,"migrated":['*) ;;
+        *)
+            migration_error "$step_reply" "Plasma is started again. Finished steps are kept; run this again once that is fixed."
+            exit 1
+            ;;
+    esac
+    case "$step_reply" in *'"pending":['*'"wallet-entry"'*) migration_wallet_pending=true ;; esac
+    migrate_step applets
+    case "$step_reply" in
+        *'"pending":['*'"applets"'*)
+            migration_error '' "Plasma is started again. Your widgets were not changed; run this again."
+            exit 1
+            ;;
+        '{"ok":true,"migrated":["applets"]'*) migration_moved_applets=true ;;
+        '{"ok":true,"migrated":[]'*) ;;
+        *)
+            migration_error "$step_reply" "Plasma is started again. Your widgets were not changed; run this again once that is fixed."
+            exit 1
+            ;;
+    esac
+fi
+if python3 -P -m pip show hearthside >/dev/null 2>&1; then
+    if ! python3 -P -m pip uninstall -y --break-system-packages hearthside; then
+        echo "Could not remove the old hearthside helper (it may be installed system-wide). Remove it manually, then run this script again." >&2
+        exit 1
+    fi
+fi
+if kpackagetool6 -t Plasma/Applet -s io.github.flybytechprog.hearthside >/dev/null 2>&1; then
+    if ! kpackagetool6 -t Plasma/Applet -r io.github.flybytechprog.hearthside; then
+        echo "Could not remove the old Hearthside widget package (it may be installed system-wide). Remove it manually, then run this script again." >&2
+        exit 1
+    fi
+fi
+# rm unlinks a symlink, never its target.
+rm -f -- "$icon_directory/hearthside.svg" \
+    "$icon_directory/hearthside-settings-general.svg" \
+    "$icon_directory/hearthside-settings-ai.svg" \
+    "$icon_directory/hearthside-settings-chat.svg" \
+    "$notifyrc_directory/hearthside.notifyrc"
+# <<< legacy-migration
+
 # Migrate from AI Usage: remove the old helper first, so the old and new
 # helpers never refresh the same OAuth tokens under different lock directories.
 migrated=false
@@ -247,7 +499,6 @@ else
 fi
 
 # Full-colour app icon for the widget list and Settings → About (metadata "Icon": "hearthwire").
-icon_directory="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
 mkdir -p -- "$icon_directory"
 # Unlinked first, like the notifyrc below, so a symlink is replaced, never followed.
 rm -f -- "$icon_directory/hearthwire.svg"
@@ -262,13 +513,14 @@ done
 
 # Usage alert events (System Settings → Notifications → Hearthwire). The old
 # file is unlinked first, so a symlink in its place is replaced, never followed.
-notifyrc_directory="${XDG_DATA_HOME:-$HOME/.local/share}/knotifications6"
 mkdir -p -- "$notifyrc_directory"
 rm -f -- "$notifyrc_directory/hearthwire.notifyrc"
 cp -- "$project_directory/assets/hearthwire.notifyrc" "$notifyrc_directory/hearthwire.notifyrc"
 chmod 0644 -- "$notifyrc_directory/hearthwire.notifyrc"
 
-if [ "$restart_plasma" = true ]; then
+if [ "$plasma_stopped" = true ]; then
+    plasma_started_again
+elif [ "$restart_plasma" = true ]; then
     if systemctl --user is-active plasma-plasmashell.service >/dev/null 2>&1; then
         systemctl --user restart plasma-plasmashell.service
     else
@@ -286,3 +538,21 @@ fi
 if [ "$migrated" = true ]; then
     echo "Remove the old AI Usage widget from your panel if it is still there, then add Hearthwire via Add Widgets…"
 fi
+# >>> legacy-migration: report the move; delete the old layout backup (Q4)
+if [ "$migration_pending" = true ]; then
+    echo "Moved your Hearthside data, settings and widgets to Hearthwire."
+    if [ "$migration_moved_applets" = true ]; then
+        echo "A backup of your panel layout from before the move was saved as $applets_backup; the next successful run of this installer deletes it."
+    fi
+    if [ "$migration_wallet_pending" = true ]; then
+        echo "The KDE Wallet key of the encrypted chat folder could not be moved yet (the wallet may be locked, or its prompt was cancelled). Unlocking with the passphrase works; run this script again to move the key."
+    fi
+    echo "You may delete the empty Hearthside folder in KWalletManager."
+fi
+# Only an owned regular file, never through a symlink (rm unlinks a link itself).
+if [ "$remove_applets_backup" = true ] && [ -f "$applets_backup" ] && [ ! -L "$applets_backup" ] && [ -O "$applets_backup" ]; then
+    if rm -f -- "$applets_backup"; then
+        echo "Deleted the panel layout backup from the move to Hearthwire (no longer needed)."
+    fi
+fi
+# <<< legacy-migration

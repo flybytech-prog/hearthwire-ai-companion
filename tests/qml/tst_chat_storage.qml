@@ -210,6 +210,19 @@ TestCase {
         compare(ChatStorage.messageFor("something-new"), "failed")
     }
 
+    // Unmigrated data of the previous version: setup, unlock and the web
+    // data steps refuse with a word of their own, shown as is.
+    function test_legacyDataIsKept() {
+        compare(ChatStorage.parseReply("{\"ok\":false,\"error\":\"legacy-data\"}"),
+                {ok: false, error: "legacy-data"})
+        compare(ChatStorage.replyFor(0, "{\"ok\":false,\"error\":\"legacy-data\"}\n"),
+                {ok: false, error: "legacy-data"})
+        compare(ChatStorage.messageFor("legacy-data"), "legacy-data")
+        compare(card({state: "absent", error: "legacy-data"}), {view: "create", message: "legacy-data"})
+        compare(card({state: "locked", error: "legacy-data"}), {view: "unlock", message: "legacy-data"})
+        compare(card({state: "unlocked", error: "legacy-data"}), {view: "retry", message: "legacy-data"})
+    }
+
     function card(fields) {
         return ChatStorage.cardFor(Object.assign({
             mode: "encrypted", state: "", op: "", error: "", hold: false,

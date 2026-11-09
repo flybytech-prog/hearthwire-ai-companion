@@ -283,6 +283,8 @@ KCM.SimpleKCM {
             return i18n("The encrypted folder is busy. Try again in a moment.")
         case "damaged":
             return i18n("The encrypted folder is damaged and can't be opened. Nothing was changed.")
+        case "legacy-data":
+            return i18n("Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
         default:
             return i18n("That didn't work. Nothing was changed.")
         }

@@ -1,10 +1,12 @@
-"""scripts/install.sh: the notification events file (plan R1 T1.3).
+"""scripts/install.sh: the notification events file (plan R1 T1.3) and the
+one-time migration to the new name (plan R2).
 
 The install path runs against a copy of the script and its assets in
-``tmp_path``, with stub ``python3``, ``kpackagetool6`` and ``qtpaths6`` first on
-PATH, so it never runs pip, never touches the real widget and never writes
-outside the test's own HOME (the script deletes ``<checkout>/build``, which
-here is the copy's).
+``tmp_path``, with stub ``python3``, ``kpackagetool6``, ``qtpaths6``,
+``systemctl``, ``kquitapp6`` and ``kstart`` first on PATH, so it never runs
+pip, never stops or starts the real Plasma, never touches the real widget and
+never writes outside the test's own HOME (the script deletes
+``<checkout>/build``, which here is the copy's).
 """
 
 import configparser
@@ -27,6 +29,9 @@ REQUIRED_QML = (
     "org/kde/plasma/plasma5support", "org/kde/plasma/components", "org/kde/plasma/extras",
     "org/kde/plasma/plasmoid",
 )
+# >>> legacy-migration
+OLD_PIP_PACKAGE = "hearthside"
+# <<< legacy-migration
 
 # Answers exactly the python3 calls the install path makes (all with -P);
 # anything else exits 97.
@@ -34,12 +39,15 @@ PYTHON_STUB = """#!/bin/sh
 case "$*" in
     "-P -c "*) exit 0 ;;
     "-P -m pip --version") exit 0 ;;
-    "-P -m pip show ai-usage-kde") exit 1 ;;
+    "-P -m pip show "*) exit 1 ;;
     "-P -m pip install "*) exit 0 ;;
     "-P -m hearthwire --version") echo 0.0-test ;;
+    "-P -m hearthwire --migrate status") echo '{"ok":true,"pending":[],"present":[]}' ;;
     *) exit 97 ;;
 esac
 """
+# Plasma must never be stopped or started by a test: these fail loudly.
+PLASMA_STUB = "#!/bin/sh\necho \"unexpected $0 $*\" >&2\nexit 98\n"
 KPACKAGETOOL_STUB = """#!/bin/sh
 case "$1 $2 $3" in
     "-t Plasma/Applet -s") exit 1 ;;
@@ -76,6 +84,8 @@ def run_install(tmp_path, *, xdg_data_home=None, python_stub=PYTHON_STUB, cwd=No
     _stub(stubs, "python3", python_stub)
     _stub(stubs, "kpackagetool6", KPACKAGETOOL_STUB)
     _stub(stubs, "qtpaths6", f"#!/bin/sh\necho '{qml}'\n")
+    for name in ("systemctl", "kquitapp6", "kstart"):
+        _stub(stubs, name, PLASMA_STUB)
     env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home)}
     if xdg_data_home is not None:
         env["XDG_DATA_HOME"] = str(xdg_data_home)
@@ -143,15 +153,16 @@ def test_modules_planted_in_the_working_folder_never_run(tmp_path):
     wrapper = (
         "#!/bin/sh\n"
         'if [ "$*" = "-P -m hearthwire --version" ]; then echo 0.0-test; exit 0; fi\n'
+        'if [ "$*" = "-P -m hearthwire --migrate status" ]; then echo \'{"ok":true,"pending":[],"present":[]}\'; exit 0; fi\n'
         f"PYTHONPATH='{fake.parent}' PYTHONDONTWRITEBYTECODE=1 exec '{sys.executable}' \"$@\"\n"
     )
     completed, _ = run_install(tmp_path, python_stub=wrapper, cwd=work)
     assert completed.returncode == 0, completed.stderr
     assert not marker.exists()
     calls = [line for line in pip_log.read_text().splitlines()]
-    assert calls[:2] == ['["--version"]', '["show", "ai-usage-kde"]']
-    assert calls[2].startswith('["install", "--user"')
-    assert len(calls) == 3
+    assert calls[:3] == ['["--version"]', f'["show", "{OLD_PIP_PACKAGE}"]', '["show", "ai-usage-kde"]']
+    assert calls[3].startswith('["install", "--user"')
+    assert len(calls) == 4
 
 
 def test_install_copies_the_notifyrc_with_mode_0644(tmp_path):
@@ -376,3 +387,416 @@ def test_uninstall_web_data_really_deletes_the_history_folder(tmp_path):
     assert (completed.returncode, completed.stderr) == (0, "")
     assert not history.exists()
     assert (data / "hearthwire").is_dir()
+
+
+# >>> legacy-migration: the one-time move from Hearthside (plan R2) ---------------------------------
+
+# A scripted helper: "--migrate OP" prints replies/OP.<n> for its n-th call (else
+# replies/OP). pip, kpackagetool6, systemctl, kquitapp6 and kstart only log; a
+# package counts as installed while state/pip-<name> or state/pkg-<id> exists.
+FLOW_PYTHON = r"""#!/bin/sh
+last=""
+for argument in "$@"; do last=$argument; done
+case "$*" in
+    "-P -m hearthwire --migrate "*) printf 'helper %s PYTHONPATH=%s\n' "$last" "${PYTHONPATH:-}" >> "$FLOW_LOG" ;;
+    "-P -m pip "*) printf 'pip %s\n' "$(shift 3; echo "$*")" >> "$FLOW_LOG" ;;
+esac
+case "$*" in
+    "-P -c "*) exit 0 ;;
+    "-P -m pip --version") exit 0 ;;
+    "-P -m pip show "*) [ -e "$FLOW_STATE/pip-$last" ] ;;
+    "-P -m pip uninstall "*) rm -f "$FLOW_STATE/pip-$last" ;;
+    "-P -m pip install "*) exit "${FLOW_PIP_INSTALL_EXIT:-0}" ;;
+    "-P -m hearthwire --version") echo 0.0-test ;;
+    "-P -m hearthwire --migrate "*)
+        op=$last
+        n=$(cat "$FLOW_STATE/count-$op" 2>/dev/null || echo 0)
+        n=$((n + 1))
+        echo "$n" > "$FLOW_STATE/count-$op"
+        if [ -e "$FLOW_REPLIES/$op.$n" ]; then cat "$FLOW_REPLIES/$op.$n"; else cat "$FLOW_REPLIES/$op"; fi
+        ;;
+    *) exit 97 ;;
+esac
+"""
+FLOW_KPACKAGETOOL = r"""#!/bin/sh
+printf 'kpackagetool6 %s %s\n' "$3" "${4##*/}" >> "$FLOW_LOG"
+case "$3" in
+    -s) [ -e "$FLOW_STATE/pkg-$4" ] ;;
+    -r) rm -f "$FLOW_STATE/pkg-$4" ;;
+    *) exit 0 ;;
+esac
+"""
+FLOW_SYSTEMCTL = r"""#!/bin/sh
+printf 'systemctl %s\n' "$*" >> "$FLOW_LOG"
+case "$2" in
+    is-active) [ -e "$FLOW_STATE/systemd" ] ;;
+    *) exit 0 ;;
+esac
+"""
+FLOW_LOGGER = "#!/bin/sh\nprintf '%s %s\\n' \"${0##*/}\" \"$*\" >> \"$FLOW_LOG\"\n"
+
+NOTHING = '{"ok":true,"pending":[],"present":[]}'
+PENDING = '{"ok":true,"pending":["data","config","notifyrc","cache","wallet-entry","applets"],"present":[]}'
+RUN_DONE = '{"ok":true,"migrated":["data","config","notifyrc","cache","wallet-entry"],"pending":["applets"]}'
+APPLETS_DONE = '{"ok":true,"migrated":["applets"],"pending":[]}'
+COMPLETE = '{"ok":true,"pending":[],"present":["data","config","notifyrc","wallet-entry","applets"]}'
+OLD_ID = "io.github.flybytechprog.hearthside"
+NEW_ID = "io.github.flybytechprog.hearthwire"
+OLD_FILES = ("icons/hicolor/scalable/apps/hearthside.svg",
+             "icons/hicolor/scalable/apps/hearthside-settings-general.svg",
+             "icons/hicolor/scalable/apps/hearthside-settings-ai.svg",
+             "icons/hicolor/scalable/apps/hearthside-settings-chat.svg",
+             "knotifications6/hearthside.notifyrc")
+BACKUP = ".config/plasma-org.kde.plasma.desktop-appletsrc.hearthside-backup"
+
+
+class Flow:
+    def __init__(self, tmp_path):
+        self.root = tmp_path
+        self.project = _copied_project(tmp_path)
+        self.home = tmp_path / "home"
+        self.home.mkdir(exist_ok=True)
+        self.state = tmp_path / "state"
+        self.state.mkdir()
+        self.replies = tmp_path / "replies"
+        self.replies.mkdir()
+        self.log = tmp_path / "flow.log"
+        self.log.write_text("")
+        qml = tmp_path / "qml"
+        for module in REQUIRED_QML + ("QtWebEngine",):
+            (qml / module).mkdir(parents=True, exist_ok=True)
+        stubs = tmp_path / "stub-bin"
+        stubs.mkdir(exist_ok=True)
+        _stub(stubs, "python3", FLOW_PYTHON)
+        _stub(stubs, "kpackagetool6", FLOW_KPACKAGETOOL)
+        _stub(stubs, "systemctl", FLOW_SYSTEMCTL)
+        _stub(stubs, "kquitapp6", FLOW_LOGGER)
+        _stub(stubs, "kstart", FLOW_LOGGER)
+        _stub(stubs, "qtpaths6", f"#!/bin/sh\necho '{qml}'\n")
+        # Present, so no package offer ever asks; sudo and pacman would fail loudly.
+        for name in ("gocryptfs", "kdialog", "fusermount3"):
+            _stub(stubs, name, "#!/bin/sh\nexit 0\n")
+        for name in ("sudo", "pacman"):
+            _stub(stubs, name, PLASMA_STUB)
+        self.env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(self.home), "FLOW_LOG": str(self.log),
+                    "FLOW_STATE": str(self.state), "FLOW_REPLIES": str(self.replies)}
+
+    def reply(self, operation, text, call=None):
+        (self.replies / (operation if call is None else f"{operation}.{call}")).write_text(text + "\n")
+
+    def installed(self, *, pip=(), packages=()):
+        for name in pip:
+            (self.state / f"pip-{name}").write_text("")
+        for name in packages:
+            (self.state / f"pkg-{name}").write_text("")
+
+    def old_files(self):
+        for name in OLD_FILES:
+            path = self.home / ".local" / "share" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("old")
+
+    def run(self, *arguments, **extra):
+        return subprocess.run(
+            ["sh", str(self.project / "scripts" / "install.sh"), *arguments],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, env={**self.env, **extra},
+            timeout=120, check=False,
+        )
+
+    def calls(self):
+        return self.log.read_text().splitlines()
+
+    def steps(self):
+        """The calls that change something or matter for the order."""
+        wanted = ("helper", "systemctl --user stop", "systemctl --user start", "kquitapp6", "kstart",
+                  "pip uninstall", "pip install", "kpackagetool6 -r", "kpackagetool6 -i", "kpackagetool6 -u")
+        return [call.split(" PYTHONPATH=")[0] for call in self.calls() if call.startswith(wanted)]
+
+
+def test_every_helper_call_runs_from_the_checkout(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", PENDING)
+    flow.reply("run", RUN_DONE)
+    flow.reply("applets", APPLETS_DONE)
+    assert flow.run("--restart-plasma").returncode == 0
+    helpers = [call for call in flow.calls() if call.startswith("helper ")]
+    assert len(helpers) == 3
+    assert all(call.endswith(f" PYTHONPATH={flow.project}/src") for call in helpers)
+    script = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    assert re.findall(r"python3 -P -m hearthwire --migrate", script) == []
+
+
+def test_nothing_to_move_never_stops_plasma(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", NOTHING)
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert flow.steps() == ["helper status", "pip install --user --upgrade --force-reinstall --break-system-packages "
+                            f"{flow.project}", "kpackagetool6 -i plasmoid"]
+    assert "Moved your Hearthside" not in completed.stdout
+
+
+def test_a_pending_move_needs_restart_plasma_without_a_terminal(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", PENDING)
+    flow.installed(pip=["hearthside"], packages=[OLD_ID])
+    flow.old_files()
+    completed = flow.run()
+    assert completed.returncode == 1
+    assert "--restart-plasma" in completed.stderr and "Nothing was changed." in completed.stderr
+    assert flow.steps() == ["helper status"]
+    assert all((flow.home / ".local" / "share" / name).exists() for name in OLD_FILES)
+
+
+@pytest.mark.parametrize("systemd", [True, False])
+def test_the_move_runs_in_order_with_plasma_stopped(tmp_path, systemd):
+    flow = Flow(tmp_path)
+    if systemd:
+        (flow.state / "systemd").write_text("")
+    flow.reply("status", PENDING)
+    flow.reply("run", RUN_DONE)
+    flow.reply("applets", APPLETS_DONE)
+    flow.installed(pip=["hearthside"], packages=[OLD_ID])
+    flow.old_files()
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 0, completed.stderr
+    stop = ["systemctl --user stop plasma-plasmashell.service"] if systemd else ["kquitapp6 plasmashell"]
+    start = ["systemctl --user start plasma-plasmashell.service"] if systemd else ["kstart plasmashell"]
+    assert flow.steps() == [
+        "helper status", *stop, "helper run", "helper applets",
+        "pip uninstall -y --break-system-packages hearthside", f"kpackagetool6 -r {OLD_ID}",
+        f"pip install --user --upgrade --force-reinstall --break-system-packages {flow.project}",
+        "kpackagetool6 -i plasmoid", *start,
+    ]
+    assert not any((flow.home / ".local" / "share" / name).exists() for name in OLD_FILES)
+    assert "Moved your Hearthside data, settings and widgets to Hearthwire." in completed.stdout
+    assert "the next successful run of this installer deletes it" in completed.stdout
+    assert "KDE Wallet key" not in completed.stdout
+
+
+@pytest.mark.parametrize(("reply", "message"), [
+    ('{"ok":false,"error":"not-locked"}', "Lock the encrypted chat folder"),
+    ('{"ok":false,"error":"busy"}', "in use right now"),
+    ('{"ok":false,"error":"conflict","category":"data"}', "hearthwire folder exist in"),
+    ('{"ok":false,"error":"conflict","category":"config"}', "/.config; refusing to merge"),
+    ('{"ok":false,"error":"symlink","category":"data"}', "symbolic link"),
+    ('{"ok":false,"error":"invalid","category":"applets"}', "panel layout file"),
+    ("garbage", "Could not move"),
+])
+def test_status_errors_stop_before_anything_changes(tmp_path, reply, message):
+    flow = Flow(tmp_path)
+    flow.reply("status", reply)
+    flow.installed(pip=["hearthside"], packages=[OLD_ID])
+    flow.old_files()
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 1
+    assert message in completed.stderr and "Nothing was changed." in completed.stderr
+    assert flow.steps() == ["helper status"]
+    assert all((flow.home / ".local" / "share" / name).exists() for name in OLD_FILES)
+
+
+def test_a_failed_run_starts_plasma_again_and_installs_nothing(tmp_path):
+    flow = Flow(tmp_path)
+    (flow.state / "systemd").write_text("")
+    flow.reply("status", PENDING)
+    flow.reply("run", '{"ok":false,"error":"os-error","category":"config"}')
+    flow.installed(pip=["hearthside"], packages=[OLD_ID])
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 1
+    assert "Finished steps are kept" in completed.stderr
+    assert flow.steps() == ["helper status", "systemctl --user stop plasma-plasmashell.service", "helper run",
+                            "systemctl --user start plasma-plasmashell.service"]
+
+
+def test_failed_applets_start_plasma_again(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", PENDING)
+    flow.reply("run", RUN_DONE)
+    flow.reply("applets", '{"ok":false,"error":"invalid","category":"applets"}')
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 1
+    assert "panel layout file" in completed.stderr
+    assert flow.steps()[-1] == "kstart plasmashell"
+    assert not any(step.startswith("pip install") for step in flow.steps())
+
+
+def test_plasma_running_is_retried_until_plasmashell_is_gone(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", PENDING)
+    flow.reply("run", '{"ok":false,"error":"plasma-running"}', 1)
+    flow.reply("run", '{"ok":false,"error":"plasma-running"}', 2)
+    flow.reply("run", RUN_DONE)
+    flow.reply("applets", APPLETS_DONE)
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 0, completed.stderr
+    assert [step for step in flow.steps() if step.startswith("helper")] == [
+        "helper status", "helper run", "helper run", "helper run", "helper applets"]
+
+
+def test_a_pending_wallet_key_is_reported(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", PENDING)
+    flow.reply("run", '{"ok":true,"migrated":["data","config","notifyrc","cache"],"pending":["wallet-entry","applets"]}')
+    flow.reply("applets", '{"ok":true,"migrated":["applets"],"pending":["wallet-entry"]}')
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 0, completed.stderr
+    assert "could not be moved yet" in completed.stdout and "run this script again" in completed.stdout
+
+
+# --- Q4: the appletsrc backup goes on the next successful install ------------------------------------
+
+
+def _backup(flow, kind="file"):
+    path = flow.home / BACKUP
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "file":
+        path.write_text("[Containments][1][Applets][2]\nplugin=x\n")
+    else:
+        target = flow.root / "precious"
+        target.write_text("keep")
+        path.symlink_to(target)
+    return path
+
+
+def test_the_next_install_after_a_complete_move_deletes_the_backup(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", COMPLETE)
+    backup = _backup(flow)
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert not backup.exists()
+    assert "Deleted the panel layout backup" in completed.stdout
+    assert flow.steps()[0] == "helper status" and "helper run" not in flow.steps()
+
+
+@pytest.mark.parametrize("status", [
+    PENDING, NOTHING, '{"ok":true,"pending":["wallet-entry"],"present":["data","applets"]}',
+    '{"ok":true,"pending":[],"present":["data","config"]}',
+])
+def test_the_backup_stays_until_the_move_is_complete(tmp_path, status):
+    flow = Flow(tmp_path)
+    flow.reply("status", status)
+    flow.reply("run", '{"ok":true,"migrated":[],"pending":["wallet-entry"]}')
+    flow.reply("applets", '{"ok":true,"migrated":[],"pending":["wallet-entry"]}')
+    backup = _backup(flow)
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 0, completed.stderr
+    assert backup.exists()
+
+
+def test_the_backup_stays_when_the_install_fails(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", COMPLETE)
+    backup = _backup(flow)
+    completed = flow.run(FLOW_PIP_INSTALL_EXIT="1")
+    assert completed.returncode != 0
+    assert backup.exists()
+
+
+def test_a_symlinked_backup_is_never_followed_or_deleted(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", COMPLETE)
+    backup = _backup(flow, kind="symlink")
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert backup.is_symlink() and (flow.root / "precious").read_text() == "keep"
+
+
+def test_the_backup_rule_unlinks_only_an_owned_regular_file():
+    script = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    (line,) = [line for line in script.splitlines() if '"$remove_applets_backup" = true' in line]
+    assert '[ -f "$applets_backup" ] && [ ! -L "$applets_backup" ] && [ -O "$applets_backup" ]' in line
+
+
+# --- --rollback-hearthwire -------------------------------------------------------------------------------
+
+
+def test_rollback_restores_then_uninstalls_and_names_the_tag(tmp_path):
+    flow = Flow(tmp_path)
+    (flow.state / "systemd").write_text("")
+    flow.reply("rollback", '{"ok":false,"error":"plasma-running"}', 1)
+    flow.reply("rollback", '{"ok":true,"restored":["data","config","notifyrc","wallet-entry","applets"],"pending":[]}')
+    flow.installed(pip=["hearthwire"], packages=[NEW_ID])
+    icons = flow.home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps"
+    icons.mkdir(parents=True)
+    for name in ICON_NAMES:
+        (icons / name).write_text("<svg/>")
+    completed = flow.run("--rollback-hearthwire", "--restart-plasma")
+    assert completed.returncode == 0, completed.stderr
+    assert flow.steps() == [
+        "helper rollback", "systemctl --user stop plasma-plasmashell.service", "helper rollback",
+        "pip uninstall -y --break-system-packages hearthwire", f"kpackagetool6 -r {NEW_ID}",
+        "systemctl --user start plasma-plasmashell.service",
+    ]
+    assert os.listdir(icons) == []
+    assert completed.stdout.splitlines()[-1] == "To use Hearthside again, check out tag hearthside-final and run its install.sh"
+
+
+@pytest.mark.parametrize("reply", ['{"ok":false,"error":"not-locked"}', '{"ok":false,"error":"busy"}',
+                                   '{"ok":false,"error":"conflict","category":"data"}', ""])
+def test_rollback_refusals_stop_plasma_never(tmp_path, reply):
+    flow = Flow(tmp_path)
+    flow.reply("rollback", reply)
+    flow.installed(pip=["hearthwire"], packages=[NEW_ID])
+    completed = flow.run("--rollback-hearthwire", "--restart-plasma")
+    assert completed.returncode == 1
+    assert flow.steps() == ["helper rollback"]
+
+
+def test_rollback_without_restart_plasma_and_no_terminal_changes_nothing(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("rollback", '{"ok":false,"error":"plasma-running"}')
+    completed = flow.run("--rollback-hearthwire")
+    assert completed.returncode == 1 and "--restart-plasma" in completed.stderr
+    assert flow.steps() == ["helper rollback"]
+
+
+@pytest.mark.parametrize("argv", [["--rollback-hearthwire", "--uninstall-web-data"], ["--restart-plasma", "x"],
+                                  ["--restart-plasma", "--rollback-hearthwire"]])
+def test_install_script_usage(tmp_path, argv):
+    flow = Flow(tmp_path)
+    completed = flow.run(*argv)
+    assert completed.returncode == 2 and "Usage:" in completed.stderr
+    assert flow.calls() == []
+
+
+def test_uninstall_web_data_refuses_while_old_data_waits(tmp_path):
+    completed = run_uninstall(tmp_path, '{"ok":false,"error":"legacy-data"}')
+    assert completed.returncode == 1
+    assert "has not been moved to Hearthwire yet" in completed.stderr
+    assert helper_calls(tmp_path) == ["-P -m hearthwire --web-data purge"]
+
+
+@pytest.mark.parametrize(("answer", "code"), [("y", 0), ("n", 1), ("", 1)])
+def test_in_a_terminal_the_move_asks_before_stopping_plasma(tmp_path, answer, code):
+    import pty
+
+    flow = Flow(tmp_path)
+    flow.reply("status", PENDING)
+    flow.reply("run", RUN_DONE)
+    flow.reply("applets", APPLETS_DONE)
+    master, slave = pty.openpty()
+    try:
+        child = subprocess.Popen(["sh", str(flow.project / "scripts" / "install.sh")], stdin=slave, stdout=slave,
+                                 stderr=subprocess.PIPE, env=flow.env, close_fds=True)
+        os.close(slave)
+        slave = -1
+        os.write(master, (answer + "\n").encode())
+        output = b""
+        while True:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output += chunk
+        assert child.wait(timeout=120) == code
+    finally:
+        os.close(master)
+        if slave >= 0:
+            os.close(slave)
+    assert b"stops Plasma for a moment and starts it again. Continue? [y/N]" in output
+    stopped = "kquitapp6 plasmashell" in flow.steps()
+    assert stopped == (code == 0)
+# <<< legacy-migration

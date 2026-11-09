@@ -606,7 +606,7 @@ PlasmoidItem {
             } else if (!reply.ok) {
                 root.chatPreparedGeneration = -1
                 root.chatVaultError = reply.error === "not-verified" || reply.error === "stale-mount"
-                    ? reply.error : "prepare-failed"
+                    || reply.error === "legacy-data" ? reply.error : "prepare-failed"
                 root.chatEnqueue(["status"])
             }
             break

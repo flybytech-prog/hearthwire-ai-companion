@@ -35,7 +35,7 @@ var HELPER_ERRORS = [
     "absent", "cancelled", "wrong-passphrase", "empty-passphrase", "init-failed",
     "mount-failed", "not-verified", "stale-mount", "busy", "not-locked", "no-runtime-dir",
     "damaged", "not-set-up", "wallet-disabled", "wallet-closed", "wallet-failed",
-    "wallet-mismatch", "wallet-write-failed"
+    "wallet-mismatch", "wallet-write-failed", "legacy-data"
 ]
 
 // Only the exact word "wallet" means KDE Wallet; anything else (including
@@ -268,6 +268,8 @@ function messageFor(error) {
     case "wallet-failed":
     case "wallet-mismatch":
     case "wallet-write-failed":
+    // Saved data of the previous version is still waiting for the installer.
+    case "legacy-data":
         return error
     // Plasma start found the wallet closed: the card just offers Unlock.
     case "wallet-closed":

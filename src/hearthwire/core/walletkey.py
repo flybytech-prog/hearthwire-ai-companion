@@ -56,6 +56,11 @@ ENTRY = "encrypted-chat-folder"
 ENTRY_NEW = ENTRY + ".new"
 ENTRIES = (ENTRY, ENTRY_NEW)
 APP_ID = "Hearthwire"
+# The folder of the product's former name. Only the installer's one-time
+# migration (core/legacy.py) uses it: kwallet-query may read or write ENTRY
+# there, and qdbus6 may ask keyDoesNotExist or call removeEntry for ENTRIES.
+# The folder itself is never removed (removeFolder is not in KWALLET_METHODS).
+LEGACY_FOLDER = "Hearthside"
 
 KEYS_DIR = "vault-keys"
 SLOT_FILE = "wallet.conf"
@@ -101,13 +106,13 @@ def keygen_argv(openssl: str) -> list[str]:
     return [openssl, "rand", "-hex", "32"]
 
 
-def write_argv(kwallet_query: str, wallet: str, entry: str = ENTRY) -> list[str]:
-    return [kwallet_query, "--folder", FOLDER, "--write-password", entry, wallet]
+def write_argv(kwallet_query: str, wallet: str, entry: str = ENTRY, folder: str = FOLDER) -> list[str]:
+    return [kwallet_query, "--folder", folder, "--write-password", entry, wallet]
 
 
-def read_argv(kwallet_query: str, wallet: str, entry: str = ENTRY) -> list[str]:
+def read_argv(kwallet_query: str, wallet: str, entry: str = ENTRY, folder: str = FOLDER) -> list[str]:
     """Long option names only: gocryptfs turns ``-f`` into ``--f`` in -extpass."""
-    return [kwallet_query, "--folder", FOLDER, "--read-password", entry, wallet]
+    return [kwallet_query, "--folder", folder, "--read-password", entry, wallet]
 
 
 def kwallet_argv(qdbus: str, method: str, *arguments: str) -> list[str]:
@@ -134,6 +139,7 @@ def _secrets_path(path: str) -> bool:
 
 
 def is_read_argv(values: Sequence[str]) -> bool:
+    """The exact ``kwallet-query -r`` of ENTRY in FOLDER (never LEGACY_FOLDER): the only extpass."""
     values = list(values)
     return (
         len(values) == 6 and os.path.isabs(values[0]) and os.path.basename(values[0]) == "kwallet-query"
@@ -152,7 +158,8 @@ def check_argv(argv: Sequence[str]) -> None:
             raise HelperError("os-error")
     elif tool == "kwallet-query":
         if len(argv) != 6 or not valid_wallet(argv[5]) or argv not in [
-                shape(argv[0], argv[5], entry) for shape in (read_argv, write_argv) for entry in ENTRIES]:
+                *(shape(argv[0], argv[5], entry) for shape in (read_argv, write_argv) for entry in ENTRIES),
+                *(shape(argv[0], argv[5], ENTRY, LEGACY_FOLDER) for shape in (read_argv, write_argv))]:
             raise HelperError("os-error")
     elif tool == "qdbus6":
         if len(argv) < 4:
@@ -165,13 +172,15 @@ def check_argv(argv: Sequence[str]) -> None:
                 raise HelperError("os-error")
             if method in ("keyDoesNotExist", "open") and not valid_wallet(arguments[0]):
                 raise HelperError("os-error")
-            if method == "keyDoesNotExist" and arguments[1:] not in ([FOLDER, entry] for entry in ENTRIES):
+            if method == "keyDoesNotExist" and arguments[1:] not in (
+                    [folder, entry] for folder in (FOLDER, LEGACY_FOLDER) for entry in ENTRIES):
                 raise HelperError("os-error")
             if method == "open" and arguments[1:] != ["0", APP_ID]:
                 raise HelperError("os-error")
             if method in ("removeEntry", "close") and not re.fullmatch(r"[0-9]{1,10}", arguments[0]):
                 raise HelperError("os-error")
-            if method == "removeEntry" and arguments[1:] not in ([FOLDER, entry, APP_ID] for entry in ENTRIES):
+            if method == "removeEntry" and arguments[1:] not in (
+                    [folder, entry, APP_ID] for folder in (FOLDER, LEGACY_FOLDER) for entry in ENTRIES):
                 raise HelperError("os-error")
             if method == "close" and arguments[1:] != ["false", APP_ID]:
                 raise HelperError("os-error")
@@ -273,9 +282,9 @@ def local_wallet(qdbus: str) -> Optional[str]:
     return name if valid_wallet(name) else None
 
 
-def key_missing(qdbus: str, wallet: str, entry: str = ENTRY) -> Optional[bool]:
+def key_missing(qdbus: str, wallet: str, entry: str = ENTRY, folder: str = FOLDER) -> Optional[bool]:
     """True when there is no entry (answers while locked, without a prompt)."""
-    return _boolean(_query(kwallet_argv(qdbus, "keyDoesNotExist", wallet, FOLDER, entry)))
+    return _boolean(_query(kwallet_argv(qdbus, "keyDoesNotExist", wallet, folder, entry)))
 
 
 def wallet_locked(qdbus: str, wallet: str) -> Optional[bool]:
@@ -356,7 +365,7 @@ def write_new_key(tools: dict[str, str], wallet: str, *, entry: str = ENTRY,
         raise HelperError("wallet-write-failed")
 
 
-def read_key_into_pipe(kwallet_query: str, wallet: str, *, entry: str = ENTRY,
+def read_key_into_pipe(kwallet_query: str, wallet: str, *, entry: str = ENTRY, folder: str = FOLDER,
                        timeout: Optional[float] = None) -> int:
     """Run ``kwallet-query -r <entry>`` into a fresh pipe; returns the pipe's read end.
 
@@ -368,7 +377,7 @@ def read_key_into_pipe(kwallet_query: str, wallet: str, *, entry: str = ENTRY,
     reader, writer = os.pipe()
     child: Optional[subprocess.Popen] = None
     try:
-        child = _spawn(read_argv(kwallet_query, wallet, entry), stdout=writer)
+        child = _spawn(read_argv(kwallet_query, wallet, entry, folder), stdout=writer)
         os.close(writer)
         writer = -1
         code = _finish(child, PROMPT_TIMEOUT if timeout is None else timeout)
@@ -387,16 +396,21 @@ def read_key_into_pipe(kwallet_query: str, wallet: str, *, entry: str = ENTRY,
 
 
 def copy_entry(tools: dict[str, str], wallet: str, source: str, target: str, *,
+               source_folder: str = FOLDER, target_folder: str = FOLDER,
                timeout: Optional[float] = None) -> None:
     """``kwallet-query -r <source>`` into a pipe, and only after it exited 0 that pipe
-    into ``kwallet-query -w <target>`` (which must exit 0). Never read here."""
+    into ``kwallet-query -w <target>`` (which must exit 0). Never read here.
+
+    The folders differ only for the installer's migration (LEGACY_FOLDER to
+    FOLDER) and its rollback (the reverse).
+    """
     kwallet_query = tools.get("kwallet-query")
     if kwallet_query is None:
         raise HelperError("missing-tool")
-    reader = read_key_into_pipe(kwallet_query, wallet, entry=source, timeout=timeout)
+    reader = read_key_into_pipe(kwallet_query, wallet, entry=source, folder=source_folder, timeout=timeout)
     store: Optional[subprocess.Popen] = None
     try:
-        store = _spawn(write_argv(kwallet_query, wallet, target), stdin=reader)
+        store = _spawn(write_argv(kwallet_query, wallet, target, target_folder), stdin=reader)
         os.close(reader)
         reader = -1
         code = _finish(store, PROMPT_TIMEOUT if timeout is None else timeout)
@@ -409,16 +423,16 @@ def copy_entry(tools: dict[str, str], wallet: str, source: str, target: str, *,
         raise HelperError("wallet-failed")
 
 
-def _delete_entry(qdbus: str, wallet: str, entry: str, timeout: float) -> bool:
+def _delete_entry(qdbus: str, wallet: str, entry: str, timeout: float, folder: str = FOLDER) -> bool:
     """``removeEntry`` through kwalletd6; True when the entry is gone afterwards."""
     handle = _query(kwallet_argv(qdbus, "open", wallet, "0", APP_ID), timeout)
     if handle is None or not re.fullmatch(r"[0-9]{1,10}", handle):
         return False
     try:
-        _query(kwallet_argv(qdbus, "removeEntry", handle, FOLDER, entry, APP_ID), timeout)
+        _query(kwallet_argv(qdbus, "removeEntry", handle, folder, entry, APP_ID), timeout)
     finally:
         _query(kwallet_argv(qdbus, "close", handle, "false", APP_ID))
-    return key_missing(qdbus, wallet, entry) is True
+    return key_missing(qdbus, wallet, entry, folder) is True
 
 
 def remove_entry(tools: dict[str, str], wallet: str, *, entry: str = ENTRY,
@@ -438,6 +452,17 @@ def remove_entry(tools: dict[str, str], wallet: str, *, entry: str = ENTRY,
         except HelperError:
             pass  # Best effort: the value is unusable once the entry is gone, deleted below.
     if not _delete_entry(qdbus, wallet, entry, timeout):
+        raise HelperError("wallet-failed")
+
+
+def remove_legacy_entry(tools: dict[str, str], wallet: str, entry: str, *,
+                        timeout: Optional[float] = None) -> None:
+    """Delete ``entry`` from LEGACY_FOLDER through kwalletd6 (no overwrite: nothing
+    is ever written there except by a rollback). Raises wallet-failed when it may remain."""
+    qdbus = tools.get("qdbus6")
+    if qdbus is None:
+        raise HelperError("missing-tool")
+    if not _delete_entry(qdbus, wallet, entry, PROMPT_TIMEOUT if timeout is None else timeout, LEGACY_FOLDER):
         raise HelperError("wallet-failed")
 
 
@@ -486,7 +511,7 @@ def forget(tools: dict[str, str]) -> bool:
 
 
 __all__ = [
-    "ENTRIES", "ENTRY", "ENTRY_NEW", "FOLDER", "KEYS_DIR", "SLOT_FILE", "SLOT_NEW", "SLOT_OLD", "TOOLS",
+    "ENTRIES", "ENTRY", "ENTRY_NEW", "FOLDER", "KEYS_DIR", "LEGACY_FOLDER", "SLOT_FILE", "SLOT_NEW", "SLOT_OLD", "TOOLS",
     "check_argv", "copy_entry", "find_tools", "forget", "preflight", "read_argv", "read_key_into_pipe",
-    "remove_entries", "remove_entry", "wallet_locked", "write_new_key",
+    "remove_entries", "remove_entry", "remove_legacy_entry", "wallet_locked", "write_new_key",
 ]
