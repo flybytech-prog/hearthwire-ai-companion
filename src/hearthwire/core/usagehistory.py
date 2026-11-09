@@ -46,7 +46,7 @@ LOCK_FILE = "history.lock"
 FILE_MODE = 0o600
 
 # Codes the plasmoid knows for --usage-history; anything else is os-error.
-ERRORS = frozenset({"bad-sample", "symlink", "not-directory", "not-owned", "busy", "os-error"})
+ERRORS = frozenset({"bad-sample", "symlink", "not-directory", "not-owned", "busy", "legacy-data", "os-error"})
 
 # Every catalog (provider, metric) pair with a percentage, in catalog order.
 # extra_usage is money, not a percentage of a plan, so it is never recorded.
@@ -184,7 +184,15 @@ def decode(data: bytes) -> History:
 
 
 def _history_directory(environ: Optional[Mapping[str, str]], opened: list[int], *, create: bool) -> Optional[int]:
-    """``<data>/hearthwire/usage-history``; None when a part is missing and not ``create``."""
+    """``<data>/hearthwire/usage-history``; None when a part is missing and not ``create``.
+
+    Never created while the previous version's data waits for the installer:
+    the new folder would then be a conflict.
+    """
+    if create:
+        from .legacy import refuse_legacy_data  # Imported here: legacy itself builds on this module.
+
+        refuse_legacy_data(environ)
     parent = open_base(data_base(environ), create=create)
     if parent is None:
         return None

@@ -6052,12 +6052,21 @@ def _settings_problems(sources):
     return problems
 
 
-def _webauth_problems(web):
+def _webauth_problems(sources):
+    """One handler, in ChatWebView.qml; the signal is named nowhere else, so
+    neither a Connections block nor `.webAuthUxRequested.connect` can add one."""
+    web_name = _rel(CHAT_WEB_VIEW)
+    web = sources.get(web_name, "")
     bodies = [body for _, body in _handler_bodies(web, "onWebAuthUxRequested")]
     if len(bodies) != 1:
         return [f"exactly one onWebAuthUxRequested handler, found {len(bodies)}"]
     body = _normalized(bodies[0])
-    problems = []
+    problems = [f"{name}:{_line_of(code, match.start())}: `{match.group(0)}` outside the one handler"
+                for name, code in sources.items()
+                for match in re.finditer(r"\b(?:on)?[Ww]ebAuthUxRequested\b", code)
+                if (name, match.group(0)) != (web_name, "onWebAuthUxRequested")]
+    if len(_hits(r"\bonWebAuthUxRequested\b", web)) != 1:
+        problems.append("ChatWebView.qml may name onWebAuthUxRequested only for the one handler")
     if not body.startswith("{ request.cancel() "):
         problems.append(f"onWebAuthUxRequested must start with `request.cancel()`, got `{body}`")
     if len(_hits(r"\brequest\b", body)) != 1:
@@ -6071,7 +6080,7 @@ def test_webengine_settings_are_exactly_the_pinned_bindings():
 
 
 def test_passkey_requests_are_always_cancelled():
-    problems = _webauth_problems(_read_code(CHAT_WEB_VIEW))
+    problems = _webauth_problems(_all_code())
     assert not problems, problems
 
 
@@ -6118,4 +6127,25 @@ LOW2_WEBAUTH_MUTATIONS = [
 
 @pytest.mark.parametrize(("old", "new"), LOW2_WEBAUTH_MUTATIONS)
 def test_proof_webauth_rule_catches(old, new):
-    assert _webauth_problems(_mutated(CHAT_WEB_VIEW, old, new))
+    assert _webauth_problems(_sources_with(CHAT_WEB_VIEW, old, new))
+
+
+LOW2_WEBAUTH_SECOND_HANDLERS = [
+    (CHAT_WEB_VIEW, "            onWebAuthUxRequested: (request) => {\n",
+     "            Connections {\n                target: page\n"
+     "                function onWebAuthUxRequested(request) { request.retry() }\n            }\n"
+     "            onWebAuthUxRequested: (request) => {\n"),
+    (CHAT_WEB_VIEW, "            onWebAuthUxRequested: (request) => {\n",
+     "            Component.onCompleted: page.webAuthUxRequested.connect(function (r) { r.retry() })\n"
+     "            onWebAuthUxRequested: (request) => {\n"),
+    (CHAT_VIEW, "onTriggered: chatView.web.cancelDownload()",
+     "onTriggered: chatView.web.currentView.webAuthUxRequested.connect(chatView.web.saveDownload)"),
+    (FULL_REPRESENTATION, "onClicked: chatView.openExternally()",
+     "onClicked: chatView.web.currentView.webAuthUxRequested.connect(chatView.openExternally)"),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), LOW2_WEBAUTH_SECOND_HANDLERS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(LOW2_WEBAUTH_SECOND_HANDLERS)])
+def test_proof_a_second_webauth_handler_is_caught(path, old, new):
+    assert _webauth_problems(_sources_with(path, old, new))

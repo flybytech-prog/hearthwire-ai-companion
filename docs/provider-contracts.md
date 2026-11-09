@@ -663,7 +663,7 @@ A failure is `{"ok":false,"error":"<code>"}`:
 | `wallet-failed` | Wallet jobs: `kwallet-query` exited non-zero or did not finish within 120 s (denied, cancelled, locked and not answered, no entry), a `qdbus6` query failed or timed out, `localWallet` is not a valid name, or (gocryptfs exit 9 with the wallet extpass) an empty value; for `remove-key`, `destroy`, `purge`: the wallet entry may remain |
 | `wallet-mismatch` | `unlock --method wallet`, `auto-unlock`: the wallet's value does not open the slot (gocryptfs exit 12); set the wallet up again |
 | `wallet-write-failed` | `add-key`: openssl failed, gocryptfs could not write the slot (exit 24 or another code) or the slot could not be saved |
-| `legacy-data` | `create`, `unlock`, `auto-unlock`, `add-key`, `--web-data purge`: the previous version's data folder still exists and only the installer may move it; nothing else was done. The Chat tab and settings page show one fixed message, and `scripts/install.sh --uninstall-web-data` stops with one |
+| `legacy-data` | `create`, `unlock`, `auto-unlock`, `add-key`, `--web-data purge`, `--usage-history record`, `--settings-backup export`: the previous version's data folder still exists and only the installer may move it; nothing else was done. The Chat tab and settings page show one fixed message, and `scripts/install.sh --uninstall-web-data` stops with one |
 | `os-error` | Any other failure, including unexpected errors (no traceback is printed) |
 
 The plasmoid accepts only these codes (plus `empty-passphrase`, which the
@@ -887,7 +887,8 @@ argparse exits 2.
 
 Errors (`{"ok":false,"error":"<code>"}`, exit 0): `bad-sample`, `symlink` (a
 folder or file of ours is a symlink), `not-directory`, `not-owned`, `busy`,
-`os-error` (anything else). Replies never carry a path or text.
+`legacy-data` (`record` only: the previous version's data still waits for the
+installer), `os-error` (anything else). Replies never carry a path or text.
 `scripts/install.sh --uninstall-web-data` also runs `--usage-history clear`
 once the chat sign-in data is gone.
 
@@ -966,8 +967,9 @@ Errors (`{"ok":false,"error":"<code>"}`, exit 0): `absent` (no backup;
 `import` only), `invalid` (not a backup file), `unsupported` (another
 version or schema), `too-large` (file over 64 KiB, or an export that would
 be), `bad-data` (export input), `symlink`, `not-owned`, `unsafe-mode` (the
-folder or file is group- or other-writable), `os-error`. Replies never carry
-a path.
+folder or file is group- or other-writable), `legacy-data` (`export` only: the
+previous version's data still waits for the installer), `os-error`. Replies
+never carry a path.
 
 ## Upgrading from Hearthside
 
@@ -993,15 +995,17 @@ Categories, always in this order: `data`, `config`, `notifyrc`, `cache`,
 
 | Command | Does | Success reply |
 | --- | --- | --- |
-| `--migrate status` | Read only. `pending` is what still has to move, `present` what already uses the new name (`data`, `config`, `notifyrc`, `wallet-entry`, `applets`). With work pending it also refuses a mounted vault, a held lock and data under both names; with nothing pending a mounted vault is fine | `{"ok":true,"pending":[...],"present":[...]}` |
-| `--migrate run` | Moves the first five categories. `migrated` is what this call moved, `pending` what is still left afterwards (including `applets`, which is its own step). With none of the five pending it returns at once and takes no lock | `{"ok":true,"migrated":[...],"pending":[...]}` |
-| `--migrate applets` | Writes `<appletsrc>.hearthside-backup` (mode `0600`, once; an existing one is kept), then replaces appletsrc atomically, keeping its mode, after checking again that plasmashell is stopped and the file is unchanged | `{"ok":true,"migrated":[...],"pending":[...]}` |
-| `--migrate rollback` | The inverse of `run` and `applets`, except that the token cache is not restored. `pending` can only be `["wallet-entry"]` or empty | `{"ok":true,"restored":[...],"pending":[...]}` |
+| `--migrate status` | Read only. `pending` is what still has to move, `present` what already uses the new name (`data`, `config`, `notifyrc`, `wallet-entry`, `applets`). With work pending it also refuses a mounted vault, a held lock and data under both names; with nothing pending, or only `wallet-entry`, a mounted vault is fine | `{"ok":true,"pending":[...],"present":[...]}` |
+| `--migrate run` | Moves the first five categories. `migrated` is what this call moved, `pending` what is still left afterwards (including `applets`, which is its own step). With none of the five pending it returns at once and takes no lock. plasmashell may keep running when only `wallet-entry` is left | `{"ok":true,"migrated":[...],"pending":[...]}` |
+| `--migrate applets` | Checks everything first under the locks, so a refusal changes nothing. Writes `<appletsrc>.hearthside-backup` (mode `0600`, once; an existing one is kept), then replaces appletsrc atomically, keeping its mode, after checking again that plasmashell is stopped and the file is unchanged | `{"ok":true,"migrated":[...],"pending":[...]}` |
+| `--migrate rollback` | The inverse of `run` and `applets`, except that the token cache is not restored. `pending` can only be `["wallet-entry"]` or empty; a later rollback finishes it | `{"ok":true,"restored":[...],"pending":[...]}` |
 
 A failure is `{"ok":false,"error":CODE}`, with `"category":NAME` added when one
 category's step failed. The checks that come before the steps (the mounted
 vault and the locks, and plasmashell for `run` and `rollback`) have no
-category; `plasma-running` from the appletsrc step itself has
+category; a planted link or another user's entry among the moved folder's fixed
+children (`vault`, `usage-history`, `vault-keys` and its `wallet.conf`,
+`.old`, `.new`) is `data` or `wallet-entry` and refuses before anything changes; `plasma-running` from the appletsrc step itself has
 `"category":"applets"`.
 
 | Code | Meaning |
@@ -1030,12 +1034,19 @@ entry is copied with `kwallet-query -r` into a pipe and `-w` from it. The copy
 is proven by a real mount with the wallet slot, then unmounted, and only then
 are the old entry and any old staging entry removed. If the proof fails the
 copy is removed and `wallet-entry` stays pending. Without an enabled wallet,
-its tools, gocryptfs or fusermount3 the step also stays pending.
+its tools, gocryptfs or fusermount3 the step also stays pending. A staging
+entry with no real old entry proves nothing: it stays and is not reported. In
+`rollback`, the new entry is copied into the old folder and removed only after
+`cmp -s` on two pipes (this process never reads them) found both entries equal;
+without that proof both stay and `wallet-entry` is pending.
 
 The installer checks `status` before changing anything, needs
 `--restart-plasma` or a yes in a terminal, stops plasmashell (an exit trap
 starts it again), runs `run` then `applets`, and removes the old package,
-widget, icons and events file. A later complete install that finds nothing
-pending and `applets` in `present` deletes the appletsrc backup (an owned
+widget, icons and events file. When only `wallet-entry` is pending it does not
+stop Plasma or ask: it tries `run`, carries on with the install either way, and
+while the entry stays pending prints "KDE Wallet wasn't available; run the
+installer again later to finish moving its entry". A later complete install
+that finds nothing pending and `applets` in `present` deletes the appletsrc backup (an owned
 regular file only, never through a symlink). `--rollback-hearthwire` runs
 `rollback` and uninstalls this release.

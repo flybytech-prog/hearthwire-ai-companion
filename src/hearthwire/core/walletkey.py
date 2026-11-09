@@ -49,6 +49,8 @@ from .webdata import HelperError, _close
 # qt6-tools -> qdbus6). openssl is needed only to set up or remove the key.
 TOOLS = ("kwallet-query", "qdbus6")
 KEYGEN_TOOL = "openssl"
+# Only the migration's rollback uses it; without it the copy counts as unproven.
+COMPARE_TOOL = "cmp"
 FOLDER = "Hearthwire"
 ENTRY = "encrypted-chat-folder"
 # A re-setup stages its new key here and moves it to ENTRY only after the new
@@ -115,6 +117,11 @@ def read_argv(kwallet_query: str, wallet: str, entry: str = ENTRY, folder: str =
     return [kwallet_query, "--folder", folder, "--read-password", entry, wallet]
 
 
+def compare_argv(cmp_tool: str, first: int, second: int) -> list[str]:
+    """``cmp -s`` of two inherited pipe read ends; only its exit status is used."""
+    return [cmp_tool, "-s", f"/dev/fd/{first}", f"/dev/fd/{second}"]
+
+
 def kwallet_argv(qdbus: str, method: str, *arguments: str) -> list[str]:
     return [qdbus, KWALLETD_SERVICE, KWALLETD_PATH, KWALLET_INTERFACE + method, *arguments]
 
@@ -155,6 +162,9 @@ def check_argv(argv: Sequence[str]) -> None:
     tool = os.path.basename(argv[0])
     if tool == "openssl":
         if argv != keygen_argv(argv[0]):
+            raise HelperError("os-error")
+    elif tool == COMPARE_TOOL:
+        if len(argv) != 4 or argv[1] != "-s" or not all(re.fullmatch(r"/dev/fd/[0-9]{1,10}", path) for path in argv[2:]):
             raise HelperError("os-error")
     elif tool == "kwallet-query":
         if len(argv) != 6 or not valid_wallet(argv[5]) or argv not in [
@@ -202,7 +212,7 @@ def find_tools() -> tuple[dict[str, str], tuple[str, ...]]:
     A tool found only through a relative PATH entry counts as missing.
     """
     found: dict[str, str] = {}
-    for name in (*TOOLS, KEYGEN_TOOL):
+    for name in (*TOOLS, KEYGEN_TOOL, COMPARE_TOOL):
         path = shutil.which(name)
         if path and os.path.isabs(path):
             found[name] = path
@@ -423,6 +433,42 @@ def copy_entry(tools: dict[str, str], wallet: str, source: str, target: str, *,
         raise HelperError("wallet-failed")
 
 
+def entries_equal(tools: dict[str, str], wallet: str, first_folder: str, second_folder: str, *,
+                  entry: str = ENTRY, timeout: Optional[float] = None) -> bool:
+    """True when ``entry`` holds the same bytes in both folders.
+
+    Each ``kwallet-query -r`` runs into its own pipe, and ``cmp`` inherits the
+    two read ends: this process holds them and never reads, and only cmp's
+    exit status comes back. Anything else (a missing tool, a cancelled
+    prompt, a difference) is False.
+    """
+    kwallet_query, compare = tools.get("kwallet-query"), tools.get(COMPARE_TOOL)
+    if kwallet_query is None or compare is None:
+        return False
+    first = second = -1
+    try:
+        first = read_key_into_pipe(kwallet_query, wallet, entry=entry, folder=first_folder, timeout=timeout)
+        second = read_key_into_pipe(kwallet_query, wallet, entry=entry, folder=second_folder, timeout=timeout)
+        argv = compare_argv(compare, first, second)
+        check_argv(argv)
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            pass_fds=(first, second),
+            timeout=QUERY_TIMEOUT * 5,
+            check=False,
+        )
+    except (HelperError, subprocess.TimeoutExpired, OSError):
+        return False
+    finally:
+        _close(first)
+        _close(second)
+    return completed.returncode == 0
+
+
 def _delete_entry(qdbus: str, wallet: str, entry: str, timeout: float, folder: str = FOLDER) -> bool:
     """``removeEntry`` through kwalletd6; True when the entry is gone afterwards."""
     handle = _query(kwallet_argv(qdbus, "open", wallet, "0", APP_ID), timeout)
@@ -512,6 +558,6 @@ def forget(tools: dict[str, str]) -> bool:
 
 __all__ = [
     "ENTRIES", "ENTRY", "ENTRY_NEW", "FOLDER", "KEYS_DIR", "LEGACY_FOLDER", "SLOT_FILE", "SLOT_NEW", "SLOT_OLD", "TOOLS",
-    "check_argv", "copy_entry", "find_tools", "forget", "preflight", "read_argv", "read_key_into_pipe",
+    "check_argv", "compare_argv", "copy_entry", "entries_equal", "find_tools", "forget", "preflight", "read_argv", "read_key_into_pipe",
     "remove_entries", "remove_entry", "remove_legacy_entry", "wallet_locked", "write_new_key",
 ]

@@ -49,7 +49,8 @@ MAX_CUSTOM_URLS_CHARS = 32768
 
 # Codes the plasmoid knows for --settings-backup; anything else is os-error.
 ERRORS = frozenset({
-    "absent", "invalid", "unsupported", "too-large", "bad-data", "symlink", "not-owned", "unsafe-mode", "os-error",
+    "absent", "invalid", "unsupported", "too-large", "bad-data", "symlink", "not-owned", "unsafe-mode", "legacy-data",
+    "os-error",
 })
 
 # Saved and restored. main.xml keys plus the round-4 panelRing and middleClickOpens.
@@ -487,8 +488,14 @@ def _unsafe(mode: int) -> bool:
 def _backup_directory(environ: Optional[Mapping[str, str]], opened: list[int], *, create: bool) -> Optional[int]:
     """``<config>/hearthwire``: never a symlink, ours, not group- or other-writable.
 
-    Only ``create`` (export) makes it (0700) or tightens a safe one to 0700.
+    Only ``create`` (export) makes it (0700) or tightens a safe one to 0700,
+    and never while the previous version's data waits for the installer (the
+    new folder would then be a conflict).
     """
+    if create:
+        from .legacy import refuse_legacy_data  # Imported here: legacy itself builds on this module.
+
+        refuse_legacy_data(environ)
     base = open_base(config_base(environ), create=create)
     if base is None:
         return None

@@ -653,7 +653,7 @@ def test_the_module_imports_only_the_standard_library_and_no_network():
         elif isinstance(node, ast.ImportFrom) and not node.level:
             imported.add((node.module or "").split(".")[0])
         elif isinstance(node, ast.ImportFrom):
-            assert node.module in ("catalog", "webdata"), node.module
+            assert node.module in ("catalog", "webdata", "legacy"), node.module  # legacy: only legacy-data
     assert imported <= {"__future__", "collections", "datetime", "errno", "json", "math", "os", "pathlib", "re",
                         "stat", "time", "typing"}, imported
     for banned in ("socket", "http", "urllib", "ssl", "subprocess"):

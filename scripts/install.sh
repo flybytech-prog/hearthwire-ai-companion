@@ -90,7 +90,7 @@ confirm_plasma_stop() {
 migration_error() {
     case "$1" in
         *'"error":"not-locked"'*)
-            echo "Lock the encrypted chat folder in Hearthside (or Hearthwire) first, then run this again. $2" >&2 ;;
+            echo "Lock the encrypted chat folder first: run PYTHONPATH=\"$project_directory/src\" python3 -P -m hearthwire --vault lock (if the old Hearthside widget still has it open, lock it there), then run this again. $2" >&2 ;;
         *'"error":"busy"'*)
             echo "The encrypted chat folder is in use right now. Try again in a moment. $2" >&2 ;;
         *'"error":"conflict","category":"data"'*)
@@ -307,8 +307,14 @@ if ! migration_reply=$(helper --migrate status); then
     echo "Could not run the Hearthwire helper from this checkout. Nothing was changed." >&2
     exit 1
 fi
+migration_wallet_only=false
 case "$migration_reply" in
     '{"ok":true,"pending":[],"present":['*) migration_pending=false ;;
+    # Only the KDE Wallet entry is left: nothing Plasma holds, so no stop.
+    '{"ok":true,"pending":["wallet-entry"],"present":['*)
+        migration_pending=false
+        migration_wallet_only=true
+        ;;
     '{"ok":true,"pending":["'*) migration_pending=true ;;
     *)
         migration_error "$migration_reply" "Nothing was changed."
@@ -316,11 +322,11 @@ case "$migration_reply" in
         ;;
 esac
 # User decision Q4: the panel layout backup from the move is deleted by the
-# next successful install that finds the move complete and the widgets
-# already using the new id.
+# next successful install that finds the move complete (the wallet entry too)
+# and the widgets already using the new id.
 applets_backup="$config_home/plasma-org.kde.plasma.desktop-appletsrc.hearthside-backup"
 remove_applets_backup=false
-if [ "$migration_pending" = false ]; then
+if [ "$migration_pending" = false ] && [ "$migration_wallet_only" = false ]; then
     case "$migration_reply" in
         *'"present":['*'"applets"'*) remove_applets_backup=true ;;
     esac
@@ -424,6 +430,16 @@ fi
 # the data and then the widgets' plugin id; finished steps are never repeated.
 migration_wallet_pending=false
 migration_moved_applets=false
+# Wallet entry only: try it with Plasma running; if the wallet still does not
+# answer, or the folder is unlocked, the install goes on and a note says so.
+if [ "$migration_wallet_only" = true ]; then
+    migration_wallet_pending=true
+    if step_reply=$(helper --migrate run); then
+        case "$step_reply" in
+            '{"ok":true,"migrated":["wallet-entry"],"pending":[]}') migration_wallet_pending=false ;;
+        esac
+    fi
+fi
 if [ "$migration_pending" = true ]; then
     stop_plasma
     migrate_step run
@@ -555,10 +571,10 @@ if [ "$migration_pending" = true ]; then
     if [ "$migration_moved_applets" = true ]; then
         echo "A backup of your panel layout from before the move was saved as $applets_backup; the next successful run of this installer deletes it."
     fi
-    if [ "$migration_wallet_pending" = true ]; then
-        echo "The KDE Wallet key of the encrypted chat folder could not be moved yet (the wallet may be locked, or its prompt was cancelled). Unlocking with the passphrase works; run this script again to move the key."
-    fi
     echo "You may delete the empty Hearthside folder in KWalletManager."
+fi
+if [ "$migration_wallet_pending" = true ]; then
+    echo "KDE Wallet wasn't available; run the installer again later to finish moving its entry."
 fi
 # Only an owned regular file, never through a symlink (rm unlinks a link itself).
 if [ "$remove_applets_backup" = true ] && [ -f "$applets_backup" ] && [ ! -L "$applets_backup" ] && [ -O "$applets_backup" ]; then

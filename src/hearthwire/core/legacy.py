@@ -40,6 +40,7 @@ from typing import Callable, Optional
 
 from . import vault, walletkey
 from .settingsbackup import config_base
+from .usagehistory import HISTORY_DIR
 from .webdata import APP_DIR, PRIVATE_MODE, HelperError, _close, _descriptors, data_base, open_base, open_child_dir
 
 OPERATIONS = ("status", "run", "applets", "rollback")
@@ -109,6 +110,16 @@ def legacy_data_present(environ: Optional[Mapping[str, str]] = None) -> bool:
     except OSError:
         return True
     return True
+
+
+def refuse_legacy_data(environ: Optional[Mapping[str, str]] = None) -> None:
+    """legacy-data while the former name's data folder exists.
+
+    For helpers that would otherwise create the new folder before the
+    installer has moved the old one, which would then be a conflict.
+    """
+    if legacy_data_present(environ):
+        raise HelperError("legacy-data")
 
 
 # --- file system ---------------------------------------------------------------------------------
@@ -207,6 +218,45 @@ def _sync(descriptor: int) -> None:
         pass
 
 
+def _refuse_link_or_foreign(parent: int, name: str) -> None:
+    """A missing ``name`` is fine; a symlink or another user's entry is refused."""
+    try:
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise HelperError("os-error") from None
+    if stat.S_ISLNK(info.st_mode):
+        raise HelperError("symlink")
+    if info.st_uid != os.getuid():
+        raise HelperError("not-owned")
+
+
+def _check_data_children(data: Optional[int], name: str) -> None:
+    """Walk the fixed children of the data folder about to move, without following links.
+
+    A rename would carry a planted link or another user's folder along, so
+    these refuse before anything changes.
+    """
+    if data is None:
+        return
+    with _descriptors() as opened:
+        with _category("data"):
+            app = open_child_dir(data, name, create=False)
+            if app is None:
+                return
+            opened.append(app)
+            for child in (vault.VAULT_DIR, HISTORY_DIR):
+                _refuse_link_or_foreign(app, child)
+        with _category("wallet-entry"):
+            keys = open_child_dir(app, walletkey.KEYS_DIR, create=False)
+            if keys is None:
+                return
+            opened.append(keys)
+            for slot in (walletkey.SLOT_FILE, walletkey.SLOT_OLD, walletkey.SLOT_NEW):
+                _refuse_link_or_foreign(keys, slot)
+
+
 def _check_directory_move(parent: Optional[int], source: str, target: str) -> bool:
     """True when ``source`` is there to move; conflict when ``target`` holds anything."""
     if parent is None or _directory_state(parent, source) == "absent":
@@ -266,14 +316,21 @@ def _cache_names(cache: int) -> list[str]:
 
 
 def _cache_pending(parent: Optional[int]) -> bool:
-    """The old cache folder still holds the token cache (or is empty)."""
+    """The old cache folder still holds the token cache (or is empty).
+
+    Each file about to be deleted is checked here, so the step cannot fail
+    after the data has moved.
+    """
     if parent is None:
         return False
     cache = open_child_dir(parent, LEGACY_NAME, create=False)
     if cache is None:
         return False
     try:
-        return bool(_cache_names(cache)) or not os.listdir(cache)
+        names = _cache_names(cache)
+        for name in names:
+            _entry(cache, name, directory=False)
+        return bool(names) or not os.listdir(cache)
     except OSError:
         raise HelperError("os-error") from None
     finally:
@@ -536,7 +593,11 @@ def _switch_applets(config: Optional[int], old: str, new: str) -> bool:
 
 
 def _slot_in(base: Optional[int], name: str) -> bool:
-    """``<base>/<name>/vault-keys/wallet.conf`` is a regular file of ours (rule L4)."""
+    """``<base>/<name>/vault-keys/wallet.conf`` is a regular file of ours (rule L4).
+
+    A symlink or another user's file there is refused, so it can never lead to
+    a wallet call.
+    """
     if base is None:
         return False
     with _descriptors() as opened:
@@ -554,7 +615,11 @@ def _slot_in(base: Optional[int], name: str) -> bool:
             return False
         except OSError:
             raise HelperError("os-error") from None
-        return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+        if stat.S_ISLNK(info.st_mode):
+            raise HelperError("symlink")
+        if info.st_uid != os.getuid():
+            raise HelperError("not-owned")
+        return stat.S_ISREG(info.st_mode)
 
 
 def _open_wallet(tools: dict[str, str]) -> Optional[str]:
@@ -567,15 +632,6 @@ def _open_wallet(tools: dict[str, str]) -> Optional[str]:
     return walletkey.local_wallet(qdbus)
 
 
-def _legacy_entries_left(tools: dict[str, str], wallet: str) -> Optional[bool]:
-    """Either old entry still exists (None when the wallet did not answer)."""
-    answers = [walletkey.key_missing(tools["qdbus6"], wallet, entry, walletkey.LEGACY_FOLDER)
-               for entry in walletkey.ENTRIES]
-    if None in answers:
-        return None
-    return not all(answers)
-
-
 def _wallet_status(slot: bool) -> tuple[bool, bool]:
     """(pending, present) for the wallet entry; no wallet call at all without a slot."""
     if not slot:
@@ -584,9 +640,10 @@ def _wallet_status(slot: bool) -> tuple[bool, bool]:
     wallet = _open_wallet(tools)
     if wallet is None:
         return True, False
-    left = _legacy_entries_left(tools, wallet)
+    # Only the real entry counts: a lone old staging entry is nothing to move.
+    missing = walletkey.key_missing(tools["qdbus6"], wallet, walletkey.ENTRY, walletkey.LEGACY_FOLDER)
     present = walletkey.key_missing(tools["qdbus6"], wallet) is False
-    return left is not False, present
+    return missing is not True, present
 
 
 def _drop_copy(tools: dict[str, str], wallet: str) -> None:
@@ -606,6 +663,8 @@ def _migrate_wallet(ctx: vault.Context, app: int, slot: bool) -> str:
     2. The copy is proven by mounting with the wallet slot, then unmounted.
     3. Only then the old entry and the old staging entry are removed. When
        the proof fails the new copy is removed again and the step is pending.
+
+    A staging entry without a real old entry proves nothing and stays.
     """
     if not slot:
         return "none"
@@ -617,38 +676,44 @@ def _migrate_wallet(ctx: vault.Context, app: int, slot: bool) -> str:
         return "pending"
     qdbus = tools["qdbus6"]
     old = walletkey.key_missing(qdbus, wallet, walletkey.ENTRY, walletkey.LEGACY_FOLDER)
-    old_staged = walletkey.key_missing(qdbus, wallet, walletkey.ENTRY_NEW, walletkey.LEGACY_FOLDER)
-    if old is None or old_staged is None:
+    if old is None:
         return "pending"
-    if old and old_staged:
+    if old:
         return "none"
-    if not old:
-        new = walletkey.key_missing(qdbus, wallet)
-        if new is None:
-            return "pending"
-        verified = new is False and vault.verify_wallet_slot(ctx, app, wallet)
+    old_staged = walletkey.key_missing(qdbus, wallet, walletkey.ENTRY_NEW, walletkey.LEGACY_FOLDER)
+    new = walletkey.key_missing(qdbus, wallet)
+    if old_staged is None or new is None:
+        return "pending"
+    verified = new is False and vault.verify_wallet_slot(ctx, app, wallet)
+    if not verified:
+        try:
+            walletkey.copy_entry(tools, wallet, walletkey.ENTRY, walletkey.ENTRY,
+                                 source_folder=walletkey.LEGACY_FOLDER)
+            verified = vault.verify_wallet_slot(ctx, app, wallet)
+        except HelperError:
+            verified = False
         if not verified:
-            try:
-                walletkey.copy_entry(tools, wallet, walletkey.ENTRY, walletkey.ENTRY,
-                                     source_folder=walletkey.LEGACY_FOLDER)
-                verified = vault.verify_wallet_slot(ctx, app, wallet)
-            except HelperError:
-                verified = False
-            if not verified:
-                _drop_copy(tools, wallet)
-                return "pending"
+            _drop_copy(tools, wallet)
+            return "pending"
     try:
-        for entry, missing in ((walletkey.ENTRY, old), (walletkey.ENTRY_NEW, old_staged)):
-            if not missing:
-                walletkey.remove_legacy_entry(tools, wallet, entry)
+        walletkey.remove_legacy_entry(tools, wallet, walletkey.ENTRY)
+        if not old_staged:
+            walletkey.remove_legacy_entry(tools, wallet, walletkey.ENTRY_NEW)
     except HelperError:
         return "pending"
     return "migrated"
 
 
 def _restore_wallet(ctx: vault.Context, slot: bool) -> str:
-    """Rollback: "restored", "pending" or "none". The new entry (it fits the slot that
-    moves back with the data) is copied into the old folder, then removed."""
+    """Rollback: "restored", "pending" or "none".
+
+    The new entry (it fits the slot that moves back with the data) is copied
+    into the old folder pipe to pipe, and removed only after a byte comparison
+    of the two entries proved the copy. Without that proof both stay and the
+    step is pending, so a later rollback can finish it. A real unlock cannot
+    prove it: gocryptfs may only ever read the new folder. A staging entry
+    without a real entry stays too.
+    """
     if not slot:
         return "none"
     tools = ctx.wallet_tools
@@ -657,20 +722,21 @@ def _restore_wallet(ctx: vault.Context, slot: bool) -> str:
         return "pending"
     qdbus = tools["qdbus6"]
     new = walletkey.key_missing(qdbus, wallet)
-    staged = walletkey.key_missing(qdbus, wallet, walletkey.ENTRY_NEW)
-    if new is None or staged is None:
+    if new is None:
         return "pending"
-    if new and staged:
+    if new:
         return "none"
+    staged = walletkey.key_missing(qdbus, wallet, walletkey.ENTRY_NEW)
+    if staged is None:
+        return "pending"
     try:
-        if not new:
-            walletkey.copy_entry(tools, wallet, walletkey.ENTRY, walletkey.ENTRY,
-                                 target_folder=walletkey.LEGACY_FOLDER)
-            if walletkey.key_missing(qdbus, wallet, walletkey.ENTRY, walletkey.LEGACY_FOLDER) is not False:
-                return "pending"
-        for entry, missing in ((walletkey.ENTRY, new), (walletkey.ENTRY_NEW, staged)):
-            if not missing:
-                walletkey.remove_entry(tools, wallet, entry=entry)
+        walletkey.copy_entry(tools, wallet, walletkey.ENTRY, walletkey.ENTRY,
+                             target_folder=walletkey.LEGACY_FOLDER)
+        if not walletkey.entries_equal(tools, wallet, walletkey.FOLDER, walletkey.LEGACY_FOLDER):
+            return "pending"
+        walletkey.remove_entry(tools, wallet)
+        if not staged:
+            walletkey.remove_entry(tools, wallet, entry=walletkey.ENTRY_NEW)
     except HelperError:
         return "pending"
     return "restored"
@@ -707,12 +773,20 @@ def _ordered(names: Sequence[str]) -> list[str]:
     return [name for name in CATEGORIES if name in names]
 
 
+def _check_applets_paths(config: Optional[int]) -> None:
+    """The backup and temporary names the appletsrc step will use are usable."""
+    assert config is not None
+    for name in (APPLETSRC + BACKUP_SUFFIX, TEMPORARY_NAME):
+        _entry(config, name, directory=False)
+
+
 def _file_pending(bases: dict[str, Optional[int]]) -> list[str]:
     """data, config, notifyrc and cache that still have to move; conflict where both exist."""
     pending = []
     with _category("data"):
         if _check_directory_move(bases["data"], LEGACY_NAME, APP_DIR):
             pending.append("data")
+    _check_data_children(bases["data"], LEGACY_NAME)
     with _category("config"):
         if _check_directory_move(bases["config"], LEGACY_NAME, APP_DIR):
             pending.append("config")
@@ -724,6 +798,9 @@ def _file_pending(bases: dict[str, Optional[int]]) -> list[str]:
     with _category("cache"):
         if _cache_pending(bases["cache"]):
             pending.append("cache")
+    with _category("applets"):
+        if _applets_state(bases["config"])[0]:
+            _check_applets_paths(bases["config"])
     return pending
 
 
@@ -765,11 +842,12 @@ def status(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
 
     Read only. With work left it also refuses a mounted vault (not-locked), a
     held vault lock (busy) and data or config under both names (conflict), so
-    the installer can stop before changing anything. With nothing left a
+    the installer can stop before changing anything. With nothing left, or
+    only the wallet entry (the wallet may stay unavailable for a long time), a
     mounted vault is fine: an ordinary reinstall needs no lock.
     """
     pending, present = _survey(environ)
-    if pending:
+    if any(name != "wallet-entry" for name in pending):
         with _locked(environ, find_tools=False):
             with _bases(environ) as bases:
                 _file_pending(bases)
@@ -777,15 +855,20 @@ def status(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
 
 
 def run(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
-    """Move data, config, notifyrc, cache and the wallet entry (plasmashell stopped)."""
+    """Move data, config, notifyrc, cache and the wallet entry.
+
+    plasmashell must be stopped unless only the wallet entry is left: a running
+    widget can only recreate the old folders.
+    """
     pending, _ = _survey(environ)
     if not any(name in RUN_CATEGORIES for name in pending):
         return {"ok": True, "migrated": [], "pending": pending}
     migrated: list[str] = []
     with _locked(environ, find_tools=True) as (ctx, app):
         with _bases(environ) as bases:
-            _file_pending(bases)  # Conflicts refuse before anything changes.
-            _refuse_plasma()
+            # Everything that can refuse does so before anything changes.
+            if _file_pending(bases):
+                _refuse_plasma()
             with _category("data"):
                 if _move_directory(bases["data"], LEGACY_NAME, APP_DIR):
                     migrated.append("data")
@@ -807,13 +890,18 @@ def run(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
 
 
 def applets(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
-    """Give every widget of the old id the new one (plasmashell must be stopped)."""
+    """Give every widget of the old id the new one (plasmashell must be stopped).
+
+    Everything is surveyed first, under the locks, so a refusal changes nothing
+    and no error can follow a rewrite.
+    """
     with _locked(environ, find_tools=False):
+        pending, _ = _survey(environ)
         with _bases(environ) as bases:
             with _category("applets"):
                 changed = _switch_applets(bases["config"], LEGACY_PLUGIN, PLUGIN)
-    pending, _ = _survey(environ)
-    return {"ok": True, "migrated": ["applets"] if changed else [], "pending": pending}
+    return {"ok": True, "migrated": ["applets"] if changed else [],
+            "pending": [name for name in pending if name != "applets"]}
 
 
 def rollback(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
@@ -828,11 +916,20 @@ def rollback(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
         with _bases(environ) as bases:
             with _category("data"):
                 _check_directory_move(bases["data"], APP_DIR, LEGACY_NAME)
+            _check_data_children(bases["data"], APP_DIR)
             with _category("config"):
                 _check_directory_move(bases["config"], APP_DIR, LEGACY_NAME)
+            with _category("notifyrc"):
+                if bases["config"] is not None:
+                    _entry(bases["config"], APP_DIR + NOTIFYRC_SUFFIX, directory=False)
+                    _entry(bases["config"], LEGACY_NAME + NOTIFYRC_SUFFIX, directory=False)
+            with _category("applets"):
+                if _applets_state(bases["config"])[1]:
+                    _check_applets_paths(bases["config"])
             _refuse_plasma()
             with _category("wallet-entry"):
-                slot = _slot_in(bases["data"], APP_DIR) and not _slot_in(bases["data"], LEGACY_NAME)
+                # Either name: an earlier rollback may have moved the data but kept the entry.
+                slot = _slot_in(bases["data"], APP_DIR) or _slot_in(bases["data"], LEGACY_NAME)
                 outcome = _restore_wallet(ctx, slot)
                 if outcome != "none":
                     (restored if outcome == "restored" else pending).append("wallet-entry")
@@ -877,5 +974,6 @@ def run_operation(operation: str, environ: Optional[Mapping[str, str]] = None) -
         return {"ok": False, "error": "os-error"}
 
 
-__all__ = ["CATEGORIES", "ERRORS", "OPERATIONS", "legacy_data_present", "plasma_running", "rewrite_applets",
+__all__ = ["CATEGORIES", "ERRORS", "OPERATIONS", "legacy_data_present", "plasma_running", "refuse_legacy_data",
+           "rewrite_applets",
            "run_operation"]

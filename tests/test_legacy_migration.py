@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 from pathlib import Path
@@ -22,7 +23,8 @@ from pathlib import Path
 import pytest
 
 from hearthwire import cli
-from hearthwire.core import legacy, vault, walletkey, webdata
+from hearthwire.core import legacy, settingsbackup, usagehistory, vault, walletkey, webdata
+from test_settingsbackup import GOOD, hexed
 from test_vault import Stubs
 
 SOURCE = Path(legacy.__file__)
@@ -62,6 +64,20 @@ MIGRATED_APPLETSRC = (
 CACHE_TEMPORARY = ".antigravity-auth.json." + "ab" * 16 + ".tmp"
 
 
+# Compares the two /dev/fd paths it inherited, like cmp -s, and logs no value.
+CMP_STUB = r'''#!PYTHON
+import json, os, sys
+args = sys.argv[1:]
+code = int(os.environ.get("STUB_CMP_EXIT", "-1"))
+if code < 0:
+    with open(args[1], "rb") as first, open(args[2], "rb") as second:
+        code = 0 if first.read() == second.read() else 1
+with open(os.environ["STUB_LOG"], "a") as handle:
+    handle.write(json.dumps({"tool": "cmp", "argv": args, "exit": code}) + "\n")
+sys.exit(code)
+'''
+
+
 def sha(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -86,6 +102,8 @@ class Home:
         # Never the real /run/user/<uid>.
         monkeypatch.setattr(vault, "DEFAULT_RUNTIME", str(self.root / "no-runtime-{uid}"))
         monkeypatch.setattr(walletkey, "QUERY_TIMEOUT", 5.0)
+        (stubs.bin / "cmp").write_text(CMP_STUB.replace("PYTHON", sys.executable, 1))
+        (stubs.bin / "cmp").chmod(0o755)
 
     @property
     def appletsrc(self):
@@ -331,12 +349,15 @@ def test_the_old_staging_entry_goes_too(home, capsys):
     assert home.wallet() == {NEW_KEY: MARKER_KEY}
 
 
-def test_a_lone_old_staging_entry_is_removed_without_an_unlock(home, capsys):
+def test_a_lone_old_staging_entry_stays_and_is_not_reported(home, capsys):
+    """It proves nothing about the slot, so it is neither deleted nor "migrated"."""
     home.old_install()
     home.set_wallet({NEW_KEY: MARKER_KEY, OLD_STAGED: OTHER_KEY})
-    assert "wallet-entry" in migrate("run", capsys)["migrated"]
-    assert home.wallet() == {NEW_KEY: MARKER_KEY}
+    assert migrate("run", capsys) == {
+        "ok": True, "migrated": ["data", "config", "notifyrc", "cache"], "pending": ["applets"]}
+    assert home.wallet() == {NEW_KEY: MARKER_KEY, OLD_STAGED: OTHER_KEY}
     assert home.stubs.calls("gocryptfs") == []
+    assert "wallet-entry" not in migrate("status", capsys)["pending"]
 
 
 @pytest.mark.parametrize("settings", [{"STUB_WALLET_ENABLED": "false"}, {"STUB_QDBUS_EXIT": "1"}])
@@ -894,3 +915,323 @@ def test_proof_legacy_source_rules_catch(old, new, monkeypatch, tmp_path):
     monkeypatch.setattr(sys.modules[__name__], "SOURCE", mutated)
     with pytest.raises(AssertionError):
         test_legacy_source_rules()
+
+
+# --- R4 audit -----------------------------------------------------------------------------------------
+
+
+def _replace_with_link(path, target):
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+    path.symlink_to(target)
+
+
+def _foreign(monkeypatch, name):
+    """``name`` looks like another user's, for every no-follow lookup by directory fd."""
+    real = os.stat
+
+    def fake(path, *arguments, **keywords):
+        info = real(path, *arguments, **keywords)
+        if path == name and keywords.get("dir_fd") is not None:
+            values = list(info)
+            values[4] = os.getuid() + 1
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(os, "stat", fake)
+
+
+def _precious(root):
+    directory = root / "precious"
+    directory.mkdir()
+    (directory / "file").write_text("keep")
+    return directory
+
+
+# M1: nothing is rewritten before everything has been checked.
+@pytest.mark.parametrize(("name", "reply"), [
+    ("conflict", {"ok": False, "error": "conflict", "category": "data"}),
+    ("cache-link", {"ok": False, "error": "symlink", "category": "cache"}),
+])
+def test_applets_checks_everything_before_rewriting(home, capsys, tmp_path, name, reply):
+    home.old_install()
+    if name == "conflict":
+        (home.data / NEW).mkdir()
+        (home.data / NEW / "keep").write_text("mine")
+    else:
+        _replace_with_link(home.cache / OLD / "antigravity-auth.json", _precious(tmp_path) / "file")
+    before = home.tree()
+    assert migrate("applets", capsys) == reply
+    assert home.tree() == before and not home.backup.exists()
+
+
+def test_applets_reports_what_is_left_without_a_second_survey(home, capsys, monkeypatch):
+    home.old_install()
+    migrate("run", capsys)
+    real, calls = legacy._survey, []
+    monkeypatch.setattr(legacy, "_survey", lambda environ: calls.append(1) or real(environ))
+    assert migrate("applets", capsys) == {"ok": True, "migrated": ["applets"], "pending": []}
+    assert len(calls) == 1
+
+
+# M2: the fixed children of the folder about to move.
+CHILDREN = [("vault", "data"), ("usage-history", "data"), ("vault-keys/wallet.conf", "wallet-entry"),
+            ("vault-keys/wallet.conf.old", "wallet-entry"), ("vault-keys/wallet.conf.new", "wallet-entry")]
+
+
+@pytest.mark.parametrize(("child", "category"), CHILDREN)
+@pytest.mark.parametrize("operation", ["status", "run", "applets"])
+def test_a_symlinked_child_of_the_old_folder_refuses(home, capsys, tmp_path, child, category, operation):
+    home.old_install()
+    target = _precious(tmp_path)
+    _replace_with_link(home.data / OLD / child, target)
+    before = home.tree()
+    assert migrate(operation, capsys) == {"ok": False, "error": "symlink", "category": category}
+    assert home.tree() == before and (target / "file").read_text() == "keep"
+    assert home.wallet() == {OLD_KEY: MARKER_KEY} and home.wallet_calls() == []
+
+
+@pytest.mark.parametrize(("child", "category"), CHILDREN[:3])
+def test_a_foreign_child_of_the_old_folder_refuses(home, capsys, monkeypatch, child, category):
+    home.old_install()
+    before = home.tree()
+    _foreign(monkeypatch, child.rsplit("/", 1)[-1])
+    assert migrate("run", capsys) == {"ok": False, "error": "not-owned", "category": category}
+    assert home.tree() == before and home.wallet_calls() == []
+
+
+def test_a_foreign_vault_keys_folder_refuses(home, capsys, monkeypatch):
+    home.old_install()
+    before = home.tree()
+    _foreign(monkeypatch, "vault-keys")
+    assert migrate("status", capsys) == {"ok": False, "error": "not-owned", "category": "wallet-entry"}
+    assert home.tree() == before and home.wallet_calls() == []
+
+
+@pytest.mark.parametrize(("child", "category"), CHILDREN)
+def test_rollback_walks_the_new_folder_the_same_way(home, capsys, tmp_path, child, category):
+    home.old_install()
+    full_migration(home, capsys)
+    home.stubs.log.write_text("")
+    _replace_with_link(home.data / NEW / child, _precious(tmp_path))
+    before = home.tree()
+    assert migrate("rollback", capsys) == {"ok": False, "error": "symlink", "category": category}
+    assert home.tree() == before and home.wallet_calls() == []
+
+
+def test_a_symlinked_slot_under_the_new_name_is_refused_without_a_wallet_call(home, capsys, tmp_path):
+    home.old_install()
+    full_migration(home, capsys)
+    home.stubs.log.write_text("")
+    _replace_with_link(home.slot_dir(NEW) / "wallet.conf", _precious(tmp_path) / "file")
+    assert migrate("status", capsys) == {"ok": False, "error": "symlink", "category": "wallet-entry"}
+    assert home.wallet_calls() == []
+
+
+def test_a_foreign_slot_under_the_new_name_is_refused_without_a_wallet_call(home, capsys, monkeypatch):
+    home.old_install()
+    full_migration(home, capsys)
+    home.stubs.log.write_text("")
+    _foreign(monkeypatch, "wallet.conf")
+    assert migrate("status", capsys) == {"ok": False, "error": "not-owned", "category": "wallet-entry"}
+    assert home.wallet_calls() == []
+
+
+# L1: nothing can stop the run after the data has moved.
+@pytest.mark.parametrize("name", ["antigravity-auth.json", CACHE_TEMPORARY])
+def test_a_symlinked_cache_file_refuses_before_the_data_moves(home, capsys, tmp_path, name):
+    home.old_install()
+    _replace_with_link(home.cache / OLD / name, _precious(tmp_path) / "file")
+    before = home.tree()
+    assert migrate("status", capsys) == {"ok": False, "error": "symlink", "category": "cache"}
+    assert migrate("run", capsys) == {"ok": False, "error": "symlink", "category": "cache"}
+    assert home.tree() == before
+
+
+def test_a_directory_named_like_the_cache_file_refuses_before_the_data_moves(home, capsys):
+    home.old_install()
+    (home.cache / OLD / "antigravity-auth.json").unlink()
+    (home.cache / OLD / "antigravity-auth.json").mkdir()
+    assert migrate("run", capsys) == {"ok": False, "error": "not-directory", "category": "cache"}
+    assert (home.data / OLD).is_dir()
+
+
+def test_a_symlinked_backup_refuses_before_the_data_moves(home, capsys, tmp_path):
+    home.old_install()
+    home.backup.symlink_to(_precious(tmp_path) / "file")
+    before = home.tree()
+    assert migrate("run", capsys) == {"ok": False, "error": "symlink", "category": "applets"}
+    assert home.tree() == before
+
+
+def test_a_directory_at_the_temporary_name_refuses_before_the_data_moves(home, capsys):
+    home.old_install()
+    (home.config / legacy.TEMPORARY_NAME).mkdir()
+    assert migrate("run", capsys) == {"ok": False, "error": "not-directory", "category": "applets"}
+    assert (home.data / OLD).is_dir()
+
+
+def test_a_symlinked_backup_does_not_block_a_finished_move(home, capsys, tmp_path):
+    home.old_install()
+    full_migration(home, capsys)
+    _replace_with_link(home.backup, _precious(tmp_path) / "file")
+    assert migrate("status", capsys)["pending"] == []
+
+
+def test_rollback_checks_the_backup_and_appletsrc_before_moving_anything(home, capsys, tmp_path):
+    home.old_install()
+    full_migration(home, capsys)
+    _replace_with_link(home.backup, _precious(tmp_path) / "file")
+    before = home.tree()
+    assert migrate("rollback", capsys) == {"ok": False, "error": "symlink", "category": "applets"}
+    assert home.tree() == before and home.wallet() == {NEW_KEY: MARKER_KEY}
+
+
+# L2: the new entry stays until the old copy is proven.
+def _cmp_order(home):
+    return [call["tool"] for call in home.stubs.calls() if call["tool"] == "cmp"
+            or (call["tool"] == "qdbus6" and call["argv"][2].endswith(".removeEntry"))]
+
+
+def test_rollback_compares_before_it_removes_the_new_entry(home, capsys):
+    home.old_install()
+    full_migration(home, capsys)
+    home.stubs.log.write_text("")
+    assert "wallet-entry" in migrate("rollback", capsys)["restored"]
+    assert _cmp_order(home) == ["cmp", "qdbus6"]
+    assert home.wallet() == {OLD_KEY: MARKER_KEY}
+    (read_new, read_old) = [call for call in home.stubs.calls("kwallet-query") if "--read-password" in call["argv"]][1:3]
+    assert read_new["fds"][1].startswith("pipe:") and read_old["fds"][1].startswith("pipe:")
+    assert (read_new["argv"][1], read_old["argv"][1]) == ("Hearthwire", "Hearthside")
+    assert read_new["sha"] == read_old["sha"] == sha(MARKER_KEY)
+
+
+@pytest.mark.parametrize("failure", ["differs", "no-cmp", "second-read-fails"])
+def test_rollback_keeps_both_entries_without_proof(home, capsys, failure):
+    home.old_install()
+    full_migration(home, capsys)
+    if failure == "differs":
+        home.stubs.env(STUB_CMP_EXIT=1)
+    elif failure == "no-cmp":
+        home.stubs.remove("cmp")
+    home.stubs.log.write_text("")
+    if failure == "second-read-fails":
+        real = walletkey.read_key_into_pipe
+        calls = []
+
+        def failing(*arguments, **keywords):
+            calls.append(1)
+            if len(calls) == 3:  # The copy's read, then the two reads of the proof.
+                raise webdata.HelperError("wallet-failed")
+            return real(*arguments, **keywords)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(walletkey, "read_key_into_pipe", failing)
+            reply = migrate("rollback", capsys)
+    else:
+        reply = migrate("rollback", capsys)
+    assert reply["pending"] == ["wallet-entry"] and "wallet-entry" not in reply["restored"]
+    assert home.wallet() == {NEW_KEY: MARKER_KEY, OLD_KEY: MARKER_KEY}
+
+
+def test_a_rollback_stopped_by_a_cancelled_dialog_is_finished_by_the_next(home, capsys):
+    home.old_install()
+    full_migration(home, capsys)
+    home.stubs.env(STUB_KWALLET_READ_EXIT=1)
+    reply = migrate("rollback", capsys)
+    assert reply["pending"] == ["wallet-entry"] and "data" in reply["restored"]
+    assert home.wallet() == {NEW_KEY: MARKER_KEY}
+    # The slot has moved back with the data, and the entries decide.
+    assert (home.slot_dir(OLD) / "wallet.conf").exists() and not (home.data / NEW).exists()
+    home.stubs.env(STUB_KWALLET_READ_EXIT=0)
+    assert migrate("rollback", capsys) == {"ok": True, "restored": ["wallet-entry"], "pending": []}
+    assert home.wallet() == {OLD_KEY: MARKER_KEY}
+
+
+def test_rollback_leaves_a_lone_new_staging_entry(home, capsys):
+    home.old_install()
+    full_migration(home, capsys)
+    home.set_wallet({NEW_STAGED: OTHER_KEY})
+    assert "wallet-entry" not in migrate("rollback", capsys)["restored"]
+    assert home.wallet() == {NEW_STAGED: OTHER_KEY}
+
+
+def test_rollback_removes_the_new_staging_entry_after_the_proof(home, capsys):
+    home.old_install()
+    full_migration(home, capsys)
+    home.set_wallet({NEW_KEY: MARKER_KEY, NEW_STAGED: OTHER_KEY})
+    assert "wallet-entry" in migrate("rollback", capsys)["restored"]
+    assert home.wallet() == {OLD_KEY: MARKER_KEY}
+
+
+@pytest.mark.skipif(not os.path.exists("/usr/bin/cmp"), reason="no cmp here")
+@pytest.mark.parametrize(("other", "equal"), [(MARKER_KEY, True), (OTHER_KEY, False)])
+def test_entries_equal_works_with_the_real_cmp_over_two_pipes(home, other, equal):
+    (home.stubs.bin / "cmp").unlink()
+    (home.stubs.bin / "cmp").symlink_to("/usr/bin/cmp")
+    home.set_wallet({NEW_KEY: MARKER_KEY, OLD_KEY: other})
+    tools, _ = walletkey.find_tools()
+    assert walletkey.entries_equal(tools, "kdewallet", walletkey.FOLDER, walletkey.LEGACY_FOLDER) is equal
+
+
+# L3: nothing creates the new folder while the old one waits.
+@pytest.fixture
+def waiting(home):
+    (home.data / OLD).mkdir()
+    return home
+
+
+def test_recording_usage_refuses_while_old_data_waits(waiting):
+    assert usagehistory.run("record", sample="claude.session=5") == {"ok": False, "error": "legacy-data"}
+    assert not (waiting.data / NEW).exists()
+
+
+def test_exporting_settings_refuses_while_old_data_waits(waiting):
+    assert settingsbackup.run("export", data=hexed(GOOD)) == {"ok": False, "error": "legacy-data"}
+    assert not (waiting.config / NEW).exists()
+
+
+def test_reading_history_and_backup_status_still_work_while_old_data_waits(waiting):
+    assert usagehistory.run("read")["ok"] is True
+    assert settingsbackup.run("status")["ok"] is True
+    assert not (waiting.data / NEW).exists() and not (waiting.config / NEW).exists()
+
+
+def test_both_writers_work_once_the_old_data_has_moved(home):
+    assert usagehistory.run("record", sample="claude.session=5")["ok"] is True
+    assert settingsbackup.run("export", data=hexed(GOOD))["ok"] is True
+
+
+# L5: only the wallet entry left never needs Plasma stopped.
+def _only_wallet_left(home, capsys):
+    home.old_install()
+    home.stubs.env(STUB_WALLET_ENABLED="false")
+    migrate("run", capsys)
+    migrate("applets", capsys)
+    assert migrate("status", capsys)["pending"] == ["wallet-entry"]
+
+
+def test_a_wallet_only_status_ignores_a_mounted_vault(home, capsys):
+    _only_wallet_left(home, capsys)
+    _mount_line(home, home.runtime / NEW / "vault", home.data / NEW / "vault")
+    assert migrate("status", capsys)["pending"] == ["wallet-entry"]
+
+
+def test_a_wallet_only_run_does_not_need_plasma_stopped(home, capsys):
+    _only_wallet_left(home, capsys)
+    home.plasma()
+    assert migrate("run", capsys) == {"ok": True, "migrated": [], "pending": ["wallet-entry"]}
+    home.stubs.env(STUB_WALLET_ENABLED="true")
+    assert migrate("run", capsys) == {"ok": True, "migrated": ["wallet-entry"], "pending": []}
+    assert home.wallet() == {NEW_KEY: MARKER_KEY}
+
+
+def test_a_wallet_and_applets_status_still_refuses_a_mounted_vault(home, capsys):
+    home.appletsrc.write_bytes(APPLETSRC)
+    home.slot_dir(NEW).mkdir(parents=True)
+    (home.slot_dir(NEW) / "wallet.conf").write_text("{}")
+    home.set_wallet({OLD_KEY: MARKER_KEY})
+    _mount_line(home, home.runtime / NEW / "vault", home.data / NEW / "vault")
+    assert migrate("status", capsys) == {"ok": False, "error": "not-locked"}

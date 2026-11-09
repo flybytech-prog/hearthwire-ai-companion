@@ -640,7 +640,7 @@ def test_a_pending_wallet_key_is_reported(tmp_path):
     flow.reply("applets", '{"ok":true,"migrated":["applets"],"pending":["wallet-entry"]}')
     completed = flow.run("--restart-plasma")
     assert completed.returncode == 0, completed.stderr
-    assert "could not be moved yet" in completed.stdout and "run this script again" in completed.stdout
+    assert "KDE Wallet wasn't available; run the installer again later" in completed.stdout
 
 
 # --- Q4: the appletsrc backup goes on the next successful install ------------------------------------
@@ -845,4 +845,62 @@ def test_other_replies_are_not_retried(tmp_path, reply):
     completed = flow.run("--restart-plasma")
     assert completed.returncode == 1
     assert [step for step in flow.steps() if step.startswith("helper")] == ["helper status", "helper run", "helper applets"]
+
+
+WALLET_NOTE = "KDE Wallet wasn't available; run the installer again later to finish moving its entry"
+WALLET_ONLY = '{"ok":true,"pending":["wallet-entry"],"present":["data","config","notifyrc","applets"]}'
+
+
+def _install_steps(flow):
+    return [step for step in flow.steps() if not step.startswith(("pip", "kpackagetool6"))]
+
+
+@pytest.mark.parametrize("run_reply", [
+    '{"ok":true,"migrated":[],"pending":["wallet-entry"]}',
+    '{"ok":false,"error":"not-locked"}',
+    '{"ok":false,"error":"busy"}',
+    "garbage",
+])
+def test_only_the_wallet_left_needs_no_plasma_stop_and_leaves_a_note(tmp_path, run_reply):
+    flow = Flow(tmp_path)
+    flow.reply("status", WALLET_ONLY)
+    flow.reply("run", run_reply)
+    backup = _backup(flow)
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert _install_steps(flow) == ["helper status", "helper run"]
+    assert WALLET_NOTE in completed.stdout
+    assert backup.exists()
+    assert "Moved your Hearthside" not in completed.stdout
+
+
+def test_only_the_wallet_left_is_finished_when_it_answers_and_the_backup_waits_a_run(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", WALLET_ONLY)
+    flow.reply("run", '{"ok":true,"migrated":["wallet-entry"],"pending":[]}')
+    backup = _backup(flow)
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert _install_steps(flow) == ["helper status", "helper run"]
+    assert WALLET_NOTE not in completed.stdout
+    assert backup.exists()
+
+
+def test_a_full_move_with_the_wallet_unavailable_gets_the_same_note(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", PENDING)
+    flow.reply("run", '{"ok":true,"migrated":["data","config","notifyrc","cache"],"pending":["wallet-entry","applets"]}')
+    flow.reply("applets", '{"ok":true,"migrated":["applets"],"pending":["wallet-entry"]}')
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 0, completed.stderr
+    assert WALLET_NOTE in completed.stdout
+
+
+def test_not_locked_names_the_helper_command_that_can_lock_it(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", '{"ok":false,"error":"not-locked"}')
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 1
+    assert f'PYTHONPATH="{flow.project}/src" python3 -P -m hearthwire --vault lock' in completed.stderr
+    assert "Nothing was changed." in completed.stderr
 # <<< legacy-migration

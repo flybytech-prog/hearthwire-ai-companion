@@ -1029,3 +1029,22 @@ def test_wallet_operations_refuse_while_old_data_waits(stubs, capsys, operation)
     assert unlock_wallet(capsys) == {"ok": False, "error": "legacy-data"}
     assert [call for call in stubs.calls() if call["tool"] in ("gocryptfs", "kwallet-query", "openssl")] == []
 # <<< legacy-migration
+
+
+# --- the rollback's byte comparison (R4 audit L2) ----------------------------------------------------
+
+
+def test_argv_guard_accepts_only_the_compare_of_two_inherited_fds():
+    walletkey.check_argv(walletkey.compare_argv("/usr/bin/cmp", 5, 7))
+    for argv in (["/usr/bin/cmp", "/dev/fd/5", "/dev/fd/7"], ["/usr/bin/cmp", "-s", "/dev/fd/5"],
+                 ["/usr/bin/cmp", "-s", "/dev/fd/5", "/etc/passwd"], ["/usr/bin/cmp", "-l", "/dev/fd/5", "/dev/fd/7"],
+                 ["cmp", "-s", "/dev/fd/5", "/dev/fd/7"], ["/usr/bin/cmp", "-s", "/dev/fd/a", "/dev/fd/7"]):
+        with pytest.raises(webdata.HelperError):
+            walletkey.check_argv(argv)
+
+
+def test_entries_equal_without_cmp_is_false_and_reads_nothing(stubs):
+    tools, _ = walletkey.find_tools()
+    assert "cmp" not in tools
+    assert walletkey.entries_equal(tools, "kdewallet", walletkey.FOLDER, walletkey.LEGACY_FOLDER) is False
+    assert stubs.calls("kwallet-query") == []
