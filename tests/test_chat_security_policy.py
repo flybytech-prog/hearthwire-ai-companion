@@ -6149,3 +6149,633 @@ LOW2_WEBAUTH_SECOND_HANDLERS = [
                          ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(LOW2_WEBAUTH_SECOND_HANDLERS)])
 def test_proof_a_second_webauth_handler_is_caught(path, old, new):
     assert _webauth_problems(_sources_with(path, old, new))
+
+
+# --- Round 4, phase 1a: hover popup, provider accent, next reset ------------------------
+
+PROVIDER_ACCENT_JS = UI / "ProviderAccent.js"
+RECTANGLE = r"(?<![\w.])Rectangle\s*\{"
+
+
+def _code_pattern(literal):
+    """``literal`` code as a regex: any spacing between tokens, whole words at the ends."""
+    tokens = re.findall(r"\w+|[^\w\s]", literal)
+    lead = r"(?<![\w.])" if re.match(r"\w", literal) else ""
+    tail = r"(?!\w)" if re.search(r"\w$", literal) else ""
+    return lead + r"\s*".join(re.escape(token) for token in tokens) + tail
+
+
+def _pin_problems(code, pins, where):
+    """Each of ``pins`` (literal code) must appear in ``code`` exactly once."""
+    problems = []
+    for literal in pins:
+        count = len(_hits(_code_pattern(literal), code))
+        if count != 1:
+            problems.append(f"{where}: {literal!r} must appear exactly once, found {count}")
+    return problems
+
+
+def _squeezed(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _named_elements(code, opener, name):
+    """The ``opener`` blocks whose own top-level objectName is the literal ``name``."""
+    return [(start, body) for start, body in _blocks(code, opener)
+            if re.search(rf'(?:^|[\n;])\s*objectName\s*:\s*"{name}"\s*(?=;|\n|$)', _top_level_raw(body))]
+
+
+def _text_binding(body):
+    match = re.search(r"(?:^|[\n;])\s*text\s*:\s*([^\n;]+)", _top_level_raw(body))
+    return match.group(1).strip() if match else None
+
+
+def _returns(body):
+    return [value.strip() for value in re.findall(r"\breturn\s+([^\n]*)", body)]
+
+
+# Anything in the hover popup or the accent code that could reach the network
+# or a file, load a picture, or open a link.
+DISPLAY_ACCESS_BANS = {
+    "XMLHttpRequest": r"\bXMLHttpRequest\b",
+    "Qt file or network call": r"\bQt\s*\.\s*(?:openUrlExternally|resolvedUrl|include|createQmlObject|createComponent)\b",
+    "helper or engine": r"\b(?:Plasma5Support|DataSource|executable|WebEngine\w*|FileDialog|FolderDialog|FolderListModel)\b",
+    "Loader": r"(?<![\w.])Loader\s*\{",
+    "picture element": r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?(?:Image|AnimatedImage|BorderImage|Icon)\s*\{",
+    "source binding": r"(?:^|[\n;{])\s*source\s*:",
+    "URL literal": r"""["'`]\s*(?:https?|ftp|file|data|qrc)\s*:""",
+    "HTML literal": r"<\s*(?:img|a\s+href)\b",
+}
+
+
+def _access_problems(code):
+    return [f"{name} at line {line}" for name, pattern in DISPLAY_ACCESS_BANS.items()
+            for line in _hits(pattern, code)]
+
+
+# 1a hover popup: every text element is PlainText and shows one of the four
+# strings main.qml hands in; no pictures, links, files or network.
+
+TOOLTIP_IMPORTS = [
+    "QtQuick", "QtQuick.Layouts", "org.kde.kirigami as Kirigami",
+    "org.kde.plasma.components as PlasmaComponents",
+]
+TOOLTIP_TEXTS = ["reading.modelData.title", "reading.modelData.value", "section.modelData.name", "tip.title"]
+
+
+def _usage_tooltip_problems(code):
+    problems = _plain_text_problems(code) + _access_problems(code)
+    imports = sorted(re.findall(r"(?m)^\s*import\s+(.*?)\s*$", code))
+    if imports != TOOLTIP_IMPORTS:
+        problems.append(f"imports must stay {TOOLTIP_IMPORTS}, found {imports}")
+    texts = sorted(_text_binding(body) or "" for _, body in _blocks(code, TEXT_ELEMENT))
+    if texts != TOOLTIP_TEXTS:
+        problems.append(f"the text elements must show exactly {TOOLTIP_TEXTS}, found {texts}")
+    return problems
+
+
+def test_hover_popup_shows_only_the_given_strings_as_plain_text():
+    problems = _usage_tooltip_problems(_read_code(USAGE_TOOLTIP))
+    assert not problems, f"{_rel(USAGE_TOOLTIP)}: {problems}"
+
+
+@pytest.mark.parametrize("snippet", [
+    "    Text { text: tip.title; textFormat: Text.RichText }\n",
+    "    Text { text: tip.title; textFormat: Text.StyledText }\n",
+    "    Text { text: tip.title }\n",
+    '    Text { textFormat: Text.PlainText; text: "x" }\n',
+    '    Image { source: "https://example.invalid/x.png" }\n',
+    '    Kirigami.Icon { source: "speedometer" }\n',
+    "    Text { textFormat: Text.PlainText; onLinkActivated: (link) => Qt.openUrlExternally(link) }\n",
+    "    function f() { return new XMLHttpRequest() }\n",
+    '    function f() { return Qt.resolvedUrl("x") }\n',
+    '    Loader { active: false }\n',
+])
+def test_proof_hover_popup_rule_catches_additions(snippet):
+    assert _usage_tooltip_problems(_appended(USAGE_TOOLTIP, snippet))
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("text: reading.modelData.value", "text: reading.modelData.caption"),
+    ("text: section.modelData.name", "text: section.modelData.plan"),
+    ("text: tip.title", 'text: "<img src=x>"'),
+    ("textFormat: Text.PlainText\n                    font.bold: true", "font.bold: true"),
+    ("import QtQuick.Layouts\n", "import QtQuick.Layouts\nimport QtNetwork\n"),
+])
+def test_proof_hover_popup_rule_catches_changes(old, new):
+    assert _usage_tooltip_problems(_mutated(USAGE_TOOLTIP, old, new))
+
+
+# 1a hover popup, main.qml side: names and titles come from the catalog, values
+# are numbers the widget formats, and the level goes through TooltipLogic. The
+# one exception is the error line: toolTipSubText can show the helper's last
+# stderr line (root.lastError), which is PlainText through toolTipTextFormat.
+
+MAIN_TOOLTIP_SECTIONS = r"\breadonly\s+property\s+var\s+tooltipSections\s*:\s*\{"
+MAIN_TOOLTIP_SUBTEXT = r"(?<![\w.])toolTipSubText\s*:\s*\{"
+MAIN_USAGE_TOOLTIP = r"\bproperty\s+Item\s+usageTooltip\s*:\s*UsageTooltip\s*\{"
+MAIN_TOOLTIP_SECTION_PINS = (
+    "var metric = Catalog.metric(group.provider_id, metricId)",
+    "title: metric.title",
+    "value: root.tooltipValue(reading)",
+    'level: reading && reading.type === "percentage" ? UsageLogic.usageLevel(reading.raw_used, root.usageThresholds) : ""',
+    "groups.push({name: group.descriptor.display_name, items: items})",
+    "return TooltipLogic.tooltipSections(groups)",
+)
+MAIN_TOOLTIP_SUBTEXT_RETURNS = ['""', 'i18n("Error: %1", root.lastError)', 'i18n("Loading…")',
+                                'i18n("No usage to show.")', '""']
+# What a provider reply carries as text, as opposed to numbers.
+TOOLTIP_REPLY_TEXT = r"\b(?:caption|error_message|plan|status|modelData)\b|(?<!descriptor)\s*\.\s*display_name\b"
+
+
+def _one_block(code, opener):
+    bodies = [body for _, body in _blocks(code, opener)]
+    return bodies[0] if len(bodies) == 1 else None
+
+
+def _reading_value_problems(code):
+    problems = []
+    for name in ("tooltipValue", "formatReading"):
+        body = _function_body(code, name)
+        if body is None:
+            problems.append(f"exactly one function {name}() expected")
+            continue
+        members = set(re.findall(r"\breading\s*\.\s*(\w+)", body)) - {"type", "value"}
+        if members:
+            problems.append(f"{name}() may read only reading.type and reading.value, found {sorted(members)}")
+        if re.search(r"\breturn\s+reading\s*(?:;|\n|$)", body):
+            problems.append(f"{name}() must not return the reading itself")
+        for match in re.finditer(r"\breading\s*\.\s*value\b", body):
+            if not re.search(r"(?:\bMath\s*\.\s*round|\bNumber)\s*\(\s*$", body[:match.start()]):
+                problems.append(f"{name}(): reading.value must pass through Math.round() or Number()")
+    return problems
+
+
+def _main_tooltip_problems(code, sources=None):
+    sections = _one_block(code, MAIN_TOOLTIP_SECTIONS)
+    subtext = _one_block(code, MAIN_TOOLTIP_SUBTEXT)
+    usage_tooltip = _one_block(code, MAIN_USAGE_TOOLTIP)
+    groups = _function_body(code, "tooltipProviderGroups")
+    if None in (sections, subtext, usage_tooltip, groups):
+        return ["main.qml needs one tooltipSections, toolTipSubText, usageTooltip and tooltipProviderGroups()"]
+    problems = _pin_problems(sections, MAIN_TOOLTIP_SECTION_PINS, "tooltipSections")
+    problems += _pin_problems(groups, ("var descriptor = Catalog.byId(providerId)", "descriptor: descriptor"),
+                              "tooltipProviderGroups()")
+    problems += [f"tooltipSections: provider text at line {line}" for line in _hits(TOOLTIP_REPLY_TEXT, sections)]
+    problems += _reading_value_problems(code)
+    if _returns(subtext) != MAIN_TOOLTIP_SUBTEXT_RETURNS:
+        problems.append(f"toolTipSubText must return exactly {MAIN_TOOLTIP_SUBTEXT_RETURNS}, found {_returns(subtext)}")
+    top = _top_level_raw(usage_tooltip)
+    problems += _pin_problems(top, ('title: i18n("Hearthwire")', "sections: root.tooltipSections"), "usageTooltip")
+    if re.search(r"(?:^|[\n;])\s*text\s*:", top):
+        problems.append("usageTooltip must not bind text")
+    problems += _pin_problems(code, ('toolTipMainText: i18n("Hearthwire")',
+                                     "toolTipItem: root.tooltipSections.length > 0 ? root.usageTooltip : null"),
+                              "main.qml")
+    for block in (sections, subtext, usage_tooltip):
+        problems += _access_problems(block)
+    uses = [name for name, text in (sources or {}).items() for _ in _hits(r"(?<![\w.])UsageTooltip\s*\{", text)]
+    if sources is not None and len(uses) != 1:
+        problems.append(f"UsageTooltip must be created once, by main.qml; found {uses}")
+    return problems
+
+
+def test_hover_popup_text_comes_from_the_catalog_and_the_widget():
+    problems = _main_tooltip_problems(_read_code(MAIN_QML), _all_code())
+    assert not problems, f"{_rel(MAIN_QML)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("title: metric.title,", "title: reading.caption,"),
+    ("value: root.tooltipValue(reading),", "value: reading.caption,"),
+    ("return TooltipLogic.tooltipSections(groups)", "return groups"),
+    ("{name: group.descriptor.display_name, items: items}", "{name: group.provider.display_name, items: items}"),
+    ('? UsageLogic.usageLevel(reading.raw_used, root.usageThresholds) : ""', '? reading.raw_level : ""'),
+    ("var metric = Catalog.metric(group.provider_id, metricId)", "var metric = group.provider.windows[metricId]"),
+    ('        title: i18n("Hearthwire")\n        sections: root.tooltipSections\n',
+     "        title: root.lastError\n        sections: root.tooltipSections\n"),
+    ("        sections: root.tooltipSections\n", "        sections: root.snapshot.providers\n"),
+    ("        sections: root.tooltipSections\n", "        sections: root.tooltipSections\n        text: root.lastError\n"),
+    ("        sections: root.tooltipSections\n",
+     '        sections: root.tooltipSections\n        Image { source: "https://example.invalid/x.png" }\n'),
+    ('return i18n("No usage to show.")', "return root.lastError"),
+    ('return i18n("Loading…")', "return root.snapshot.plan"),
+    ("toolTipItem: root.tooltipSections.length > 0 ? root.usageTooltip : null", "toolTipItem: root.usageTooltip"),
+    ("            return root.formatReading(reading)\n", "            return reading.caption\n"),
+    ("return String(Math.round(reading.value))", "return String(reading.value)"),
+    ('return Math.round(reading.value) + "%"', 'return reading.value + "%"'),
+    ("        var groups = []\n", "        var groups = []\n        var request = new XMLHttpRequest()\n"),
+])
+def test_proof_main_tooltip_rule_catches(old, new):
+    assert _main_tooltip_problems(_mutated(MAIN_QML, old, new))
+
+
+def test_proof_main_tooltip_rule_needs_catalog_descriptors():
+    code = _mutated_in_function(MAIN_QML, "tooltipProviderGroups", "var descriptor = Catalog.byId(providerId)",
+                                "var descriptor = shown[index]")
+    assert _main_tooltip_problems(code)
+
+
+def test_proof_second_usage_tooltip_is_caught():
+    sources = _sources_with(FULL_REPRESENTATION, snippet="\n    UsageTooltip { }\n")
+    assert _main_tooltip_problems(_read_code(MAIN_QML), sources)
+
+
+# 1a hover popup, TooltipLogic side: plain strings out, and the dot takes only
+# normal | warning | critical | "" (anything else is cleared by readingLevel).
+
+READING_LEVEL_BODY = '{ return level === "normal" || level === "warning" || level === "critical" ? level : "" }'
+LEVEL_COLOR_BODY = ('{ if (level === "critical") return tip.criticalColor if (level === "warning") '
+                    'return tip.warningColor if (level === "normal") return tip.normalColor return "transparent" }')
+TOOLTIP_SECTION_PINS = (
+    'name: String(group.name || "")',
+    'title: String(entry.title || "")',
+    'value: String(entry.value || "")',
+    "level: readingLevel(entry.level)",
+)
+
+
+def _tooltip_level_problems(view, logic):
+    problems = _access_problems(logic)
+    dots = _named_elements(view, RECTANGLE, "tooltipReadingDot")
+    if len(dots) != 1:
+        problems.append(f"exactly one Rectangle tooltipReadingDot expected, found {len(dots)}")
+    else:
+        top = _top_level_raw(dots[0][1])
+        problems += _pin_problems(top, ("color: tip.levelColor(reading.modelData.level)",), "tooltipReadingDot")
+        if len(_hits(r"(?:^|[\n;])\s*color\s*:", top)) != 1:
+            problems.append("tooltipReadingDot must bind its color once")
+    if len(_hits(r"\btip\s*\.\s*levelColor\b", view)) != 1:
+        problems.append("only tooltipReadingDot may call tip.levelColor")
+    color = _function_body(view, "levelColor")
+    if color is None or _squeezed(color) != LEVEL_COLOR_BODY:
+        problems.append(f"levelColor must stay {LEVEL_COLOR_BODY}")
+    level = _function_body(logic, "readingLevel")
+    if level is None or _squeezed(level) != READING_LEVEL_BODY:
+        problems.append(f"readingLevel must stay {READING_LEVEL_BODY}")
+    sections = _function_body(logic, "tooltipSections")
+    if sections is None:
+        problems.append("exactly one function tooltipSections() expected")
+    else:
+        problems += _pin_problems(sections, TOOLTIP_SECTION_PINS, "tooltipSections()")
+    return problems
+
+
+def test_hover_popup_dot_takes_only_known_levels():
+    problems = _tooltip_level_problems(_read_code(USAGE_TOOLTIP), _read_code(TOOLTIP_LOGIC_JS))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (USAGE_TOOLTIP, "color: tip.levelColor(reading.modelData.level)", "color: reading.modelData.level"),
+    (USAGE_TOOLTIP, 'objectName: "tooltipReadingDot"', 'objectName: "tooltipDot"'),
+    (USAGE_TOOLTIP, 'return "transparent"', "return level"),
+    (USAGE_TOOLTIP, 'if (level === "warning")', 'if (level === "warning" || level === "stale")'),
+    (TOOLTIP_LOGIC_JS, 'level === "critical" ? level : ""', 'level === "critical" ? level : String(level)'),
+    (TOOLTIP_LOGIC_JS, 'level === "normal" || level === "warning"', 'level === "normal" || level === "stale"'),
+    (TOOLTIP_LOGIC_JS, "level: readingLevel(entry.level)", 'level: String(entry.level || "")'),
+    (TOOLTIP_LOGIC_JS, 'value: String(entry.value || ""),', "value: entry.value,"),
+    (TOOLTIP_LOGIC_JS, 'name: String(group.name || ""),', "name: group.name,"),
+    (TOOLTIP_LOGIC_JS, "function readingLevel(level) {",
+     "function reach() { return new XMLHttpRequest() }\nfunction readingLevel(level) {"),
+])
+def test_proof_hover_popup_level_rule_catches(path, old, new):
+    view = _mutated(path, old, new) if path == USAGE_TOOLTIP else _read_code(USAGE_TOOLTIP)
+    logic = _mutated(path, old, new) if path == TOOLTIP_LOGIC_JS else _read_code(TOOLTIP_LOGIC_JS)
+    assert _tooltip_level_problems(view, logic)
+
+
+# 1a accent: a pure library whose only results are "#rrggbb" or "", and a
+# decorative strip that shows nothing else.
+
+ACCENT_ENTRY = r'\w+\s*:\s*\{\s*light\s*:\s*"#[0-9a-f]{6}"\s*,\s*dark\s*:\s*"#[0-9a-f]{6}"\s*\}'
+ACCENT_TABLE = rf"\{{\s*{ACCENT_ENTRY}(?:\s*,\s*{ACCENT_ENTRY})*\s*\}}"
+ACCENT_RETURNS = ['""', '""', "luminance < 0.5 ? pair.dark : pair.light"]
+ACCENT_GUARD = 'typeof providerId !== "string" || !Object.prototype.hasOwnProperty.call(ACCENTS, providerId)'
+ACCENT_STRINGS = {"", "string", "number"}
+ACCENT_BINDING = ("readonly property string accent: ProviderAccent.accentFor(providerSection.modelData.provider_id, "
+                  "Kirigami.Theme.backgroundColor.r, Kirigami.Theme.backgroundColor.g, Kirigami.Theme.backgroundColor.b)")
+ACCENT_STRIP_PINS = (
+    'visible: providerSection.accent !== ""',
+    'color: providerSection.accent !== "" ? providerSection.accent : "transparent"',
+)
+
+
+def _provider_accent_problems(code):
+    problems = _alert_logic_problems(code) + _access_problems(code)
+    table = _one_block(code, r"\bvar\s+ACCENTS\s*=\s*\{")
+    if table is None:
+        return problems + ["exactly one `var ACCENTS = {...}` expected"]
+    if not re.fullmatch(ACCENT_TABLE, table):
+        problems.append('ACCENTS must hold only {light: "#rrggbb", dark: "#rrggbb"} literals')
+    others = [text for text in re.findall(r'"([^"\n]*)"', code)
+              if text not in ACCENT_STRINGS and not re.fullmatch(r"#[0-9a-f]{6}", text)]
+    if others or _hits(r"['`]", code):
+        problems.append(f"no other string literals are allowed, found {others}")
+    body = _function_body(code, "accentFor")
+    if body is None:
+        return problems + ["exactly one function accentFor() expected"]
+    if _returns(body) != ACCENT_RETURNS:
+        problems.append(f"accentFor() must return exactly {ACCENT_RETURNS}, found {_returns(body)}")
+    problems += _pin_problems(body, (ACCENT_GUARD,), "accentFor()")
+    return problems
+
+
+def _accent_strip_problems(code):
+    problems = _pin_problems(code, (ACCENT_BINDING,), "UsageView.qml")
+    if len(_hits(r"\bProviderAccent\s*\.\s*(?!js\b)", code)) != 1:
+        problems.append("ProviderAccent may be used only by the accent binding")
+    if _hits(r"\baccent\s*=(?!=)", code):
+        problems.append("nothing may assign accent")
+    strips = _named_elements(code, RECTANGLE, "providerAccent")
+    if len(strips) != 1:
+        return problems + [f"exactly one Rectangle providerAccent expected, found {len(strips)}"]
+    body = strips[0][1]
+    top = _top_level_raw(body)
+    problems += _pin_problems(top, ACCENT_STRIP_PINS, "providerAccent")
+    if _hits(r"(?<![\w.])[A-Z][\w.]*\s*\{", body):
+        problems.append("providerAccent must have no child elements")
+    if re.search(r"(?:^|[\n;])\s*(?:text|source)\s*:", top):
+        problems.append("providerAccent is decorative: no text or source")
+    return problems
+
+
+def test_provider_accent_is_a_pure_library_of_hex_colors():
+    problems = _provider_accent_problems(_read_code(PROVIDER_ACCENT_JS))
+    assert not problems, f"{_rel(PROVIDER_ACCENT_JS)}: {problems}"
+
+
+def test_provider_accent_strip_is_decorative():
+    problems = _accent_strip_problems(_read_code(USAGE_VIEW))
+    assert not problems, f"{_rel(USAGE_VIEW)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    (".pragma library\n", ""),
+    ('claude: {light: "#b4532a"', 'claude: {light: "https://example.invalid/x"'),
+    ('claude: {light: "#b4532a"', 'claude: {light: "#B4532A"'),
+    ('dark: "#e8926f"}', 'dark: "#e8926f80"}'),
+    ('grok: {light: "#4d4d4d", dark: "#c4c4c4"}', 'grok: {light: "#4d4d4d", dark: "#c4c4c4", name: "Grok"}'),
+    ("return luminance < 0.5 ? pair.dark : pair.light", "return providerId"),
+    ("return luminance < 0.5 ? pair.dark : pair.light", 'return "url(x)"'),
+    ("!Object.prototype.hasOwnProperty.call(ACCENTS, providerId)", "!ACCENTS[providerId]"),
+    ("function channel(value) {", "function reach() { return new XMLHttpRequest() }\nfunction channel(value) {"),
+    ("function channel(value) {", 'function reach() { return Qt.resolvedUrl("x") }\nfunction channel(value) {'),
+    ("function channel(value) {", '.import "UsageLogic.js" as UsageLogic\nfunction channel(value) {'),
+])
+def test_proof_provider_accent_rule_catches(old, new):
+    assert _provider_accent_problems(_mutated(PROVIDER_ACCENT_JS, old, new))
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ('objectName: "providerAccent"', 'objectName: "accentStrip"'),
+    ('color: providerSection.accent !== "" ? providerSection.accent : "transparent"',
+     "color: providerSection.modelData.color"),
+    ('visible: providerSection.accent !== ""\n', ""),
+    ('                            objectName: "providerAccent"\n',
+     '                            objectName: "providerAccent"\n                            '
+     'Image { source: "https://example.invalid/x.png" }\n'),
+    ('                            objectName: "providerAccent"\n',
+     '                            objectName: "providerAccent"\n'
+     "                            property string text: providerSection.modelData.plan\n"
+     "                            Text { text: providerSection.modelData.plan }\n"),
+    ("ProviderAccent.accentFor(\n                        providerSection.modelData.provider_id,",
+     "ProviderAccent.accentFor(\n                        providerSection.modelData.display_name,"),
+    ('    function billingTitle(billing) {',
+     '    function other() { return ProviderAccent.ACCENTS }\n    function billingTitle(billing) {'),
+])
+def test_proof_accent_strip_rule_catches(old, new):
+    assert _accent_strip_problems(_mutated(USAGE_VIEW, old, new))
+
+
+# 1a next reset: PlainText, and its names are the catalog's, never the helper's.
+
+NEXT_RESET_TEXT = "UsageLogic.shownText(usage.nextResetText(root.shownProviders, usage.nowMs))"
+NEXT_RESET_PINS = (
+    "var descriptor = providerData ? Catalog.byId(providerData.provider_id) : null",
+    "var metric = Catalog.metric(descriptor.provider_id, windows[windowIndex].kind)",
+    "entries.push({resetsAtMs: target, provider: descriptor.display_name, metric: metric.title})",
+    "var next = UsageLogic.nextReset(entries, nowMs)",
+    "next.provider, next.metric, usage.countdownText(UsageLogic.shortCountdown(next.resetsAtMs, nowMs))",
+    'i18nc("@label soonest reset: provider, reading, time left", "Next reset: %1 %2 in %3",',
+)
+NEXT_RESET_BANS = {
+    "helper caption": r"\bcaption\b",
+    "helper text": r"\b(?:plan|error_message|status|modelData)\b",
+    "provider field": r"\bproviderData\s*\.\s*(?!provider_id\b|windows\b)\w+",
+    "window field": r"\bwindows\s*\[\s*windowIndex\s*\]\s*\.\s*(?!kind\b|resets_at\b)\w+",
+    "name not from the catalog": r"(?<!descriptor)\s*\.\s*display_name\b",
+}
+
+
+def _next_reset_problems(code):
+    labels = _named_elements(code, TEXT_ELEMENT, "usageNextResetLabel")
+    if len(labels) != 1:
+        return [f"exactly one text element usageNextResetLabel expected, found {len(labels)}"]
+    start, body = labels[0]
+    problems = []
+    if len(re.findall(PLAIN_TEXT_FORMAT, _top_level(body))) != 1:
+        problems.append(f"line {_line_of(code, start)}: usageNextResetLabel needs textFormat PlainText")
+    if _text_binding(body) != NEXT_RESET_TEXT:
+        problems.append(f"usageNextResetLabel must show {NEXT_RESET_TEXT}, found {_text_binding(body)}")
+    next_reset = _function_body(code, "nextResetText")
+    countdown = _function_body(code, "countdownText")
+    if next_reset is None or countdown is None:
+        return problems + ["exactly one nextResetText() and countdownText() expected"]
+    problems += _pin_problems(next_reset, NEXT_RESET_PINS, "nextResetText()")
+    problems += [f"nextResetText(): {name} at line {line}" for name, pattern in NEXT_RESET_BANS.items()
+                 for line in _hits(pattern, next_reset)]
+    extra = set(re.findall(r"\bparts\s*\.\s*(\w+)", countdown)) - {"days", "hours", "minutes"}
+    if extra:
+        problems.append(f"countdownText() may read only numbers, found {sorted(extra)}")
+    return problems
+
+
+def test_next_reset_label_is_plain_text_with_catalog_names():
+    problems = _next_reset_problems(_read_code(USAGE_VIEW))
+    assert not problems, f"{_rel(USAGE_VIEW)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ('objectName: "usageNextResetLabel"', 'objectName: "nextResetLabel"'),
+    ("        textFormat: Text.PlainText\n        text: UsageLogic.shownText(usage.nextResetText(",
+     "        text: UsageLogic.shownText(usage.nextResetText("),
+    ("        textFormat: Text.PlainText\n        text: UsageLogic.shownText(usage.nextResetText(",
+     "        textFormat: Text.RichText\n        text: UsageLogic.shownText(usage.nextResetText("),
+    ("text: UsageLogic.shownText(usage.nextResetText(root.shownProviders, usage.nowMs))",
+     "text: UsageLogic.shownText(root.lastError)"),
+    ("provider: descriptor.display_name, metric: metric.title",
+     "provider: providerData.display_name, metric: metric.title"),
+    ("provider: descriptor.display_name, metric: metric.title",
+     "provider: descriptor.display_name, metric: windows[windowIndex].caption"),
+    ("var descriptor = providerData ? Catalog.byId(providerData.provider_id) : null",
+     "var descriptor = providerData"),
+    ("var metric = Catalog.metric(descriptor.provider_id, windows[windowIndex].kind)",
+     "var metric = windows[windowIndex]"),
+    ("next.provider, next.metric,", "next.provider, providerData.plan,"),
+    ("if (parts.minutes > 0)", "if (parts.caption)"),
+])
+def test_proof_next_reset_rule_catches(old, new):
+    assert _next_reset_problems(_mutated(USAGE_VIEW, old, new))
+
+
+# --- Round 4, phase 1b: Ollama bubbles ---------------------------------------------------
+
+# The bubbles restyled the transcript only. Text stays plain and read-only (the
+# user's message, the reply's paragraphs and code are read-only TextEdits; word
+# runs and headings are Text), and the scrolling and the rest of the view keep
+# working. Most of the plan's "Must not change" items are properties, functions
+# or ids rather than objectNames, so those are pinned by their declarations.
+
+BARE_TEXT_EDIT = r"(?<![\w.])TextEdit\s*\{"
+READ_ONLY_TRUE = r"(?:^|[\n;])\s*readOnly\s*:\s*true\s*(?=;|\n|$)"
+OLLAMA_BUBBLE_TEXTS = ("id: userText", "id: plainText", "id: wordText", "id: codeText",
+                       "font: ollamaView.headingFont(segment.block.level)")
+USER_BUBBLE_TEXT = 'message.mine ? message.body : ""'
+
+
+def _ollama_bubble_problems(code):
+    problems = _pinned_plain_text_problems(code, OLLAMA_BUBBLE_TEXTS)
+    edits = list(_blocks(code, BARE_TEXT_EDIT))
+    if not edits:
+        problems.append("no TextEdit found")
+    for start, body in edits:
+        if len(re.findall(READ_ONLY_TRUE, _top_level(body))) != 1:
+            problems.append(f"line {_line_of(code, start)}: every TextEdit here must be `readOnly: true`")
+    bubbles = _named_elements(code, RECTANGLE, "userBubble")
+    if len(bubbles) != 1:
+        return problems + [f"exactly one Rectangle userBubble expected, found {len(bubbles)}"]
+    texts = list(_blocks(bubbles[0][1], TEXT_ELEMENT))
+    if len(texts) != 1 or _text_binding(texts[0][1]) != USER_BUBBLE_TEXT:
+        problems.append(f"the user bubble must hold one text element showing {USER_BUBBLE_TEXT}")
+    return problems
+
+
+def test_ollama_bubbles_keep_plain_read_only_text():
+    problems = _ollama_bubble_problems(_read_code(OLLAMA_CHAT_VIEW))
+    assert not problems, f"{_rel(OLLAMA_CHAT_VIEW)}: {problems}"
+
+
+@pytest.mark.parametrize(("anchor", "old", "new"), [
+    ("id: userText", "textFormat: TextEdit.PlainText\n", ""),
+    ("id: userText", "textFormat: TextEdit.PlainText", "textFormat: TextEdit.RichText"),
+    ("id: userText", "readOnly: true", "readOnly: false"),
+    ("id: userText", "readOnly: true\n", ""),
+    ("id: userText", 'text: message.mine ? message.body : ""', "text: message.body + root.lastError"),
+    ("id: plainText", "readOnly: true", "readOnly: false"),
+    ("id: plainText", "textFormat: TextEdit.PlainText", "textFormat: TextEdit.MarkdownText"),
+    ("id: codeText", "readOnly: true\n", ""),
+    ("id: codeText", "textFormat: TextEdit.PlainText\n", ""),
+    ("id: wordText", "textFormat: Text.PlainText", "textFormat: Text.StyledText"),
+])
+def test_proof_ollama_bubble_rule_catches(anchor, old, new):
+    assert _ollama_bubble_problems(_mutated_in_block(OLLAMA_CHAT_VIEW, TEXT_ELEMENT, anchor, old, new))
+
+
+def test_proof_ollama_bubble_rule_catches_a_second_user_text():
+    code = _mutated(OLLAMA_CHAT_VIEW, '                            objectName: "userBubble"\n',
+                    '                            objectName: "userBubble"\n'
+                    "                            Text { textFormat: Text.PlainText; text: message.body }\n")
+    assert _ollama_bubble_problems(code)
+
+
+OLLAMA_OBJECT_NAMES = (
+    "clearConfirm", "personaPanel", "personaForA", "personaForB", "personaPicker", "personaInput",
+    "compareHint", "problemText", "problemHint", "problemDetail", "retryButton", "inputScroll",
+    "ollamaInput", "inputWheelZoom", "sendButton", "replyWords", "paneModel", "personaLine",
+    "transcript", "transcriptB", "transcriptBar", "transcriptBarB", "transcriptWheel",
+    "userBubble", "editButton", "replyBubble", "hiddenCharsNote", "regenerateButton",
+    "backToBottom", "backToBottomB",
+)
+OLLAMA_MUST_KEEP = {
+    "follow": "property bool follow: true",
+    "held": "readonly property bool held: list.moving || bar.pressed || wheelSettle.running",
+    "pin": "function pin() { if (pane.follow && !pane.held) pane.scrollToEnd()",
+    "released": "function released() { pane.follow = pane.sentWhileHeld || pane.atBottom()",
+    "released-on-held": "onHeldChanged: { if (!pane.held) pane.released()",
+    "wheelSettle": "id: wheelSettle",
+    "wheelSettle-restart": "wheelSettle.restart()",
+    "transcript-zoom": ("if (wheel.modifiers & Qt.ControlModifier) { wheel.accepted = true "
+                        "ollamaView.wheelZoom(wheel) } else { pane.wheeled(wheel) }"),
+    "input-zoom": "onWheel: (wheel) => ollamaView.wheelZoom(wheel)",
+    "back-to-bottom": 'i18n("Back to bottom")',
+    "new-messages": 'i18n("New messages")',
+    "back-to-bottom-click": "onClicked: pane.followBottom()",
+    "drops": "component TextDropArea: DropArea {",
+    "compare": "property bool comparing: false",
+    "compare-toggle": "ollamaView.comparing = on === true",
+    "compare-queue": 'ollamaView.queuedPrompt = ollamaView.comparing ? input.text : ""',
+    "textScale": "property real textScale: 1.0",
+    "textScale-pixels": "Math.round(base.pixelSize * ollamaView.textScale)",
+    "textScale-points": "spec.pointSize = base.pointSize * ollamaView.textScale",
+}
+OLLAMA_DROP_TARGETS = 2
+# The view, the panes area, the pane, the transcript and the boxes clip; never fewer.
+OLLAMA_MIN_CLIPS = 7
+TRANSCRIPT_ELEMENT = r"(?<![\w.])ListView\s*\{"
+
+
+def _ollama_must_keep_problems(code):
+    problems = []
+    names = [name for binding in re.findall(r"\bobjectName\s*:\s*([^\n]*)", code)
+             for name in re.findall(r'"(\w+)"', binding)]
+    for name in OLLAMA_OBJECT_NAMES:
+        if names.count(name) != 1:
+            problems.append(f"objectName:{name}: must be set exactly once, found {names.count(name)}")
+    for key, literal in OLLAMA_MUST_KEEP.items():
+        count = len(_hits(_code_pattern(literal), code))
+        if count != 1:
+            problems.append(f"{key}: {literal!r} must appear exactly once, found {count}")
+    drops = len(_hits(r"(?<![\w.])TextDropArea\s*\{", code))
+    if drops != OLLAMA_DROP_TARGETS:
+        problems.append(f"drop-targets: {OLLAMA_DROP_TARGETS} TextDropArea items expected, found {drops}")
+    clips = len(_hits(r"(?m)^\s*clip\s*:\s*true\s*$", code))
+    if clips < OLLAMA_MIN_CLIPS:
+        problems.append(f"clip: at least {OLLAMA_MIN_CLIPS} `clip: true` expected, found {clips}")
+    transcripts = [body for _, body in _blocks(code, TRANSCRIPT_ELEMENT)
+                   if re.search(r'(?m)^\s*objectName\s*:[^\n]*"transcript"', _top_level_raw(body))]
+    if len(transcripts) != 1 or not re.search(r"(?m)^\s*clip\s*:\s*true\s*$", _top_level(transcripts[0])):
+        problems.append("transcript-clip: the transcript ListView must clip")
+    return problems
+
+
+def test_ollama_view_keeps_its_scrolling_compare_and_object_names():
+    problems = _ollama_must_keep_problems(_read_code(OLLAMA_CHAT_VIEW))
+    assert not problems, f"{_rel(OLLAMA_CHAT_VIEW)}: {problems}"
+
+
+@pytest.mark.parametrize("name", OLLAMA_OBJECT_NAMES)
+def test_proof_ollama_object_name_rule_catches(name):
+    code = _mutated(OLLAMA_CHAT_VIEW, f'"{name}"', f'"{name}Renamed"')
+    assert any(problem.startswith(f"objectName:{name}:") for problem in _ollama_must_keep_problems(code))
+
+
+@pytest.mark.parametrize(("key", "old", "new"), [
+    ("follow", "property bool follow: true", "property bool follow: false"),
+    ("held", "list.moving || bar.pressed || wheelSettle.running", "list.moving || bar.pressed"),
+    ("pin", "if (pane.follow && !pane.held)\n", "if (pane.follow)\n"),
+    ("released", "pane.follow = pane.sentWhileHeld || pane.atBottom()", "pane.follow = true"),
+    ("released-on-held", "                pane.released()\n", "                pane.pin()\n"),
+    ("wheelSettle", "id: wheelSettle", "id: wheelWait"),
+    ("wheelSettle-restart", "wheelSettle.restart()", "wheelSettle.start()"),
+    ("transcript-zoom", "                                ollamaView.wheelZoom(wheel)\n",
+     "                                pane.wheeled(wheel)\n"),
+    ("input-zoom", "onWheel: (wheel) => ollamaView.wheelZoom(wheel)", "onWheel: (wheel) => {}"),
+    ("back-to-bottom", 'i18n("Back to bottom")', 'i18n("Jump down")'),
+    ("new-messages", 'i18n("New messages")', 'i18n("New text")'),
+    ("back-to-bottom-click", "onClicked: pane.followBottom()", "onClicked: pane.scrollToEnd()"),
+    ("drops", "component TextDropArea: DropArea {", "component TextDropArea: Item {"),
+    ("drop-targets", "        TextDropArea {\n            anchors.fill: parent\n        }\n", ""),
+    ("compare", "property bool comparing: false", "property bool comparing: true"),
+    ("compare-toggle", "ollamaView.comparing = on === true", "ollamaView.comparing = false"),
+    ("compare-queue", 'ollamaView.queuedPrompt = ollamaView.comparing ? input.text : ""',
+     'ollamaView.queuedPrompt = ""'),
+    ("textScale", "property real textScale: 1.0", "property real textScale: 2.0"),
+    ("textScale-pixels", "Math.round(base.pixelSize * ollamaView.textScale)", "Math.round(base.pixelSize)"),
+    ("textScale-points", "spec.pointSize = base.pointSize * ollamaView.textScale", "spec.pointSize = base.pointSize"),
+    ("clip", "    clip: true\n\n    function scaledFont", "\n    function scaledFont"),
+    ("transcript-clip", "                    clip: true\n", ""),
+])
+def test_proof_ollama_must_keep_rule_catches(key, old, new):
+    problems = _ollama_must_keep_problems(_mutated(OLLAMA_CHAT_VIEW, old, new))
+    assert any(problem.startswith(f"{key}:") for problem in problems), problems
