@@ -53,7 +53,7 @@ GOOD = {
     "middleClickOpens": "mscopilot",
     "chatCustomUrls": '{"local":"http://localhost:8080/","claude":"https://claude.example.org/new?x=1"}',
 }
-# What the checks keep of GOOD: canonical JSON (catalog order), lower-case colours.
+# What the checks keep of GOOD: canonical JSON (catalog order), lower-case colors.
 GOOD_KEPT = dict(GOOD, usageNormalColor="#00aaff",
                  tooltipMetrics='{"claude":["weekly"],"codex":[]}',
                  chatCustomUrls='{"claude":"https://claude.example.org/new?x=1","local":"http://localhost:8080/"}')
@@ -161,7 +161,7 @@ def test_the_choices_match_the_widget():
     assert js_list(settings, "POPUP_SIZES") == backup.POPUP_SIZES
     assert js_list(settings, "SHORTCUT_TARGETS") == backup.SHORTCUT_TARGETS
     assert js_list(settings, "ALERT_PERCENTS") == backup.ALERT_PERCENTS
-    assert js_list(js_text("UsageLogic.js"), "COLOUR_PERCENTS") == backup.COLOUR_PERCENTS
+    assert js_list(js_text("UsageLogic.js"), "COLOR_PERCENTS") == backup.COLOR_PERCENTS
     general = js_text("configGeneral.qml").split("readonly property var refreshChoices: [", 1)[1].split("]", 1)[0]
     assert tuple(int(value) for value in re.findall(r"value: ([0-9]+)", general)) == backup.REFRESH_INTERVALS
     assert re.search(r'var DEFAULT_ADDRESS = "http://127\.0\.0\.1:11434"', js_text("OllamaChat.js"))

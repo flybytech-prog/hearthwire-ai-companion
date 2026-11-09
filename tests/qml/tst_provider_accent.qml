@@ -3,7 +3,7 @@ import QtTest
 import "../../plasmoid/contents/ui/ProviderCatalog.js" as Catalog
 import "../../plasmoid/contents/ui/ProviderAccent.js" as ProviderAccent
 
-// U1: the Usage tab's accent strips: a light and a dark colour per catalog
+// U1: the Usage tab's accent strips: a light and a dark color per catalog
 // provider, picked by the background, and readable on both.
 TestCase {
     name: "ProviderAccent"
@@ -13,8 +13,8 @@ TestCase {
     }
 
     function luminance(hex) {
-        var colour = Qt.color(hex)
-        return 0.2126 * linear(colour.r) + 0.7152 * linear(colour.g) + 0.0722 * linear(colour.b)
+        var color = Qt.color(hex)
+        return 0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
     }
 
     function contrast(first, second) {
@@ -24,8 +24,8 @@ TestCase {
     }
 
     function accentOn(providerId, background) {
-        var colour = Qt.color(background)
-        return ProviderAccent.accentFor(providerId, colour.r, colour.g, colour.b)
+        var color = Qt.color(background)
+        return ProviderAccent.accentFor(providerId, color.r, color.g, color.b)
     }
 
     function test_everyCatalogProviderHasBoth() {
@@ -37,12 +37,12 @@ TestCase {
             verify(/^#[0-9a-f]{6}$/.test(light), ids[index] + " " + light)
             verify(/^#[0-9a-f]{6}$/.test(dark), ids[index] + " " + dark)
             verify(light !== dark, ids[index])
-            // Not the catalog's near-black grok colour.
+            // Not the catalog's near-black grok color.
             verify(light !== "#111111" && dark !== "#111111", ids[index])
         }
     }
 
-    // Breeze light and dark window and view colours.
+    // Breeze light and dark window and view colors.
     function test_readableOnBreeze() {
         var ids = Catalog.providerIds()
         for (var index = 0; index < ids.length; index++) {

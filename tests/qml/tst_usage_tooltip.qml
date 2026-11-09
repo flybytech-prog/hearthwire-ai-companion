@@ -99,7 +99,7 @@ TestCase {
         verify(!findAll(small, "tooltipProvider")[0].truncated)
     }
 
-    // T1: a dot per reading in the level's colour; money and credits get a
+    // T1: a dot per reading in the level's color; money and credits get a
     // clear one, so every title starts in the same column.
     function test_levelDots() {
         var tip = createTemporaryObject(tooltipComponent, this, {
@@ -130,7 +130,7 @@ TestCase {
             // The dot comes before its title (after it in right-to-left).
             verify(dots[index].mapToItem(tip, dots[index].width, 0).x <= titles[index].mapToItem(tip, 0, 0).x)
         }
-        // The user changing a colour repaints the dots.
+        // The user changing a color repaints the dots.
         tip.criticalColor = "#0000ff"
         verify(Qt.colorEqual(dots[0].color, "#0000ff"))
     }

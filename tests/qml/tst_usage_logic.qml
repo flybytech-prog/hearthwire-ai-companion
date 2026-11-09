@@ -195,7 +195,7 @@ TestCase {
         compare(UsageLogic.normalizeThresholds(95, 50), {warn: 90, critical: 95})
     }
 
-    function test_colourChoicesKeepEveryPick() {
+    function test_colorChoicesKeepEveryPick() {
         compare(UsageLogic.WARN_PERCENTS, [50, 55, 60, 65, 70, 75, 80, 85, 90])
         compare(UsageLogic.CRITICAL_PERCENTS, [55, 60, 65, 70, 75, 80, 85, 90, 95])
         // Any warn pick with a lower critical: the critical level moves up.
@@ -299,16 +299,16 @@ TestCase {
         compare(UsageLogic.nextReset({length: 2, 0: later, 1: soon}, now), soon)
     }
 
-    function test_normalizeColour() {
-        compare(UsageLogic.normalizeColour("#A1b2C3"), "#a1b2c3")
-        compare(UsageLogic.normalizeColour(""), "")
-        compare(UsageLogic.normalizeColour("red"), "")
-        compare(UsageLogic.normalizeColour("#abc"), "")
-        compare(UsageLogic.normalizeColour("#a1b2c3ff"), "")
-        compare(UsageLogic.normalizeColour("#a1b2c3; x"), "")
-        compare(UsageLogic.normalizeColour(" #a1b2c3"), "")
-        compare(UsageLogic.normalizeColour(undefined), "")
-        compare(UsageLogic.normalizeColour(0xa1b2c3), "")
+    function test_normalizeColor() {
+        compare(UsageLogic.normalizeColor("#A1b2C3"), "#a1b2c3")
+        compare(UsageLogic.normalizeColor(""), "")
+        compare(UsageLogic.normalizeColor("red"), "")
+        compare(UsageLogic.normalizeColor("#abc"), "")
+        compare(UsageLogic.normalizeColor("#a1b2c3ff"), "")
+        compare(UsageLogic.normalizeColor("#a1b2c3; x"), "")
+        compare(UsageLogic.normalizeColor(" #a1b2c3"), "")
+        compare(UsageLogic.normalizeColor(undefined), "")
+        compare(UsageLogic.normalizeColor(0xa1b2c3), "")
     }
 
     function test_shownPercent() {
@@ -318,8 +318,8 @@ TestCase {
         compare(UsageLogic.shownPercent("x", "used"), 0)
     }
 
-    function test_defaultNormalColour() {
-        compare(UsageLogic.defaultNormalColour(0.1, 0.1, 0.1), "#32c7d3")
-        compare(UsageLogic.defaultNormalColour(0.95, 0.95, 0.95), "#008c95")
+    function test_defaultNormalColor() {
+        compare(UsageLogic.defaultNormalColor(0.1, 0.1, 0.1), "#32c7d3")
+        compare(UsageLogic.defaultNormalColor(0.95, 0.95, 0.95), "#008c95")
     }
 }

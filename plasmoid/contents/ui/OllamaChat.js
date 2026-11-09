@@ -460,7 +460,7 @@ function serverErrorText(raw) {
 // format controls (U+1BCA0-3), musical format controls (U+1D173-A) and tag
 // characters (U+E0000-E007F). Each one is shown as a visible marker such as
 // ⟦U+202E⟧ instead. Only exception: one U+FE0F right after an emoji, which
-// just asks for the colour form of that emoji.
+// just asks for the color form of that emoji.
 // Built from strings because Qt's JavaScript lexer rejects an escaped U+2028 inside a
 // regular expression literal.
 var HIDDEN_RANGES = [

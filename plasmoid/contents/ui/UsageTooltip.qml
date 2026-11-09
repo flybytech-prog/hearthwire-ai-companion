@@ -7,8 +7,8 @@ import org.kde.kirigami as Kirigami
 
 // The panel icon's hover popup while it shows usage: the title, then each
 // provider's name in bold with one reading per line (a dot in the
-// reading's level colour, name left, value right). main.qml passes
-// TooltipLogic.tooltipSections() and the Usage tab's colours; every text
+// reading's level color, name left, value right). main.qml passes
+// TooltipLogic.tooltipSections() and the Usage tab's colors; every text
 // here is plain text.
 Item {
     id: tip
@@ -16,7 +16,7 @@ Item {
     property string title: ""
     // [{name, items: [{title, value, level}]}]
     property var sections: []
-    // The user's colours for the levels (main.qml: normalUsageColor and so on).
+    // The user's colors for the levels (main.qml: normalUsageColor and so on).
     property color normalColor: Kirigami.Theme.positiveTextColor
     property color warningColor: Kirigami.Theme.neutralTextColor
     property color criticalColor: Kirigami.Theme.negativeTextColor

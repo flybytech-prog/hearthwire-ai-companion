@@ -93,7 +93,7 @@ GENERAL_CONFIG_KEYS = {
     "tooltipShowsUsage": ("Bool", "true"),
     # The hover tooltip's reset times and its own readings ("" = same as Usage).
     "tooltipMetrics": ("String", ""),
-    # Usage tab: provider order ("" = catalog order), compact rows, bar colours.
+    # Usage tab: provider order ("" = catalog order), compact rows, bar colors.
     "providerOrder": ("String", ""),
     "usageCompact": ("Bool", "false"),
     "usageWarnPercent": ("Int", "60"),
@@ -370,7 +370,7 @@ def test_webengine_and_dialogs_are_imported_only_by_chat_web_view(module_pattern
     offenders = [
         f"{_rel(path)}:{line}"
         for path in _code_files() if path != CHAT_WEB_VIEW
-        # configUsage.qml's colour boxes: only a ColorDialog (_colour_dialog_problems).
+        # configUsage.qml's color boxes: only a ColorDialog (_color_dialog_problems).
         and not _dialogs_exempt(module, path)
         for line in _hits(pattern, _read_code(path))
     ]
@@ -394,17 +394,17 @@ def test_proof_dialogs_exemption_is_the_one_path(path):
     assert not _dialogs_exempt("QtWebEngine", CONFIG_USAGE)
 
 
-# AI Provider Settings' colour boxes use Qt's ColorDialog, which only hands
-# back a colour: configUsage.qml imports QtQuick.Dialogs once, as QtDialogs,
+# AI Provider Settings' color boxes use Qt's ColorDialog, which only hands
+# back a color: configUsage.qml imports QtQuick.Dialogs once, as QtDialogs,
 # declares exactly one dialog, a ColorDialog, and no file, folder or message
-# dialog; it saves only through setUsageColour, always opaque (opaqueColour).
+# dialog; it saves only through setUsageColor, always opaque (opaqueColor).
 # The dialog sets nothing else: no options (so no alpha), no other handler.
 DIALOG_TYPES = r"\bQtDialogs\s*\.\s*(\w+)\s*\{"
-COLOUR_DIALOG_MEMBERS = ("id", "title", "selectedColor", "onAccepted")
-COLOUR_DIALOG_ACCEPTED = "page.setUsageColour(colourChoice.level, page.opaqueColour(selectedColor))"
+COLOR_DIALOG_MEMBERS = ("id", "title", "selectedColor", "onAccepted")
+COLOR_DIALOG_ACCEPTED = "page.setUsageColor(colorChoice.level, page.opaqueColor(selectedColor))"
 
 
-def _colour_dialog_problems(code):
+def _color_dialog_problems(code):
     problems = []
     imports = _hits(r"(?m)^\s*import\s+QtQuick\.Dialogs\b.*$", code)
     if len(imports) != 1 or len(_hits(r"(?m)^\s*import\s+QtQuick\.Dialogs\s+as\s+QtDialogs\s*$", code)) != 1:
@@ -416,26 +416,26 @@ def _colour_dialog_problems(code):
         problems.append(f"exactly one QtDialogs.ColorDialog, found {dialogs}")
     for start, body in _blocks(code, r"\bQtDialogs\s*\.\s*ColorDialog\s*\{"):
         accepted = re.findall(r"(?m)^\s*onAccepted\s*:\s*(.+)$", body)
-        if accepted != [COLOUR_DIALOG_ACCEPTED]:
-            problems.append(f"line {_line_of(code, start)}: the ColorDialog only calls page.setUsageColour")
+        if accepted != [COLOR_DIALOG_ACCEPTED]:
+            problems.append(f"line {_line_of(code, start)}: the ColorDialog only calls page.setUsageColor")
         top = _top_level_raw(body)
         members = re.findall(r"(?m)^\s*([A-Za-z_][\w.]*)\s*:", top)
         # Anything at the top level that is not "name: value" (a child, a
         # function, a property declaration) is a member too.
         others = [line.strip() for line in top.splitlines()
                   if line.strip() and not re.match(r"\s*[A-Za-z_][\w.]*\s*:", line)]
-        if sorted(members) != sorted(COLOUR_DIALOG_MEMBERS) or others:
+        if sorted(members) != sorted(COLOR_DIALOG_MEMBERS) or others:
             problems.append(f"line {_line_of(code, start)}: the ColorDialog may only set "
-                            f"{', '.join(COLOUR_DIALOG_MEMBERS)}; found {members + others}")
-    if not re.search(r"\bfunction\s+opaqueColour\s*\(\s*colour\s*\)\s*\{\s*return\s+String\s*\(\s*"
-                     r"Qt\s*\.\s*rgba\s*\(\s*colour\.r\s*,\s*colour\.g\s*,\s*colour\.b\s*,\s*1\s*\)\s*\)\s*\}",
+                            f"{', '.join(COLOR_DIALOG_MEMBERS)}; found {members + others}")
+    if not re.search(r"\bfunction\s+opaqueColor\s*\(\s*color\s*\)\s*\{\s*return\s+String\s*\(\s*"
+                     r"Qt\s*\.\s*rgba\s*\(\s*color\.r\s*,\s*color\.g\s*,\s*color\.b\s*,\s*1\s*\)\s*\)\s*\}",
                      code):
-        problems.append("opaqueColour(colour) must return String(Qt.rgba(colour.r, colour.g, colour.b, 1))")
+        problems.append("opaqueColor(color) must return String(Qt.rgba(color.r, color.g, color.b, 1))")
     return problems
 
 
-def test_settings_colour_dialog_is_only_a_colour_dialog():
-    problems = _colour_dialog_problems(_read_code(CONFIG_USAGE))
+def test_settings_color_dialog_is_only_a_color_dialog():
+    problems = _color_dialog_problems(_read_code(CONFIG_USAGE))
     assert not problems, f"{_rel(CONFIG_USAGE)}: {problems}"
 
 
@@ -443,38 +443,38 @@ def test_settings_colour_dialog_is_only_a_colour_dialog():
     ("import QtQuick.Dialogs as QtDialogs\n", "import QtQuick.Dialogs as QtDialogs\nimport QtQuick.Dialogs\n"),
     ("        QtDialogs.ColorDialog {\n", "        QtDialogs.FileDialog {\n"),
     ("        QtDialogs.ColorDialog {\n", "        QtDialogs.FolderDialog {}\n        QtDialogs.ColorDialog {\n"),
-    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
+    (f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n",
      "            onAccepted: page.cfg_usageNormalColor = String(selectedColor)\n"),
-    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
-     f"            onAccepted: {{ {COLOUR_DIALOG_ACCEPTED}; Qt.openUrlExternally(\"x\") }}\n"),
-    # The colour as the dialog gave it (translucent: saved as "").
-    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
-     "            onAccepted: page.setUsageColour(colourChoice.level, String(selectedColor))\n"),
+    (f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {{ {COLOR_DIALOG_ACCEPTED}; Qt.openUrlExternally(\"x\") }}\n"),
+    # The color as the dialog gave it (translucent: saved as "").
+    (f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n",
+     "            onAccepted: page.setUsageColor(colorChoice.level, String(selectedColor))\n"),
     # Other members of the dialog.
-    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
-     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            onRejected: page.cfg_usageNormalColor = \"\"\n"),
-    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
-     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            options: QtDialogs.ColorDialog.ShowAlphaChannel\n"),
-    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
-     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            onSelectedColorChanged: Qt.openUrlExternally(\"x\")\n"),
-    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
-     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            Component.onCompleted: open()\n"),
-    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
-     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            function f() {{ return 1 }}\n"),
-    (f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n",
-     f"            onAccepted: {COLOUR_DIALOG_ACCEPTED}\n            property string x: \"\"\n"),
-    ("            title: i18n(\"Choose a colour\")\n",
-     "            title: i18n(\"Choose a colour\")\n            title: \"x\"\n"),
-    ("            selectedColor: colourChoice.shown\n", ""),
-    # The helper must keep the colour opaque.
-    ("        return String(Qt.rgba(colour.r, colour.g, colour.b, 1))\n",
-     "        return String(Qt.rgba(colour.r, colour.g, colour.b, colour.a))\n"),
-    ("        return String(Qt.rgba(colour.r, colour.g, colour.b, 1))\n", "        return String(colour)\n"),
+    (f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n            onRejected: page.cfg_usageNormalColor = \"\"\n"),
+    (f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n            options: QtDialogs.ColorDialog.ShowAlphaChannel\n"),
+    (f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n            onSelectedColorChanged: Qt.openUrlExternally(\"x\")\n"),
+    (f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n            Component.onCompleted: open()\n"),
+    (f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n            function f() {{ return 1 }}\n"),
+    (f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n",
+     f"            onAccepted: {COLOR_DIALOG_ACCEPTED}\n            property string x: \"\"\n"),
+    ("            title: i18n(\"Choose a color\")\n",
+     "            title: i18n(\"Choose a color\")\n            title: \"x\"\n"),
+    ("            selectedColor: colorChoice.shown\n", ""),
+    # The helper must keep the color opaque.
+    ("        return String(Qt.rgba(color.r, color.g, color.b, 1))\n",
+     "        return String(Qt.rgba(color.r, color.g, color.b, color.a))\n"),
+    ("        return String(Qt.rgba(color.r, color.g, color.b, 1))\n", "        return String(color)\n"),
     ("    function setThresholds(warn, critical) {\n",
      "    function f() { return QtDialogs.MessageDialog }\n    function setThresholds(warn, critical) {\n"),
 ])
-def test_proof_colour_dialog_rule_catches(old, new):
-    assert _colour_dialog_problems(_mutated(CONFIG_USAGE, old, new))
+def test_proof_color_dialog_rule_catches(old, new):
+    assert _color_dialog_problems(_mutated(CONFIG_USAGE, old, new))
 
 
 # No QML is built from strings or loaded by URL at runtime: no
@@ -5087,9 +5087,9 @@ USAGE_PAGE_WRITERS = {
     "providerOrder": ("moveProvider",),
     "usageWarnPercent": ("setThresholds",),
     "usageCriticalPercent": ("setThresholds",),
-    "usageNormalColor": ("setUsageColour",),
-    "usageWarnColor": ("setUsageColour",),
-    "usageCriticalColor": ("setUsageColour",),
+    "usageNormalColor": ("setUsageColor",),
+    "usageWarnColor": ("setUsageColor",),
+    "usageCriticalColor": ("setUsageColor",),
 }
 _USAGE_KEYS = "|".join(USAGE_PAGE_WRITERS)
 # main.qml rewrites these once, in migrateUsageMetrics().

@@ -46,7 +46,7 @@ plasmashell's memory.
 <td align="center"><img src="docs/settings-chat.png" alt="Settings, Chat page: the list of chat sites" width="400"><br><sub>Settings → Chat</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/settings-providers.png" alt="Settings, AI Provider Settings page: compact layout, warning colours, and the provider list with order arrows, Track switches and reading checkboxes" width="400"><br><sub>Settings → AI Provider Settings</sub></td>
+<td align="center"><img src="docs/settings-providers.png" alt="Settings, AI Provider Settings page: compact layout, warning colors, and the provider list with order arrows, Track switches and reading checkboxes" width="400"><br><sub>Settings → AI Provider Settings</sub></td>
 <td align="center"><img src="docs/settings-hover.png" alt="Settings, AI Provider Settings page, hover popup section: show usage on the panel icon, and the readings chosen for each provider" width="400"><br><sub>Settings → AI Provider Settings → Hover popup</sub></td>
 </tr>
 </table>
@@ -125,10 +125,10 @@ plasmashell's memory.
 - **Compact layout** (optional): one slim bar per reading with its name,
   value and a short time until reset (such as Weekly, 38%, 2d 4h), without
   plan names or captions; errors still show, on one line.
-- **Colours**: bars use a teal colour, then turn to your theme's warning
-  colour from 60% used (40% left) and to its critical colour from 85% used
+- **Colors**: bars use a teal color, then turn to your theme's warning
+  color from 60% used (40% left) and to its critical color from 85% used
   (15% left). Both levels can be changed in steps of 5%, and each of the
-  three colours can be set with a colour box (a reset button goes back to
+  three colors can be set with a color box (a reset button goes back to
   the default).
 - **Hover popup**: hover over the panel icon for a short summary: each
   provider's name in bold, then one reading per line, such as **Session**
@@ -152,7 +152,7 @@ plasmashell's memory.
 Plasma's standard configuration dialog with three pages of its own —
 **General** (popup, usage display, refresh and notifications, privacy),
 **AI Provider Settings** (providers and their order, the Usage tab's
-readings, layout and colours, and the hover popup) and **Chat** (sites and
+readings, layout and colors, and the hover popup) and **Chat** (sites and
 addresses) — plus Plasma's **Keyboard Shortcuts** and **About**. Longer explanations sit behind the small **?** buttons. Hearthwire
 starts with Plasma while it remains on a panel.
 
@@ -259,12 +259,12 @@ The hover popup's settings are under **Settings → AI Provider Settings**
 ### Settings → AI Provider Settings
 
 - **Usage tab**: **Layout: Compact** (one slim bar per reading); **Normal
-  colour**; **Warning colour from** (60% used by default) and **Critical
-  colour from** (85% used by default), each with its colour box. The levels
+  color**; **Warning color from** (60% used by default) and **Critical
+  color from** (85% used by default), each with its color box. The levels
   read as left or used, as **General → Display** shows (with Left the
   defaults read 40% and 15%); when one pick passes the other level, that
   other level moves so the critical one stays further along. The reset button
-  next to a colour box goes back to the default colour. The **Refresh
+  next to a color box goes back to the default color. The **Refresh
   status** button checks the tracked providers once.
 - **Providers and readings**: one row per provider, in the order the Usage
   tab, the hover popup and the notifications list them. The **Move up** and
@@ -292,7 +292,7 @@ shows the same as before, and the Usage tab starts with every reading shown.
 
 Fresh installs open on Chat, show both tabs at Normal size, track all
 providers in catalog order with every reading shown in the standard layout,
-display usage left, refresh every five minutes, colour bars from 60% and 85%
+display usage left, refresh every five minutes, color bars from 60% and 85%
 used, and send no notifications.
 
 ## Configure usage providers
@@ -317,7 +317,7 @@ kdialog and fuse3 for Stay signed in; otherwise it prints the command to run.
 Ollama is only described, since you choose the build for your graphics card.
 It then removes the old AI Usage widget, helper, and cache if they are
 present, installs the dependency-free Python helper into the user Python site,
-installs or upgrades the plasmoid, the colour app icon and the settings and
+installs or upgrades the plasmoid, the color app icon and the settings and
 tab icons, and optionally
 reloads Plasma.
 

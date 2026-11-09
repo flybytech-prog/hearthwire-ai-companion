@@ -9,10 +9,10 @@
 // providerMetrics: {providerId: [metricIds]}; a provider without a list, or
 // with an empty one, shows all its readings in the Usage tab.
 
-var COLOUR_PERCENTS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
+var COLOR_PERCENTS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
 // The settings page's choices: the warning level stays below the critical one.
-var WARN_PERCENTS = COLOUR_PERCENTS.slice(0, COLOUR_PERCENTS.length - 1)
-var CRITICAL_PERCENTS = COLOUR_PERCENTS.slice(1)
+var WARN_PERCENTS = COLOR_PERCENTS.slice(0, COLOR_PERCENTS.length - 1)
+var CRITICAL_PERCENTS = COLOR_PERCENTS.slice(1)
 var DEFAULT_WARN = 60
 var DEFAULT_CRITICAL = 85
 var MINUTE_MS = 60000
@@ -220,37 +220,37 @@ function snapPercent(value, fallback) {
     var number = Number(value)
     if (value === null || value === undefined || value === "" || !isFinite(number))
         return fallback
-    var best = COLOUR_PERCENTS[0]
-    for (var index = 1; index < COLOUR_PERCENTS.length; index++) {
-        if (Math.abs(COLOUR_PERCENTS[index] - number) < Math.abs(best - number))
-            best = COLOUR_PERCENTS[index]
+    var best = COLOR_PERCENTS[0]
+    for (var index = 1; index < COLOR_PERCENTS.length; index++) {
+        if (Math.abs(COLOR_PERCENTS[index] - number) < Math.abs(best - number))
+            best = COLOR_PERCENTS[index]
     }
     return best
 }
 
-// {warn, critical} in percent used, both from COLOUR_PERCENTS, with
+// {warn, critical} in percent used, both from COLOR_PERCENTS, with
 // critical above warn.
 function normalizeThresholds(warn, critical) {
     var low = snapPercent(warn, DEFAULT_WARN)
     var high = snapPercent(critical, DEFAULT_CRITICAL)
     if (high <= low) {
-        if (low >= COLOUR_PERCENTS[COLOUR_PERCENTS.length - 1])
-            low = COLOUR_PERCENTS[COLOUR_PERCENTS.length - 2]
+        if (low >= COLOR_PERCENTS[COLOR_PERCENTS.length - 1])
+            low = COLOR_PERCENTS[COLOR_PERCENTS.length - 2]
         high = Math.max(high, low + 5)
     }
     return {warn: low, critical: high}
 }
 
-// The default normal bar colour: a teal that reads on the background
+// The default normal bar color: a teal that reads on the background
 // (r, g, b from 0 to 1).
-function defaultNormalColour(red, green, blue) {
+function defaultNormalColor(red, green, blue) {
     var luminance = Number(red) * 0.2126 + Number(green) * 0.7152 + Number(blue) * 0.0722
     return luminance < 0.5 ? "#32c7d3" : "#008c95"
 }
 
-// A colour setting: "" (the default colour) or "#rrggbb" in lower case;
+// A color setting: "" (the default color) or "#rrggbb" in lower case;
 // anything else is "".
-function normalizeColour(value) {
+function normalizeColor(value) {
     return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : ""
 }
 

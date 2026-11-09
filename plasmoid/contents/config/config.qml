@@ -3,7 +3,7 @@ import org.kde.plasma.configuration
 
 ConfigModel {
     // Hearthwire's own icons, installed to the icon theme by install.sh so
-    // Plasma recolours them like its own (Keyboard Shortcuts, About and the
+    // Plasma recolors them like its own (Keyboard Shortcuts, About and the
     // window icon come from Plasma and stay as they are).
     ConfigCategory {
         name: i18n("General")

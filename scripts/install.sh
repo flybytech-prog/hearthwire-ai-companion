@@ -532,12 +532,12 @@ else
     kpackagetool6 -t Plasma/Applet -i "$project_directory/plasmoid"
 fi
 
-# Full-colour app icon for the widget list and Settings → About (metadata "Icon": "hearthwire").
+# Full-color app icon for the widget list and Settings → About (metadata "Icon": "hearthwire").
 mkdir -p -- "$icon_directory"
 # Unlinked first, like the notifyrc below, so a symlink is replaced, never followed.
 rm -f -- "$icon_directory/hearthwire.svg"
 cp -- "$project_directory/assets/hearthwire.svg" "$icon_directory/hearthwire.svg"
-# Settings page icons (config.qml), single colour: Plasma recolours them to
+# Settings page icons (config.qml), single color: Plasma recolors them to
 # the theme like its own icons. Unlinked first too.
 for settings_icon in general ai chat; do
     rm -f -- "$icon_directory/hearthwire-settings-$settings_icon.svg"

@@ -239,10 +239,10 @@ PlasmoidItem {
         Plasmoid.configuration.usageWarnPercent, Plasmoid.configuration.usageCriticalPercent)
     readonly property var tooltipGroups: TooltipLogic.applyChoice(
         root.tooltipProviderGroups(), root.tooltipChoice)
-    // AI Provider Settings → the colour boxes; "" keeps the default colour.
-    readonly property string customNormalColor: UsageLogic.normalizeColour(Plasmoid.configuration.usageNormalColor)
-    readonly property string customWarnColor: UsageLogic.normalizeColour(Plasmoid.configuration.usageWarnColor)
-    readonly property string customCriticalColor: UsageLogic.normalizeColour(Plasmoid.configuration.usageCriticalColor)
+    // AI Provider Settings → the color boxes; "" keeps the default color.
+    readonly property string customNormalColor: UsageLogic.normalizeColor(Plasmoid.configuration.usageNormalColor)
+    readonly property string customWarnColor: UsageLogic.normalizeColor(Plasmoid.configuration.usageWarnColor)
+    readonly property string customCriticalColor: UsageLogic.normalizeColor(Plasmoid.configuration.usageCriticalColor)
     readonly property color warnUsageColor: root.customWarnColor !== ""
         ? root.customWarnColor : Kirigami.Theme.neutralTextColor
     readonly property color criticalUsageColor: root.customCriticalColor !== ""
@@ -251,7 +251,7 @@ PlasmoidItem {
         if (root.customNormalColor !== "")
             return root.customNormalColor
         var background = Kirigami.Theme.backgroundColor
-        return UsageLogic.defaultNormalColour(background.r, background.g, background.b)
+        return UsageLogic.defaultNormalColor(background.r, background.g, background.b)
     }
 
     function configuredList(value, fallback) {
@@ -337,8 +337,8 @@ PlasmoidItem {
         return root.normalUsageColor
     }
 
-    // Values below the warning level keep the text colour, so they stay
-    // readable whatever the normal bar colour is.
+    // Values below the warning level keep the text color, so they stay
+    // readable whatever the normal bar color is.
     function valueColor(rawUsed) {
         var level = UsageLogic.usageLevel(rawUsed, root.usageThresholds)
         if (level === "critical")
@@ -1314,7 +1314,7 @@ PlasmoidItem {
         return ""
     }
     // AI Provider Settings → Hover popup: each provider in bold with one
-    // reading per line, a dot in its level colour (percentages only); no bars
+    // reading per line, a dot in its level color (percentages only); no bars
     // or reset times, to keep it short.
     readonly property var tooltipSections: {
         if (!root.usageShown || !root.tooltipShowsUsage || !root.hasData)

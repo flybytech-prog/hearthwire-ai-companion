@@ -81,9 +81,9 @@ OLLAMA_SITE_ID = "ollama"
 CHAT_SITE_IDS = WEB_SITE_IDS + (OLLAMA_SITE_ID,)
 
 REFRESH_INTERVALS = (60, 300, 900, 1800, 3600)            # configGeneral.qml refreshChoices
-COLOUR_PERCENTS = tuple(range(50, 100, 5))                # UsageLogic.js COLOUR_PERCENTS
-WARN_PERCENTS = COLOUR_PERCENTS[:-1]
-CRITICAL_PERCENTS = COLOUR_PERCENTS[1:]
+COLOR_PERCENTS = tuple(range(50, 100, 5))                 # UsageLogic.js COLOR_PERCENTS
+WARN_PERCENTS = COLOR_PERCENTS[:-1]
+CRITICAL_PERCENTS = COLOR_PERCENTS[1:]
 ALERT_PERCENTS = (5, 10, 15, 20, 25, 30, 40, 50)          # SettingsLogic.js ALERT_PERCENTS
 USAGE_MODES = ("remaining", "used")
 POPUP_TABS = ("chat", "usage")                            # SettingsLogic.js POPUP_TABS
@@ -98,7 +98,7 @@ RING_PAIRS = frozenset(
 )
 
 _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
-_COLOUR = re.compile(r"#[0-9a-fA-F]{6}")
+_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 _OLLAMA_ADDRESS = re.compile(r"http://(127\.0\.0\.1|localhost|\[::1\]):([1-9][0-9]{0,4})")
 _STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -366,12 +366,12 @@ def _tooltip_metrics(value: object) -> str:
     return _metric_map(value)
 
 
-def _colour(value: object) -> str:
-    """A colour: "" (the theme default) or #rrggbb, stored in lower case."""
+def _color(value: object) -> str:
+    """A color: "" (the theme default) or #rrggbb, stored in lower case."""
     text = _text(value)
     if text == "":
         return ""
-    if not _COLOUR.fullmatch(text):
+    if not _COLOR.fullmatch(text):
         raise _Bad()
     return text.lower()
 
@@ -430,9 +430,9 @@ RULES: dict[str, Callable[[object], object]] = {
     "usageCompact": _boolean,
     "usageWarnPercent": _choice(WARN_PERCENTS),
     "usageCriticalPercent": _choice(CRITICAL_PERCENTS),
-    "usageNormalColor": _colour,
-    "usageWarnColor": _colour,
-    "usageCriticalColor": _colour,
+    "usageNormalColor": _color,
+    "usageWarnColor": _color,
+    "usageCriticalColor": _color,
     "alertLowEnabled": _boolean,
     "alertResetEnabled": _boolean,
     "alertLowPercent": _choice(ALERT_PERCENTS),

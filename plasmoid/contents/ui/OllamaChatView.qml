@@ -1950,7 +1950,7 @@ ColumnLayout {
                                 wrapMode: ollamaView.wrapFor(message.body)
                                 textFormat: TextEdit.PlainText
                                 color: Kirigami.Theme.highlightedTextColor
-                                // Inverted: the bubble is already the highlight colour.
+                                // Inverted: the bubble is already the highlight color.
                                 selectionColor: Kirigami.Theme.highlightedTextColor
                                 selectedTextColor: Kirigami.Theme.highlightColor
                                 font: ollamaView.bodyFont

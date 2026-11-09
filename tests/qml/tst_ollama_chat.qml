@@ -912,7 +912,7 @@ TestCase {
         }
     }
 
-    // One U+FE0F right after an emoji only asks for its colour form.
+    // One U+FE0F right after an emoji only asks for its color form.
     function test_revealHiddenAllowsOneEmojiVariationSelector() {
         compare(OllamaChat.revealHidden("I ❤️ it ✔️ 😀️"), "I ❤️ it ✔️ 😀️")
         verify(!OllamaChat.hasHidden("❤️"))

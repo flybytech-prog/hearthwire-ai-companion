@@ -49,8 +49,8 @@ an account, a plan name, a reading or an error from a provider.
 | `providerMetrics` | AI Provider Settings → reading boxes | The readings the Usage tab shows per provider, for example `{"claude":["session","weekly"]}`; a provider left out (the default, `{}`) shows all its readings |
 | `providerOrder` | AI Provider Settings → Move up / Move down | The provider order, for example `["codex","claude"]`; empty (the default) is the built-in order |
 | `usageCompact` | AI Provider Settings → Layout: Compact | `true` or `false` (the default) |
-| `usageWarnPercent`, `usageCriticalPercent` | AI Provider Settings → Warning / Critical colour from | Percent used in steps of 5: warning 50 to 90 (60 by default), critical 55 to 95 (85 by default); the page shows them as left or used, like General → Display |
-| `usageNormalColor`, `usageWarnColor`, `usageCriticalColor` | AI Provider Settings → the colour boxes | A colour such as `#e07b1a`, or empty (the default) for the default colour; anything else is read as empty |
+| `usageWarnPercent`, `usageCriticalPercent` | AI Provider Settings → Warning / Critical color from | Percent used in steps of 5: warning 50 to 90 (60 by default), critical 55 to 95 (85 by default); the page shows them as left or used, like General → Display |
+| `usageNormalColor`, `usageWarnColor`, `usageCriticalColor` | AI Provider Settings → the color boxes | A color such as `#e07b1a`, or empty (the default) for the default color; anything else is read as empty |
 | `configSchemaVersion` | Written by the widget | The settings format, now `3`; it makes the upgrade step above run once |
 | `tooltipShowsUsage` | AI Provider Settings → Hover popup | `true` (the default) or `false`. (An older `tooltipShowsReset` entry is no longer read.) |
 | `tooltipMetrics` | AI Provider Settings → Hover popup → Readings | The hover popup's own readings, for example `{"claude":["session","weekly"]}`, or empty (the default) for Same as the Usage tab. On the first start after the upgrade that made the reading boxes filter the Usage tab, a saved `providerMetrics` choice moves here (unless this already had one), and `providerMetrics` becomes `{}` |
@@ -539,7 +539,7 @@ none of the web profile rules above apply to it; these do:
   characters (U+E0000–U+E007F). Such characters can make a command look
   different from what it really is ("Trojan Source"), and a carriage return
   or escape can make a terminal act on it. One U+FE0F right after an emoji
-  (it only asks for the colour form) is left alone; emoji sequences joined
+  (it only asks for the color form) is left alone; emoji sequences joined
   with U+200D and right-to-left text that use these characters show the
   markers.
 - **Typing.** Spell checking is off in the message and personality fields, and they ask input

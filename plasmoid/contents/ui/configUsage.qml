@@ -248,15 +248,15 @@ KCM.ScrollViewKCM {
         id: providerRows
     }
 
-    // level: "normal", "warning" or "critical"; "" is the default colour.
-    // The colour dialog's choice as "#rrggbb", always opaque, so a
-    // translucent colour can't turn into "" (normalizeColour still checks it).
-    function opaqueColour(colour) {
-        return String(Qt.rgba(colour.r, colour.g, colour.b, 1))
+    // level: "normal", "warning" or "critical"; "" is the default color.
+    // The color dialog's choice as "#rrggbb", always opaque, so a
+    // translucent color can't turn into "" (normalizeColor still checks it).
+    function opaqueColor(color) {
+        return String(Qt.rgba(color.r, color.g, color.b, 1))
     }
 
-    function setUsageColour(level, colour) {
-        var value = UsageLogic.normalizeColour(colour)
+    function setUsageColor(level, color) {
+        var value = UsageLogic.normalizeColor(color)
         if (level === "normal")
             page.cfg_usageNormalColor = value
         else if (level === "warning")
@@ -265,10 +265,10 @@ KCM.ScrollViewKCM {
             page.cfg_usageCriticalColor = value
     }
 
-    // A colour box: the chosen colour, else the default one; the reset
+    // A color box: the chosen color, else the default one; the reset
     // button next to it goes back to the default.
-    component ColourChoice: RowLayout {
-        id: colourChoice
+    component ColorChoice: RowLayout {
+        id: colorChoice
 
         property string level
         property string chosen
@@ -276,43 +276,43 @@ KCM.ScrollViewKCM {
 
         spacing: Kirigami.Units.smallSpacing
 
-        readonly property color shown: colourChoice.chosen !== "" ? colourChoice.chosen : colourChoice.fallback
+        readonly property color shown: colorChoice.chosen !== "" ? colorChoice.chosen : colorChoice.fallback
 
         QQC2.Button {
-            objectName: colourChoice.level + "ColourButton"
+            objectName: colorChoice.level + "ColorButton"
             enabled: page.cfg_showUsageTab
             implicitWidth: Kirigami.Units.gridUnit * 3
-            Accessible.name: i18n("Choose a colour")
-            QQC2.ToolTip.text: i18n("Choose a colour")
+            Accessible.name: i18n("Choose a color")
+            QQC2.ToolTip.text: i18n("Choose a color")
             QQC2.ToolTip.visible: hovered
-            onClicked: colourDialog.open()
+            onClicked: colorDialog.open()
 
             Rectangle {
                 anchors.fill: parent
                 anchors.margins: Kirigami.Units.smallSpacing + 1
                 radius: Kirigami.Units.cornerRadius / 2
-                color: parent.enabled ? colourChoice.shown : "transparent"
+                color: parent.enabled ? colorChoice.shown : "transparent"
                 border.color: Kirigami.Theme.textColor
                 border.width: 1
                 opacity: parent.enabled ? 1 : 0.4
             }
         }
         QtDialogs.ColorDialog {
-            id: colourDialog
-            title: i18n("Choose a colour")
-            selectedColor: colourChoice.shown
-            onAccepted: page.setUsageColour(colourChoice.level, page.opaqueColour(selectedColor))
+            id: colorDialog
+            title: i18n("Choose a color")
+            selectedColor: colorChoice.shown
+            onAccepted: page.setUsageColor(colorChoice.level, page.opaqueColor(selectedColor))
         }
         QQC2.ToolButton {
-            objectName: colourChoice.level + "ColourReset"
+            objectName: colorChoice.level + "ColorReset"
             enabled: page.cfg_showUsageTab
-            visible: colourChoice.chosen !== ""
+            visible: colorChoice.chosen !== ""
             icon.name: "edit-reset"
             display: QQC2.AbstractButton.IconOnly
-            text: i18n("Use the default colour")
+            text: i18n("Use the default color")
             QQC2.ToolTip.text: text
             QQC2.ToolTip.visible: hovered
-            onClicked: page.setUsageColour(colourChoice.level, "")
+            onClicked: page.setUsageColor(colorChoice.level, "")
         }
     }
 
@@ -490,16 +490,16 @@ KCM.ScrollViewKCM {
                     }
                 }
 
-                ColourChoice {
-                    Kirigami.FormData.label: i18n("Normal colour:")
+                ColorChoice {
+                    Kirigami.FormData.label: i18n("Normal color:")
                     level: "normal"
-                    chosen: UsageLogic.normalizeColour(page.cfg_usageNormalColor)
-                    fallback: UsageLogic.defaultNormalColour(Kirigami.Theme.backgroundColor.r,
+                    chosen: UsageLogic.normalizeColor(page.cfg_usageNormalColor)
+                    fallback: UsageLogic.defaultNormalColor(Kirigami.Theme.backgroundColor.r,
                         Kirigami.Theme.backgroundColor.g, Kirigami.Theme.backgroundColor.b)
                 }
 
                 RowLayout {
-                    Kirigami.FormData.label: i18n("Warning colour from:")
+                    Kirigami.FormData.label: i18n("Warning color from:")
                     spacing: Kirigami.Units.smallSpacing
 
                     QQC2.ComboBox {
@@ -511,18 +511,18 @@ KCM.ScrollViewKCM {
                         currentIndex: page.choiceIndex(page.warnChoices, page.thresholds.warn, 2)
                         onActivated: page.setThresholds(currentValue, page.thresholds.critical)
                     }
-                    ColourChoice {
+                    ColorChoice {
                         level: "warning"
-                        chosen: UsageLogic.normalizeColour(page.cfg_usageWarnColor)
+                        chosen: UsageLogic.normalizeColor(page.cfg_usageWarnColor)
                         fallback: Kirigami.Theme.neutralTextColor
                     }
                     Kirigami.ContextualHelpButton {
-                        toolTipText: i18n("Bars and values turn to the warning colour at this level and to the critical colour at the Critical level. The levels read as left or used, as General → Display shows: with Left, 40% means 40% left. The critical level always stays past the warning level. The colour boxes choose each colour; the reset button next to a box goes back to the default.")
+                        toolTipText: i18n("Bars and values turn to the warning color at this level and to the critical color at the Critical level. The levels read as left or used, as General → Display shows: with Left, 40% means 40% left. The critical level always stays past the warning level. The color boxes choose each color; the reset button next to a box goes back to the default.")
                     }
                 }
 
                 RowLayout {
-                    Kirigami.FormData.label: i18n("Critical colour from:")
+                    Kirigami.FormData.label: i18n("Critical color from:")
                     spacing: Kirigami.Units.smallSpacing
 
                     QQC2.ComboBox {
@@ -538,9 +538,9 @@ KCM.ScrollViewKCM {
                             page.setThresholds(warn, currentValue)
                         }
                     }
-                    ColourChoice {
+                    ColorChoice {
                         level: "critical"
-                        chosen: UsageLogic.normalizeColour(page.cfg_usageCriticalColor)
+                        chosen: UsageLogic.normalizeColor(page.cfg_usageCriticalColor)
                         fallback: Kirigami.Theme.negativeTextColor
                     }
                 }

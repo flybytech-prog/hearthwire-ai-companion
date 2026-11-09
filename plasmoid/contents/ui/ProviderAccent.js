@@ -1,13 +1,13 @@
 .pragma library
 
 // The Usage tab's provider accent strips: pure rules, no QML state.
-// UsageView.qml passes the provider id and the background colour in.
+// UsageView.qml passes the provider id and the background color in.
 // Decorative only: the strip carries no meaning the text doesn't.
 //
-// ProviderCatalog.js's colours are brand colours and some don't read on
+// ProviderCatalog.js's colors are brand colors and some don't read on
 // every background (grok's is near black), so each catalog provider has its
 // own pair here: "light" for light backgrounds and "dark" for dark ones,
-// both at least 3:1 against Breeze's light and dark window colours.
+// both at least 3:1 against Breeze's light and dark window colors.
 var ACCENTS = {
     claude: {light: "#b4532a", dark: "#e8926f"},
     codex: {light: "#0a7d61", dark: "#3cc9a1"},
@@ -25,7 +25,7 @@ function channel(value) {
 
 // The accent "#rrggbb" for a catalog provider on a background of r, g, b
 // (from 0 to 1): the dark variant when the background's luminance is below
-// 0.5, as UsageLogic.defaultNormalColour decides. "" for an unknown id or
+// 0.5, as UsageLogic.defaultNormalColor decides. "" for an unknown id or
 // a background that isn't three numbers.
 function accentFor(providerId, red, green, blue) {
     if (typeof providerId !== "string" || !Object.prototype.hasOwnProperty.call(ACCENTS, providerId))
