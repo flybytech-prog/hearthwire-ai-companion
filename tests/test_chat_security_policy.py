@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from hearthwire.core.settingsbackup import BACKUP_KEYS, EXCLUDED_KEYS
+
 
 PLASMOID = Path(__file__).resolve().parent.parent / "plasmoid"
 CONTENTS = PLASMOID / "contents"
@@ -106,6 +108,12 @@ GENERAL_CONFIG_KEYS = {
     "alertLowEnabled": ("Bool", "false"),
     "alertLowPercent": ("Int", "20"),
     "alertResetEnabled": ("Bool", "false"),
+    # Round 4: the panel ring, the middle-click and the opt-in usage history.
+    # usageHistoryClearOwed: a turned-off history still has to be deleted.
+    "panelRing": ("String", "auto"),
+    "middleClickOpens": ("String", "refresh"),
+    "usageHistoryEnabled": ("Bool", "false"),
+    "usageHistoryClearOwed": ("Bool", "false"),
 }
 
 # Characters after which a "/" starts a regex literal rather than division.
@@ -1296,6 +1304,10 @@ def _chat_config_keys():
     return keys
 
 
+def _unexpected_main_xml_keys(entries):
+    return set(entries) - set(_chat_config_keys()) - PRE_CHAT_CONFIG_KEYS - set(GENERAL_CONFIG_KEYS)
+
+
 def test_main_xml_adds_only_the_chat_keys():
     entries = _main_xml_entries()
     expected = _chat_config_keys()
@@ -1303,7 +1315,7 @@ def test_main_xml_adds_only_the_chat_keys():
     assert chat_keys == set(expected), (
         f"{_rel(MAIN_XML)} chat entries must be exactly {sorted(expected)}, got {sorted(chat_keys)}"
     )
-    unexpected = set(entries) - set(expected) - PRE_CHAT_CONFIG_KEYS - set(GENERAL_CONFIG_KEYS)
+    unexpected = _unexpected_main_xml_keys(entries)
     assert not unexpected, f"{_rel(MAIN_XML)} has new persisted keys besides the chat ones: {sorted(unexpected)}"
     for key, (kind, default) in sorted(expected.items()):
         assert entries[key]["group"] == "General", f"{_rel(MAIN_XML)}: {key} must be in group General"
@@ -1331,6 +1343,13 @@ def test_chat_files_never_write_the_plasmoid_config(filename):
         + _hits(rf"{config}(?!\s*[.\[])", code)
     )
     assert not lines, f"{_rel(path)} must never write Plasmoid.configuration; lines {sorted(set(lines))}"
+
+
+@pytest.mark.parametrize("key", ["usageHistoryCache", "panelRingColor", "middleClickOpensTwo", "usageHistoryClearOwedAt"])
+def test_proof_unlisted_main_xml_key_is_caught(key):
+    entries = dict(_main_xml_entries())
+    entries[key] = {"group": "General", "type": "String", "default": ""}
+    assert _unexpected_main_xml_keys(entries) == {key}
 
 
 # The chat keys main.qml may write: the profile generation and the zoom map
@@ -1392,15 +1411,36 @@ def test_config_pages_declare_every_chat_key_and_never_write_config(page):
 # --- settings pages: General, AI Usage, Chat ----------------------------------------
 
 
-def test_general_keys_have_their_exact_type_and_default():
-    entries = _main_xml_entries()
+def _general_key_problems(entries):
+    problems = []
     for key, (kind, default) in sorted(GENERAL_CONFIG_KEYS.items()):
-        assert key in entries, f"{_rel(MAIN_XML)} is missing {key}"
+        if key not in entries:
+            problems.append(f"{_rel(MAIN_XML)} is missing {key}")
+            continue
         # An empty <default></default> parses as None: it is the "" default.
         entry = dict(entries[key], default=entries[key]["default"] or "")
-        assert entry == {"group": "General", "type": kind, "default": default}, (
-            f"{_rel(MAIN_XML)}: {key} must be {kind} {default!r} in group General, got {entries[key]}"
-        )
+        if entry != {"group": "General", "type": kind, "default": default}:
+            problems.append(f"{_rel(MAIN_XML)}: {key} must be {kind} {default!r} in group General, got {entries[key]}")
+    return problems
+
+
+def test_general_keys_have_their_exact_type_and_default():
+    problems = _general_key_problems(_main_xml_entries())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("key", "field", "value"), [
+    ("usageHistoryEnabled", "default", "true"),
+    ("usageHistoryEnabled", "type", "String"),
+    ("usageHistoryClearOwed", "default", "true"),
+    ("panelRing", "default", "off"),
+    ("middleClickOpens", "default", "usage"),
+    ("middleClickOpens", "group", "Chat"),
+])
+def test_proof_round_4_key_type_and_default_are_pinned(key, field, value):
+    entries = dict(_main_xml_entries())
+    entries[key] = dict(entries[key], **{field: value})
+    assert _general_key_problems(entries)
 
 
 def test_config_qml_lists_the_pages_in_order():
@@ -1452,7 +1492,7 @@ def test_proof_missing_page_key_is_caught():
 # migration, see _main_migration_problems) the two reading choices.
 MAIN_WRITABLE_KEYS = {
     "chatProfileGeneration", "configSchemaVersion", "initialSetupComplete", "refreshInterval", "usageMode",
-    "chatSiteZoom", "tooltipMetrics", "providerMetrics",
+    "chatSiteZoom", "tooltipMetrics", "providerMetrics", "usageHistoryClearOwed",
 }
 
 
@@ -1472,6 +1512,13 @@ def test_proof_main_general_key_write_is_caught():
     code = _mutated(MAIN_QML, "    function chatNext() {",
                     "    function x() { Plasmoid.configuration.showChatTab = true }\n    function chatNext() {")
     assert _main_written_keys(code) - MAIN_WRITABLE_KEYS
+
+
+@pytest.mark.parametrize("key", ["usageHistoryEnabled", "panelRing", "middleClickOpens", "usageMode2", "chatSites"])
+def test_proof_main_round_4_key_write_is_caught(key):
+    code = _mutated(MAIN_QML, "    function chatNext() {",
+                    f"    function x() {{ Plasmoid.configuration.{key} = \"\" }}\n    function chatNext() {{")
+    assert _main_written_keys(code) - MAIN_WRITABLE_KEYS == {key}
 
 
 def _shortcut_offenders(sources):
@@ -5100,6 +5147,16 @@ USAGE_CONFIG_WRITE = (rf"\b[Pp]lasmoid\s*\.\s*configuration\s*\.\s*({_USAGE_KEYS
                       r"(?:\+\+|--|(?:[-+*/%&|^]|\?\?)?=(?!=))")
 
 
+def _is_apply_backup_line(code, at, key):
+    """Whether offset ``at`` is on applyBackup's own line for ``key``, in the one applyBackup."""
+    spans = _block_spans(code, r"\bfunction\s+applyBackup\s*\(\s*\)\s*\{")
+    if len(spans) != 1 or not spans[0][0] <= at < spans[0][1]:
+        return False
+    line = code[code.rfind("\n", 0, at) + 1:code.find("\n", at)]
+    return re.fullmatch(rf"\s*if\s*\(\s*values\s*\.\s*{key}\s*!==\s*undefined\s*\)\s*"
+                        rf"page\s*\.\s*cfg_{key}\s*=\s*values\s*\.\s*{key}\s*", line) is not None
+
+
 def _usage_writer_problems(sources):
     problems = []
     for name, code in sources.items():
@@ -5113,6 +5170,9 @@ def _usage_writer_problems(sources):
             hits = [(at, key) for at, key in hits
                     if not (key in MIGRATED_KEYS and len(migration) == 1
                             and migration[0][0] <= at < migration[0][1])]
+        if _base(name) == CONFIG_GENERAL.name:
+            # Import: Replace sets each value by its own line of applyBackup.
+            hits = [(at, key) for at, key in hits if not _is_apply_backup_line(code, at, key)]
         if _base(name) != CONFIG_USAGE.name:
             problems += sorted({f"{name}:{_line_of(code, at)}: only configUsage.qml writes {key}" for at, key in hits})
             continue
@@ -5175,6 +5235,16 @@ USAGE_WRITER_MUTATIONS = [
      "    function warn() { page.cfg_usageWarnPercent++ }\n    function moveProvider(providerId, direction) {\n"),
     (CONFIG_GENERAL, "    property bool cfg_usageCompactDefault: false\n",
      "    property bool cfg_usageCompactDefault: false\n    function f() { page.cfg_usageCompact = true }\n"),
+    (CONFIG_GENERAL, "if (values.usageCompact !== undefined) page.cfg_usageCompact = values.usageCompact",
+     "if (values.usageCompact !== undefined) page.cfg_usageCompact = true"),
+    (CONFIG_GENERAL, "if (values.usageCompact !== undefined) page.cfg_usageCompact = values.usageCompact",
+     "if (values.usageCompact !== undefined) page.cfg_usageCompact = values.usageMode"),
+    (CONFIG_GENERAL, "if (values.usageCompact !== undefined) page.cfg_usageCompact = values.usageCompact",
+     "page.cfg_usageCompact = values.usageCompact"),
+    (CONFIG_GENERAL, '        page.backupMessage = "applied"\n',
+     '        page.cfg_tooltipMetrics = ""\n        page.backupMessage = "applied"\n'),
+    (CONFIG_GENERAL, "    function backupStatusText() {\n",
+     "    function applyBackup() { }\n    function backupStatusText() {\n"),
     (CONFIG_GENERAL, "    property bool cfg_tooltipShowsUsageDefault: true\n",
      "    property bool cfg_tooltipShowsUsageDefault: true\n    function f() { page.cfg_tooltipShowsUsage = false }\n"),
     (CONFIG_GENERAL, 'import "SettingsLogic.js" as SettingsLogic\n',
@@ -6269,7 +6339,8 @@ def test_proof_hover_popup_rule_catches_changes(old, new):
 # 1a hover popup, main.qml side: names and titles come from the catalog, values
 # are numbers the widget formats, and the level goes through TooltipLogic. The
 # one exception is the error line: toolTipSubText can show the helper's last
-# stderr line (root.lastError), which is PlainText through toolTipTextFormat.
+# stderr line (root.lastError), PlainText through toolTipTextFormat and cut to
+# length by UsageLogic.shownText.
 
 MAIN_TOOLTIP_SECTIONS = r"\breadonly\s+property\s+var\s+tooltipSections\s*:\s*\{"
 MAIN_TOOLTIP_SUBTEXT = r"(?<![\w.])toolTipSubText\s*:\s*\{"
@@ -6282,7 +6353,7 @@ MAIN_TOOLTIP_SECTION_PINS = (
     "groups.push({name: group.descriptor.display_name, items: items})",
     "return TooltipLogic.tooltipSections(groups)",
 )
-MAIN_TOOLTIP_SUBTEXT_RETURNS = ['""', 'i18n("Error: %1", root.lastError)', 'i18n("Loading…")',
+MAIN_TOOLTIP_SUBTEXT_RETURNS = ['""', 'i18n("Error: %1", UsageLogic.shownText(root.lastError))', 'i18n("Loading…")',
                                 'i18n("No usage to show.")', '""']
 # What a provider reply carries as text, as opposed to numbers.
 TOOLTIP_REPLY_TEXT = r"\b(?:caption|error_message|plan|status|modelData)\b|(?<!descriptor)\s*\.\s*display_name\b"
@@ -6359,6 +6430,7 @@ def test_hover_popup_text_comes_from_the_catalog_and_the_widget():
     ("        sections: root.tooltipSections\n",
      '        sections: root.tooltipSections\n        Image { source: "https://example.invalid/x.png" }\n'),
     ('return i18n("No usage to show.")', "return root.lastError"),
+    ('return i18n("Error: %1", UsageLogic.shownText(root.lastError))', 'return i18n("Error: %1", root.lastError)'),
     ('return i18n("Loading…")', "return root.snapshot.plan"),
     ("toolTipItem: root.tooltipSections.length > 0 ? root.usageTooltip : null", "toolTipItem: root.usageTooltip"),
     ("            return root.formatReading(reading)\n", "            return reading.caption\n"),
@@ -6779,3 +6851,1095 @@ def test_proof_ollama_object_name_rule_catches(name):
 def test_proof_ollama_must_keep_rule_catches(key, old, new):
     problems = _ollama_must_keep_problems(_mutated(OLLAMA_CHAT_VIEW, old, new))
     assert any(problem.startswith(f"{key}:") for problem in problems), problems
+
+
+# --- Round 4, phase 3: panel ring, middle-click, color preview ----------------------------
+
+USAGE_RING = UI / "UsageRing.qml"
+SETTINGS_BACKUP_JS = UI / "SettingsBackup.js"
+USAGE_HISTORY_JS = UI / "UsageHistory.js"
+CONFIG_CHAT = UI / "configChat.qml"
+RING_IMPORTS = ["QtQuick", "QtQuick.Shapes"]
+RING_ELEMENTS = {"Shape", "ShapePath", "PathAngleArc"}
+RING_BANS = {
+    "text": r"\b(?:text|textFormat|i18nc?|i18np)\b",
+    "outside state": r"\b(?:Plasmoid|Kirigami|root|XMLHttpRequest|console)\b",
+    "dynamic creation": r"\b(?:Loader|Repeater|Component)\b",
+}
+
+
+def _usage_ring_problems(code):
+    problems = _access_problems(code)
+    imports = sorted(re.findall(r"(?m)^\s*import\s+(.*?)\s*$", code))
+    if imports != RING_IMPORTS:
+        problems.append(f"imports must stay {RING_IMPORTS}, found {imports}")
+    blanked = _strip_comments(code, blank_strings=True)
+    elements = set(re.findall(r"(?<![\w.])([A-Z][\w.]*)\s*\{", blanked))
+    if elements != RING_ELEMENTS:
+        problems.append(f"elements must be exactly {sorted(RING_ELEMENTS)}, found {sorted(elements)}")
+    problems += [f"{name} at line {line}" for name, pattern in RING_BANS.items() for line in _hits(pattern, blanked)]
+    others = [text for text in re.findall(r'"([^"\n]*)"', code) if text != "transparent"]
+    if others:
+        problems.append(f"no string literal but \"transparent\" is allowed, found {others}")
+    return problems
+
+
+def test_usage_ring_only_draws():
+    problems = _usage_ring_problems(_read_code(USAGE_RING))
+    assert not problems, f"{_rel(USAGE_RING)}: {problems}"
+
+
+@pytest.mark.parametrize("snippet", [
+    '    Text { text: "62%" }\n',
+    '    Image { source: "https://example.invalid/x.png" }\n',
+    "    Canvas { }\n",
+    "    function f() { return new XMLHttpRequest() }\n",
+    '    function f() { return Qt.resolvedUrl("x") }\n',
+    "    readonly property string mode: Plasmoid.configuration.panelRing\n",
+    "    readonly property color theme: Kirigami.Theme.textColor\n",
+    '    property string label: "62%"\n',
+    "    Loader { }\n",
+])
+def test_proof_usage_ring_rule_catches(snippet):
+    assert _usage_ring_problems(_appended(USAGE_RING, snippet))
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("import QtQuick.Shapes\n", "import QtQuick.Shapes\nimport QtQuick.Controls\n"),
+    ("import QtQuick.Shapes\n", 'import QtQuick.Shapes\nimport "UsageLogic.js" as UsageLogic\n'),
+    ("import QtQuick\n", "import QtNetwork\n"),
+])
+def test_proof_usage_ring_import_rule_catches(old, new):
+    assert _usage_ring_problems(_mutated(USAGE_RING, old, new))
+
+
+COMPACT_CLICK = r"\bonClicked\s*:\s*\(\s*mouse\s*\)\s*=>\s*\{"
+COMPACT_CLICK_BODY = "{ if (mouse.button === Qt.MiddleButton) root.middleClick() else root.expanded = !root.expanded }"
+
+
+def _compact_click_problems(compact, main):
+    problems = []
+    clicks = [body for _, body in _blocks(compact, COMPACT_CLICK)]
+    if len(clicks) != 1 or _squeezed(clicks[0]) != COMPACT_CLICK_BODY:
+        problems.append(f"onClicked must be exactly {COMPACT_CLICK_BODY}")
+    if len(_hits(r"\bmiddleClick\b", compact)) != 1:
+        problems.append("CompactRepresentation.qml may name middleClick only in that branch")
+    body = _function_body(main, "middleClick")
+    if body is None:
+        problems.append("main.qml needs exactly one function middleClick()")
+    elif _hits(r"\b[Pp]lasmoid\s*\.\s*configuration\b", body):
+        problems.append("middleClick() must not touch the configuration")
+    return problems
+
+
+def test_middle_button_runs_exactly_middle_click():
+    problems = _compact_click_problems(_read_code(COMPACT_REPRESENTATION), _read_code(MAIN_QML))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (COMPACT_REPRESENTATION, "            root.middleClick()\n", "            root.refresh()\n"),
+    (COMPACT_REPRESENTATION, "            root.middleClick()\n",
+     "        {\n            root.middleClick()\n            root.refresh()\n        }\n"),
+    (COMPACT_REPRESENTATION, "mouse.button === Qt.MiddleButton", "mouse.button === Qt.RightButton"),
+    (COMPACT_REPRESENTATION, "            root.expanded = !root.expanded\n", "            root.middleClick()\n"),
+    (COMPACT_REPRESENTATION, "    hoverEnabled: true\n",
+     "    hoverEnabled: true\n    onPressAndHold: root.middleClick()\n"),
+    (MAIN_QML, "    function middleClick() {\n",
+     '    function middleClick() {\n        Plasmoid.configuration.popupDefaultTab = "usage"\n'),
+    (MAIN_QML, "    function middleClick() {\n", "    function middleKlick() {\n"),
+])
+def test_proof_compact_click_rule_catches(path, old, new):
+    compact = _mutated(path, old, new) if path == COMPACT_REPRESENTATION else _read_code(COMPACT_REPRESENTATION)
+    main = _mutated(path, old, new) if path == MAIN_QML else _read_code(MAIN_QML)
+    assert _compact_click_problems(compact, main)
+
+
+# Config contract: who may write each round-4 key.
+
+WRITE_OPERATOR = r"\s*(?:\+\+|--|(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=))"
+
+
+def _key_writes(code, keys):
+    """(offset, key) of each write of ``keys`` as cfg_key or Plasmoid.configuration.key."""
+    names = "|".join(keys)
+    return [(match.start(), match.group(1)) for match in re.finditer(
+        rf"\b(?:cfg_|[Pp]lasmoid\s*\.\s*configuration\s*\.\s*)({names})\b{WRITE_OPERATOR}", code)]
+
+
+def _line_at(code, at):
+    return code[code.rfind("\n", 0, at) + 1:code.find("\n", at)].strip()
+
+
+def _single_element_top(code, opener, name):
+    elements = _named_elements(code, opener, name)
+    return _top_level_raw(elements[0][1]) if len(elements) == 1 else None
+
+
+COMBO_BOX = r"\bQQC2\s*\.\s*ComboBox\s*\{"
+CHECK_BOX = r"\bQQC2\s*\.\s*CheckBox\s*\{"
+PANEL_RING_WRITE = "page.cfg_panelRing = value"
+MIDDLE_CLICK_WRITE = "onActivated: page.cfg_middleClickOpens = currentValue"
+PANEL_RING_CALL = "onActivated: page.setPanelRing(currentValue)"
+
+
+def _ring_click_writer_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        base = _base(name)
+        for at, key in _key_writes(code, ("panelRing", "middleClickOpens")):
+            if base == CONFIG_GENERAL.name and _is_apply_backup_line(code, at, key):
+                continue
+            if key == "panelRing" and base == CONFIG_USAGE.name and _line_at(code, at) == PANEL_RING_WRITE:
+                body = _function_body(code, "setPanelRing")
+                if body is not None and len(_key_writes(body, (key,))) == 1:
+                    continue
+            if key == "middleClickOpens" and base == CONFIG_GENERAL.name and _line_at(code, at) == MIDDLE_CLICK_WRITE:
+                continue
+            problems.append(f"{name}:{_line_of(code, at)}: {key} is written only where the Config contract says")
+    usage = sources.get(_rel(CONFIG_USAGE), "")
+    general = sources.get(_rel(CONFIG_GENERAL), "")
+    ring_top = _single_element_top(usage, COMBO_BOX, "panelRingChoice")
+    if ring_top is None or _pin_problems(ring_top, (PANEL_RING_CALL,), "panelRingChoice"):
+        problems.append(f"the panelRingChoice ComboBox must have {PANEL_RING_CALL!r}")
+    if len(_hits(r"\bsetPanelRing\s*\(", usage)) != 2:
+        problems.append("setPanelRing is defined once and called only by panelRingChoice")
+    click_top = _single_element_top(general, COMBO_BOX, "middleClickChoice")
+    if click_top is None or _pin_problems(click_top, (MIDDLE_CLICK_WRITE,), "middleClickChoice"):
+        problems.append(f"the middleClickChoice ComboBox must have {MIDDLE_CLICK_WRITE!r}")
+    return problems
+
+
+def test_ring_and_middle_click_are_written_only_where_the_contract_says():
+    problems = _ring_click_writer_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (MAIN_QML, "    function chatNext() {", '    function x() { Plasmoid.configuration.panelRing = "off" }\n    function chatNext() {'),
+    (MAIN_QML, "    function chatNext() {",
+     '    function x() { Plasmoid.configuration.middleClickOpens = "usage" }\n    function chatNext() {'),
+    (CONFIG_CHAT, "    property string cfg_panelRingDefault: \"auto\"\n",
+     "    property string cfg_panelRingDefault: \"auto\"\n    function f() { page.cfg_panelRing = \"off\" }\n"),
+    (CONFIG_USAGE, "    function setPanelRing(value) {\n",
+     "    function g() { page.cfg_middleClickOpens = \"usage\" }\n    function setPanelRing(value) {\n"),
+    (CONFIG_USAGE, "    function setPanelRing(value) {\n",
+     "    function g() { page.cfg_panelRing = \"off\" }\n    function setPanelRing(value) {\n"),
+    (CONFIG_USAGE, "        page.cfg_panelRing = value\n", "        page.cfg_panelRing = \"off\"\n"),
+    (CONFIG_USAGE, "onActivated: page.setPanelRing(currentValue)", "onActivated: page.cfg_panelRing = currentValue"),
+    (CONFIG_USAGE, "        page.cfg_panelRing = value\n", "        page.cfg_panelRing = value\n        page.setPanelRing(value)\n"),
+    (CONFIG_GENERAL, "onActivated: page.cfg_middleClickOpens = currentValue",
+     'onActivated: page.cfg_middleClickOpens = "refresh"'),
+    (CONFIG_GENERAL, "    function backupStatusText() {\n",
+     '    function g() { page.cfg_panelRing = "off" }\n    function backupStatusText() {\n'),
+    (CONFIG_GENERAL, "if (values.panelRing !== undefined) page.cfg_panelRing = values.panelRing",
+     "if (values.panelRing !== undefined) page.cfg_panelRing = values.usageMode"),
+])
+def test_proof_ring_and_middle_click_writer_rule_catches(path, old, new):
+    assert _ring_click_writer_problems(_sources_with(path, old, new))
+
+
+def _middle_click_shortcut_problems(sources, settings_logic):
+    """The middle-click is a mouse action: nothing of it reaches the keyboard shortcut."""
+    problems = [f"shortcut field at {place}" for place in _shortcut_offenders(sources)]
+    compact = sources.get(_rel(COMPACT_REPRESENTATION), "")
+    main = sources.get(_rel(MAIN_QML), "")
+    if _hits(r"(?i)shortcut", compact):
+        problems.append("CompactRepresentation.qml must not touch the shortcut")
+    click = _function_body(main, "middleClick")
+    plan = _function_body(settings_logic, "middleClickPlan")
+    if click is None or plan is None:
+        return problems + ["exactly one middleClick() and middleClickPlan() expected"]
+    if _hits(r"(?i)shortcut", click) or _hits(r"(?i)shortcut", plan):
+        problems.append("the middle-click must not use the shortcut's state or plan")
+    problems += _pin_problems(main, ("activationTogglesExpanded: false",
+                                     "function onActivated() { root.openFromShortcut() }"), "main.qml")
+    if _hits(r"\bmiddleClick\b", _function_body(main, "openFromShortcut") or ""):
+        problems.append("the shortcut must not run the middle-click")
+    return problems
+
+
+def test_middle_click_adds_nothing_to_the_keyboard_shortcut():
+    problems = _middle_click_shortcut_problems(_all_code(), _read_code(SETTINGS_LOGIC_JS))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (CONFIG_GENERAL, 'import "SettingsLogic.js" as SettingsLogic\n',
+     'import "SettingsLogic.js" as SettingsLogic\nimport org.kde.kquickcontrols\n'),
+    (COMPACT_REPRESENTATION, "            root.middleClick()\n", "            root.openFromShortcut()\n"),
+    (MAIN_QML, "    function middleClick() {\n", "    function middleClick() {\n        root.shortcutOpen = true\n"),
+    (MAIN_QML, "activationTogglesExpanded: false", "activationTogglesExpanded: true"),
+    (MAIN_QML, "    function openFromShortcut() {\n", "    function openFromShortcut() {\n        root.middleClick()\n"),
+    (MAIN_QML, "            root.openFromShortcut()\n", "            root.middleClick()\n"),
+    (SETTINGS_LOGIC_JS, "function middleClickPlan(target, state) {\n",
+     "function middleClickPlan(target, state) {\n    target = normalizeShortcutTarget(target)\n"),
+])
+def test_proof_middle_click_shortcut_rule_catches(path, old, new):
+    settings_logic = _mutated(path, old, new) if path == SETTINGS_LOGIC_JS else _read_code(SETTINGS_LOGIC_JS)
+    sources = _sources_with(path, old, new)
+    assert _middle_click_shortcut_problems(sources, settings_logic)
+
+
+# The color preview is plain text. It reads the page's cfg_ values, the numbers
+# derived from them and, for a level with no color chosen, the theme's color
+# (fallbackColor). Nothing from the saved configuration or the helper.
+
+PREVIEW_PAGE_MEMBERS = {"previewColor", "levelName", "thresholds", "cfg_usageMode"}
+PREVIEW_DATA_MEMBERS = {"level", "shown"}
+PREVIEW_BANS = {
+    "saved configuration or helper data": r"\b(?:Plasmoid|root|snapshot|Catalog|DataSource)\b",
+}
+PREVIEW_COLOR_READS = {"cfg_usageNormalColor", "cfg_usageWarnColor", "cfg_usageCriticalColor", "fallbackColor"}
+FALLBACK_COLOR_READS = {"cfg_usageWarnColor"}
+PREVIEW_THRESHOLDS = ("readonly property var thresholds: UsageLogic.normalizeThresholds("
+                      "page.cfg_usageWarnPercent, page.cfg_usageCriticalPercent)")
+
+
+def _preview_members(body):
+    return set(re.findall(r"\bpage\s*\.\s*(\w+)", _strip_comments(body, blank_strings=True)))
+
+
+def _color_preview_problems(code):
+    previews = _named_elements(code, r"(?<![\w.])ColumnLayout\s*\{", "usagePreview")
+    if len(previews) != 1:
+        return [f"exactly one ColumnLayout usagePreview expected, found {len(previews)}"]
+    body = previews[0][1]
+    problems = _plain_text_problems(body) + _access_problems(body)
+    if not list(_blocks(body, TEXT_ELEMENT)):
+        problems.append("the preview has no text element")
+    extra = _preview_members(body) - PREVIEW_PAGE_MEMBERS
+    if extra:
+        problems.append(f"the preview may read only {sorted(PREVIEW_PAGE_MEMBERS)}, found {sorted(extra)}")
+    data = set(re.findall(r"\bmodelData\s*\.\s*(\w+)", body)) - PREVIEW_DATA_MEMBERS
+    if data:
+        problems.append(f"the preview's samples have only {sorted(PREVIEW_DATA_MEMBERS)}, found {sorted(data)}")
+    problems += [f"{name} at line {line}" for name, pattern in PREVIEW_BANS.items() for line in _hits(pattern, body)]
+    problems += _pin_problems(code, (PREVIEW_THRESHOLDS,), "configUsage.qml")
+    problems += _pin_problems(body, ("model: UsageLogic.levelSamples(page.thresholds, page.cfg_usageMode)",), "usagePreview")
+    for function, allowed in (("previewColor", PREVIEW_COLOR_READS), ("fallbackColor", FALLBACK_COLOR_READS)):
+        function_body = _function_body(code, function)
+        if function_body is None:
+            problems.append(f"exactly one function {function}() expected")
+            continue
+        extra = _preview_members(function_body) - allowed
+        if extra:
+            problems.append(f"{function}() may read only {sorted(allowed)}, found {sorted(extra)}")
+        problems += [f"{function}(): {name} at line {line}" for name, pattern in PREVIEW_BANS.items()
+                     for line in _hits(pattern, function_body)]
+    return problems
+
+
+def test_color_preview_is_plain_text_and_reads_the_page_only():
+    problems = _color_preview_problems(_read_code(CONFIG_USAGE))
+    assert not problems, f"{_rel(CONFIG_USAGE)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ('objectName: "usagePreview"', 'objectName: "colorPreview"'),
+    ('objectName: "previewLabel_" + sampleRow.modelData.level\n                                textFormat: Text.PlainText\n',
+     'objectName: "previewLabel_" + sampleRow.modelData.level\n'),
+    ('objectName: "previewLabel_" + sampleRow.modelData.level\n                                textFormat: Text.PlainText\n',
+     'objectName: "previewLabel_" + sampleRow.modelData.level\n                                textFormat: Text.RichText\n'),
+    ("model: UsageLogic.levelSamples(page.thresholds, page.cfg_usageMode)",
+     "model: UsageLogic.levelSamples(root.usageThresholds, page.cfg_usageMode)"),
+    ("page.previewColor(sampleRow.modelData.level, Kirigami.Theme)", "Plasmoid.configuration.usageNormalColor"),
+    ("page.previewColor(sampleRow.modelData.level, Kirigami.Theme)", "page.providerStatus(sampleRow.modelData.level)"),
+    ("page.levelName(sampleRow.modelData.level)", "sampleRow.modelData.caption"),
+    ('var chosen = UsageLogic.normalizeColor(level === "normal" ? page.cfg_usageNormalColor',
+     'var chosen = UsageLogic.normalizeColor(level === "normal" ? Plasmoid.configuration.usageNormalColor'),
+    ('var chosen = UsageLogic.normalizeColor(level === "normal" ? page.cfg_usageNormalColor',
+     'var chosen = UsageLogic.normalizeColor(level === "normal" ? page.shownColors.normal'),
+    ('UsageLogic.effectiveCriticalColor("", page.cfg_usageWarnColor)', 'UsageLogic.effectiveCriticalColor("", page.shownColors.warning)'),
+    ('                    Kirigami.FormData.label: i18n("Preview:")\n',
+     '                    Kirigami.FormData.label: i18n("Preview:")\n'
+     '                    Image { source: "https://example.invalid/x.png" }\n'),
+    ('                    Kirigami.FormData.label: i18n("Preview:")\n',
+     '                    Kirigami.FormData.label: i18n("Preview:")\n'
+     "                    QQC2.Label { text: page.cfg_usageWarnColor }\n"),
+])
+def test_proof_color_preview_rule_catches(old, new):
+    assert _color_preview_problems(_mutated(CONFIG_USAGE, old, new))
+
+
+# --- Round 4, phase 4: usage history (opt-in, D70) ----------------------------------------
+
+HISTORY_CHOICE_WRITE = "onToggled: page.cfg_usageHistoryEnabled = checked"
+
+
+def _js_string_list(code, name):
+    match = re.search(rf"\bvar\s+{name}\s*=\s*\[(.*?)\]", code, re.DOTALL)
+    return re.findall(r'"([^"\n]*)"', match.group(1)) if match else None
+
+
+def _usage_history_enabled_problems(sources, entries, backup_keys, excluded_keys):
+    problems = []
+    writes = [(name, at) for name, code in sources.items() for at, _ in _key_writes(code, ("usageHistoryEnabled",))]
+    general_name = _rel(CONFIG_GENERAL)
+    general = sources.get(general_name, "")
+    if len(writes) != 1 or writes[0][0] != general_name or _line_at(general, writes[0][1]) != HISTORY_CHOICE_WRITE:
+        problems.append(f"usageHistoryEnabled is written only by {HISTORY_CHOICE_WRITE!r}, found "
+                        f"{[(name, _line_of(sources[name], at)) for name, at in writes]}")
+    top = _single_element_top(general, CHECK_BOX, "usageHistoryChoice")
+    if top is None or _pin_problems(top, (HISTORY_CHOICE_WRITE,), "usageHistoryChoice"):
+        problems.append(f"the usageHistoryChoice CheckBox must have {HISTORY_CHOICE_WRITE!r}")
+    privacy = general.find('Kirigami.FormData.label: i18n("Privacy")')
+    backup = general.find('Kirigami.FormData.label: i18n("Backup")')
+    choice = general.find('objectName: "usageHistoryChoice"')
+    if not 0 <= privacy < choice < backup:
+        problems.append("usageHistoryChoice belongs in the Privacy section")
+    entry = entries.get("usageHistoryEnabled", {})
+    if entry.get("type") != "Bool" or entry.get("default") != "false":
+        problems.append(f"usageHistoryEnabled must be Bool, default false; got {entry}")
+    if "usageHistoryEnabled" not in excluded_keys or "usageHistoryEnabled" in backup_keys:
+        problems.append("usageHistoryEnabled must be in EXCLUDED_KEYS and not in BACKUP_KEYS")
+    apply_body = _function_body(general, "applyBackup")
+    if apply_body is None or _hits(r"\busageHistoryEnabled\b", apply_body):
+        problems.append("applyBackup must never name usageHistoryEnabled")
+    library = sources.get(_rel(SETTINGS_BACKUP_JS), "")
+    if "usageHistoryEnabled" not in (_js_string_list(library, "EXCLUDED_KEYS") or []):
+        problems.append("SettingsBackup.js must list usageHistoryEnabled in EXCLUDED_KEYS")
+    if _hits(r"\busageHistoryEnabled\b", _function_body(library, "checkedValue") or ""):
+        problems.append("checkedValue must not accept usageHistoryEnabled")
+    return problems
+
+
+def test_usage_history_is_opt_in_and_never_imported():
+    problems = _usage_history_enabled_problems(_all_code(), _main_xml_entries(), BACKUP_KEYS, EXCLUDED_KEYS)
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (CONFIG_GENERAL, HISTORY_CHOICE_WRITE, "onToggled: page.cfg_usageHistoryEnabled = true"),
+    (CONFIG_GENERAL, 'objectName: "usageHistoryChoice"', 'objectName: "historyChoice"'),
+    (CONFIG_GENERAL, '        page.backupMessage = "applied"\n',
+     '        if (values.usageHistoryEnabled !== undefined) page.cfg_usageHistoryEnabled = values.usageHistoryEnabled\n'
+     '        page.backupMessage = "applied"\n'),
+    (CONFIG_GENERAL, "    function backupStatusText() {\n",
+     "    function g() { page.cfg_usageHistoryEnabled = true }\n    function backupStatusText() {\n"),
+    (CONFIG_USAGE, "    function setPanelRing(value) {\n",
+     "    function g() { page.cfg_usageHistoryEnabled = true }\n    function setPanelRing(value) {\n"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { Plasmoid.configuration.usageHistoryEnabled = true }\n    function chatNext() {"),
+    (SETTINGS_BACKUP_JS, '"initialSetupComplete", "usageHistoryEnabled", ', '"initialSetupComplete", '),
+    (SETTINGS_BACKUP_JS, '    case "panelRing":\n', '    case "usageHistoryEnabled":\n        return bool(value)\n    case "panelRing":\n'),
+])
+def test_proof_usage_history_enabled_rule_catches(path, old, new):
+    assert _usage_history_enabled_problems(_sources_with(path, old, new), _main_xml_entries(), BACKUP_KEYS, EXCLUDED_KEYS)
+
+
+def test_proof_usage_history_placement_is_caught():
+    code = _read_code(CONFIG_GENERAL)
+    moved = code.replace('Kirigami.FormData.label: i18n("Privacy")', 'Kirigami.FormData.label: i18n("Other")', 1)
+    sources = dict(_all_code(), **{_rel(CONFIG_GENERAL): moved})
+    assert _usage_history_enabled_problems(sources, _main_xml_entries(), BACKUP_KEYS, EXCLUDED_KEYS)
+
+
+@pytest.mark.parametrize(("field", "value"), [("default", "true"), ("type", "String")])
+def test_proof_usage_history_default_is_caught(field, value):
+    entries = dict(_main_xml_entries())
+    entries["usageHistoryEnabled"] = dict(entries["usageHistoryEnabled"], **{field: value})
+    assert _usage_history_enabled_problems(_all_code(), entries, BACKUP_KEYS, EXCLUDED_KEYS)
+
+
+@pytest.mark.parametrize(("backup_keys", "excluded_keys"), [
+    (BACKUP_KEYS + ("usageHistoryEnabled",), EXCLUDED_KEYS),
+    (BACKUP_KEYS, tuple(key for key in EXCLUDED_KEYS if key != "usageHistoryEnabled")),
+])
+def test_proof_usage_history_key_lists_are_checked(backup_keys, excluded_keys):
+    assert _usage_history_enabled_problems(_all_code(), _main_xml_entries(), backup_keys, excluded_keys)
+
+
+# usageHistoryClearOwed: main.qml alone stores it; the pages only keep their
+# copy in step with what main.qml stored, as they do for the profile generation.
+
+OWED_MIRROR = 'else if (key === "usageHistoryClearOwed") page.cfg_usageHistoryClearOwed = value'
+
+
+def _clear_owed_writer_problems(sources):
+    problems = []
+    written = False
+    for name, code in sources.items():
+        base = _base(name)
+        for at, _ in _key_writes(code, ("usageHistoryClearOwed",)):
+            line = _line_at(code, at)
+            if base == MAIN_QML.name and line.startswith("Plasmoid.configuration."):
+                written = True
+                continue
+            if any(base == page.name for page in CONFIG_PAGES) and line == "page.cfg_usageHistoryClearOwed = value":
+                continue
+            problems.append(f"{name}:{_line_of(code, at)}: only main.qml stores usageHistoryClearOwed")
+        if any(base == page.name for page in CONFIG_PAGES):
+            problems += _pin_problems(code, (OWED_MIRROR,), name)
+    if not written:
+        problems.append("main.qml must store usageHistoryClearOwed")
+    return problems
+
+
+def test_only_main_stores_the_owed_history_delete():
+    problems = _clear_owed_writer_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (CONFIG_GENERAL, "    function backupStatusText() {\n",
+     "    function g() { page.cfg_usageHistoryClearOwed = false }\n    function backupStatusText() {\n"),
+    (CONFIG_GENERAL, '        page.backupMessage = "applied"\n',
+     '        page.cfg_usageHistoryClearOwed = false\n        page.backupMessage = "applied"\n'),
+    (CONFIG_USAGE, "    function setPanelRing(value) {\n",
+     "    function g() { Plasmoid.configuration.usageHistoryClearOwed = false }\n    function setPanelRing(value) {\n"),
+    (CONFIG_CHAT, '            else if (key === "usageHistoryClearOwed")\n                page.cfg_usageHistoryClearOwed = value\n', ""),
+    (USAGE_VIEW, "            onClicked: root.refresh()\n",
+     "            onClicked: { Plasmoid.configuration.usageHistoryClearOwed = false; root.refresh() }\n"),
+])
+def test_proof_clear_owed_writer_rule_catches(path, old, new):
+    assert _clear_owed_writer_problems(_sources_with(path, old, new))
+
+
+HISTORY_LIBRARY_PINS = (
+    "var ID_PATTERN = /^[a-z_]{1,32}$/",
+    "var SAMPLE_PATTERN = /^[a-z_]{1,32}\\.[a-z_]{1,32}=(100|[1-9]?[0-9])$/",
+)
+HISTORY_COMMAND_BODY = (
+    '{ if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0) return "" '
+    'var command = "env HEARTHWIRE_RUN=" + run + " python3 -P -m hearthwire --usage-history " + op '
+    'if (op !== "record") return command '
+    'return validSample(sample) ? command + " --sample " + sample : "" }'
+)
+HISTORY_SAMPLE_PINS = (
+    "var pairs = catalogPairs(catalog)",
+    'items.push(pairs[index] + "=" + Math.round(Math.max(0, Math.min(100, reading.used_percent))))',
+    "var parts = pairs[index].split(\".\")",
+    'if (!provider || provider.status !== "ok" || provider.stale === true || !Array.isArray(provider.windows))',
+)
+HISTORY_VALID_SAMPLE_PINS = (
+    'if (typeof sample !== "string" || sample === "") return false',
+    "items.every(function (item) { return SAMPLE_PATTERN.test(item) })",
+)
+HISTORY_OPERATIONS = ["read", "record", "clear"]
+
+
+def _history_library_problems(code):
+    problems = _alert_logic_problems(code) + _access_problems(code)
+    if _js_string_list(code, "OPERATIONS") != HISTORY_OPERATIONS:
+        problems.append(f"OPERATIONS must stay {HISTORY_OPERATIONS}")
+    problems += _pin_problems(code, HISTORY_LIBRARY_PINS, "UsageHistory.js")
+    command = _function_body(code, "historyCommand")
+    sample = _function_body(code, "sampleArg")
+    valid = _function_body(code, "validSample")
+    if None in (command, sample, valid):
+        return problems + ["exactly one historyCommand(), sampleArg() and validSample() expected"]
+    if _squeezed(command) != HISTORY_COMMAND_BODY:
+        problems.append(f"historyCommand must stay {HISTORY_COMMAND_BODY}")
+    problems += _pin_problems(sample, HISTORY_SAMPLE_PINS, "sampleArg()")
+    problems += _pin_problems(valid, HISTORY_VALID_SAMPLE_PINS, "validSample()")
+    return problems
+
+
+def test_usage_history_js_is_pure_and_builds_checked_commands():
+    problems = _history_library_problems(_read_code(USAGE_HISTORY_JS))
+    assert not problems, f"{_rel(USAGE_HISTORY_JS)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    (".pragma library\n", ""),
+    ("function isInt(value) {", "function reach() { return new XMLHttpRequest() }\nfunction isInt(value) {"),
+    ("function isInt(value) {", 'function reach() { return Qt.resolvedUrl("x") }\nfunction isInt(value) {'),
+    ("function isInt(value) {", "function logged(value) { console.log(value) }\nfunction isInt(value) {"),
+    ("function isInt(value) {", "function saved() { return Plasmoid.configuration.panelRing }\nfunction isInt(value) {"),
+    ('var OPERATIONS = ["read", "record", "clear"]', 'var OPERATIONS = ["read", "record", "clear", "dump"]'),
+    ("/^[a-z_]{1,32}\\.[a-z_]{1,32}=(100|[1-9]?[0-9])$/", "/^.*$/"),
+    ("var ID_PATTERN = /^[a-z_]{1,32}$/", "var ID_PATTERN = /^.+$/"),
+    ('return validSample(sample) ? command + " --sample " + sample : ""', 'return command + " --sample " + sample'),
+    ("if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0)", "if (!isInt(run) || run < 0)"),
+    ("if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0)", "if (OPERATIONS.indexOf(op) < 0)"),
+    ('" python3 -P -m hearthwire --usage-history "', '" python3 -m hearthwire --usage-history "'),
+    ('items.push(pairs[index] + "=" + Math.round(Math.max(0, Math.min(100, reading.used_percent))))',
+     'items.push(provider.provider_id + "." + reading.kind + "=" + reading.used_percent)'),
+    ('items.push(pairs[index] + "=" + Math.round(Math.max(0, Math.min(100, reading.used_percent))))',
+     'items.push(pairs[index] + "=" + reading.used_percent)'),
+    ("    var pairs = catalogPairs(catalog)\n    var items = []", "    var pairs = list.map(function (p) { return p.provider_id })\n    var items = []"),
+    ("return items.length <= MAX_PAIRS && items.every(function (item) { return SAMPLE_PATTERN.test(item) })",
+     "return items.length <= MAX_PAIRS"),
+])
+def test_proof_history_library_rule_catches(old, new):
+    assert _history_library_problems(_mutated(USAGE_HISTORY_JS, old, new))
+
+
+HISTORY_FLAG = r"--usage-history\b"
+HISTORY_COMMAND_CALLS = {
+    MAIN_QML.name: "UsageHistory.historyCommand(job.op, root.historyRun, job.sample)",
+    CONFIG_GENERAL.name: 'UsageHistory.historyCommand("clear", page.historyClearRun)',
+}
+HISTORY_REQUEST_ARGS = {'"read"': 1, '"record", sample': 1}
+HISTORY_REQUEST_ALLOWED = {'"read"', '"record", sample', '"clear"'}
+HISTORY_MAIN_PINS = (
+    "var sample = UsageHistory.sampleArg(tracked, Catalog.providers)",
+    "historySource.connectSource(command)",
+)
+
+
+def _history_command_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        base = _base(name)
+        flags = _hits(HISTORY_FLAG, code)
+        if (base == USAGE_HISTORY_JS.name and len(flags) != 1) or (base != USAGE_HISTORY_JS.name and flags):
+            problems.append(f"{name}: --usage-history belongs to historyCommand only (lines {flags})")
+        calls = _hits(r"\bhistoryCommand\s*\(", code)
+        if base == USAGE_HISTORY_JS.name:
+            if len(calls) != 1:
+                problems.append(f"{name}: historyCommand is defined once, and not called here")
+        elif base in HISTORY_COMMAND_CALLS:
+            if len(calls) != 1:
+                problems.append(f"{name}: one historyCommand call expected, found {len(calls)}")
+            problems += _pin_problems(code, (HISTORY_COMMAND_CALLS[base],), name)
+        elif calls:
+            problems.append(f"{name}: must not build a history command (lines {calls})")
+    main = sources.get(_rel(MAIN_QML), "")
+    general = sources.get(_rel(CONFIG_GENERAL), "")
+    problems += _pin_problems(main, HISTORY_MAIN_PINS, "main.qml")
+    problems += _pin_problems(general, ("historyClearSource.connectSource(command)",), "configGeneral.qml")
+    args = re.findall(r"\bhistoryRequest\s*\(\s*([^()\n]*?)\s*\)", main)
+    args = [_squeezed(value) for value in args if value != "op, sample"]
+    unknown = sorted(set(args) - HISTORY_REQUEST_ALLOWED)
+    if unknown:
+        problems.append(f"historyRequest may be called only with {sorted(HISTORY_REQUEST_ALLOWED)}, found {unknown}")
+    for value, count in HISTORY_REQUEST_ARGS.items():
+        if args.count(value) != count:
+            problems.append(f"historyRequest({value}) expected {count} time(s), found {args.count(value)}")
+    source_blocks = [(main, "historySource"), (general, "historyClearSource")]
+    for code, source in source_blocks:
+        for _, body in _blocks(code, r"\bPlasma5Support\s*\.\s*DataSource\s*\{"):
+            if re.search(rf"(?:^|[\n;])\s*id\s*:\s*{source}\b", _top_level_raw(body)) and _hits(r"\bstderr\b", body):
+                problems.append(f"{source} must read stdout only")
+    return problems
+
+
+def test_history_commands_are_built_only_from_checked_values():
+    problems = _history_command_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (MAIN_QML, "UsageHistory.historyCommand(job.op, root.historyRun, job.sample)",
+     "UsageHistory.historyCommand(job.op, root.historyRun, root.snapshot.plan)"),
+    (MAIN_QML, "UsageHistory.sampleArg(tracked, Catalog.providers)", "UsageHistory.sampleArg(tracked, root.snapshot.catalog)"),
+    (MAIN_QML, 'root.historyRequest("record", sample)', 'root.historyRequest("record", tracked[0].plan)'),
+    (MAIN_QML, "    function chatNext() {",
+     '    function x() { historySource.connectSource("python3 -m hearthwire --usage-history read") }\n    function chatNext() {'),
+    (MAIN_QML, "    function chatNext() {",
+     '    function x() { root.historyRequest("record", root.lastError) }\n    function chatNext() {'),
+    (MAIN_QML, 'root.historyFinish(root.historyOp, data["exit code"], data["stdout"])',
+     'root.historyFinish(root.historyOp, data["exit code"], data["stderr"])'),
+    (CONFIG_GENERAL, 'UsageHistory.historyCommand("clear", page.historyClearRun)', 'UsageHistory.historyCommand(page.cfg_usageMode, page.historyClearRun)'),
+    (CONFIG_GENERAL, 'var reply = UsageHistory.parseReply("clear", data["exit code"], data["stdout"], Catalog.providers)',
+     'var reply = UsageHistory.parseReply("clear", data["exit code"], data["stderr"], Catalog.providers)'),
+    (CONFIG_USAGE, "    function setPanelRing(value) {\n",
+     '    function g() { return UsageHistory.historyCommand("read", 1) }\n    function setPanelRing(value) {\n'),
+])
+def test_proof_history_command_rule_catches(path, old, new):
+    assert _history_command_problems(_sources_with(path, old, new))
+
+
+HISTORY_RECORD_GUARD = "{ if (!root.usageHistoryEnabled || !root.usageShown) return "
+HISTORY_START_BODY = ('{ if (root.usageHistoryEnabled && root.usageShown && !root.historyReadDone) { '
+                      'root.historyReadDone = true root.historyRequest("read") } }')
+HISTORY_OFF_PINS = (
+    "root.historyQueue = []",
+    'root.historyRequest("clear")',
+)
+
+
+def _history_guard_problems(code):
+    record = _function_body(code, "historyRecord")
+    start = _function_body(code, "historyStart")
+    finish = _function_body(code, "historyFinish")
+    if None in (record, start, finish):
+        return ["exactly one historyRecord(), historyStart() and historyFinish() expected"]
+    problems = []
+    if not _squeezed(record).startswith(HISTORY_RECORD_GUARD):
+        problems.append(f"historyRecord must start with {HISTORY_RECORD_GUARD}")
+    if len(_hits(_code_pattern('root.historyRequest("record", sample)'), record)) != 1:
+        problems.append("the record request belongs to historyRecord")
+    if _squeezed(start) != HISTORY_START_BODY:
+        problems.append(f"historyStart must stay {HISTORY_START_BODY}")
+    problems += _pin_problems(finish, ("} else if (root.usageHistoryEnabled) {",), "historyFinish()")
+    handlers = [body for _, body in _blocks(code, r"(?<![\w.])onUsageHistoryEnabledChanged\s*:\s*\{")]
+    if len(handlers) != 1:
+        return problems + ["exactly one onUsageHistoryEnabledChanged expected"]
+    tail = handlers[0][handlers[0].find("root.historyStart()"):]
+    if "return" not in tail or tail.find("return") > tail.find("root.historyQueue"):
+        problems.append("while turning on, the handler must stop before the off branch")
+    problems += _pin_problems(tail, HISTORY_OFF_PINS, "the off branch")
+    drop = tail.find("root.historyQueue = []")
+    if drop > tail.find('root.historyRequest("clear")'):
+        problems.append("turning off must drop the queued steps before asking for the clear")
+    problems += _pin_problems(code, ("root.historyRecord(payload.providers)",), "main.qml")
+    if len(_hits(r"\bhistoryRecord\s*\(", code)) != 2:
+        problems.append("historyRecord is defined once and called once, after a good snapshot")
+    return problems
+
+
+def test_no_history_read_or_record_runs_while_disabled():
+    problems = _history_guard_problems(_read_code(MAIN_QML))
+    assert not problems, f"{_rel(MAIN_QML)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("        if (!root.usageHistoryEnabled || !root.usageShown)\n            return\n        var now = Date.now()\n",
+     "        var now = Date.now()\n"),
+    ("if (!root.usageHistoryEnabled || !root.usageShown)", "if (!root.usageShown)"),
+    ("if (root.usageHistoryEnabled && root.usageShown && !root.historyReadDone) {", "if (root.usageShown && !root.historyReadDone) {"),
+    ('            root.historyRequest("read")\n', '            root.historyRequest("read")\n            root.historyRequest("read")\n'),
+    ("} else if (root.usageHistoryEnabled) {", "} else {"),
+    ('        root.historyQueue = []\n        root.historyRequest("clear")\n', '        root.historyRequest("clear")\n'),
+    ('        root.historyQueue = []\n        root.historyRequest("clear")\n', '        root.historyRequest("clear")\n        root.historyQueue = []\n'),
+    ("            root.historyStart()\n            return\n", "            root.historyStart()\n"),
+    ("        root.historyRecord(payload.providers)\n", "        root.historyRecord(root.snapshot.providers)\n"),
+    ("    function chatNext() {", "    function x() { root.historyRecord([]) }\n    function chatNext() {"),
+])
+def test_proof_history_guard_rule_catches(old, new):
+    assert _history_guard_problems(_mutated(MAIN_QML, old, new))
+
+
+SPARKLINE_BANS = {
+    "canvas text": r"\b(?:fillText|strokeText|measureText|font)\b",
+    "canvas image": r"\b(?:drawImage|loadImage|unloadImage|isImageLoaded|isImageError|createPattern|createImageData|getImageData|putImageData)\b",
+    "canvas file": r"\.\s*(?:save|toDataURL|grabToImage)\s*\(",
+    "text element": TEXT_ELEMENT,
+}
+SPARKLINE_PINS = (
+    "readonly property var points: root.historyPoints(providerSection.modelData.provider_id, quotaCard.modelData.kind)",
+    "UsageHistory.sparkSegments(sparkline.points, root.historyNow, root.usageMode,",
+    "Accessible.ignored: true",
+)
+
+
+def _sparkline_problems(code, sources):
+    canvases = _named_elements(code, r"(?<![\w.])Canvas\s*\{", "usageSparkline")
+    if len(canvases) != 1:
+        return [f"exactly one Canvas usageSparkline expected, found {len(canvases)}"]
+    body = canvases[0][1]
+    problems = _access_problems(body)
+    problems += [f"{name} at line {line}" for name, pattern in SPARKLINE_BANS.items() for line in _hits(pattern, body)]
+    if re.search(r"(?:^|[\n;])\s*text\s*:", _top_level_raw(body)):
+        problems.append("the sparkline must not bind text")
+    problems += _pin_problems(body, SPARKLINE_PINS, "usageSparkline")
+    others = [f"{name}:{line}" for name, text in sources.items()
+              for line in _hits(r"(?<![\w.])Canvas\s*\{", text)]
+    if len(others) != 1:
+        problems.append(f"the sparkline is the only Canvas, found {others}")
+    return problems
+
+
+def test_sparkline_draws_only_lines():
+    problems = _sparkline_problems(_read_code(USAGE_VIEW), _all_code())
+    assert not problems, f"{_rel(USAGE_VIEW)}: {problems}"
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (USAGE_VIEW, 'objectName: "usageSparkline"', 'objectName: "sparkline"'),
+    (USAGE_VIEW, "                                            context.reset()\n",
+     '                                            context.fillText("62%", 0, 0)\n'),
+    (USAGE_VIEW, "                                            context.reset()\n",
+     '                                            context.font = "12px sans"\n'),
+    (USAGE_VIEW, "                                            context.reset()\n",
+     '                                            context.drawImage("https://example.invalid/x.png", 0, 0)\n'),
+    (USAGE_VIEW, "                                            context.reset()\n",
+     '                                            sparkline.loadImage("file:///tmp/x.png")\n'),
+    (USAGE_VIEW, "                                            context.reset()\n",
+     '                                            sparkline.save("/tmp/x.png")\n'),
+    (USAGE_VIEW, "                                        Accessible.ignored: true\n",
+     "                                        Accessible.ignored: true\n"
+     "                                        Text { text: quotaCard.modelData.caption; textFormat: Text.PlainText }\n"),
+    (USAGE_VIEW, "root.historyPoints(\n                                            providerSection.modelData.provider_id,",
+     "root.historyPoints(\n                                            providerSection.modelData.display_name,"),
+    (FULL_REPRESENTATION, "    function ", "    Canvas { }\n    function "),
+])
+def test_proof_sparkline_rule_catches(path, old, new):
+    sources = _sources_with(path, old, new)
+    assert _sparkline_problems(sources[_rel(USAGE_VIEW)], sources)
+
+
+LEGACY_DATA_TEXT = ("Saved sign-ins from the previous version haven't been moved yet. "
+                    "Run the installer again with --restart-plasma.")
+FIXED_RETURN = r'i18n\("[^"\n]*"\)'
+REPLY_ERROR_CHECK = "ERRORS.indexOf(reply.error) >= 0 ? { ok: false, error: reply.error } :"
+HISTORY_NOTICE = (
+    'readonly property string historyNotice: root.historyClearFailed '
+    '? i18n("The usage history couldn\'t be deleted. Use Delete usage history in Settings → General → Privacy.") '
+    f': root.historyError === "legacy-data" ? i18n("{LEGACY_DATA_TEXT}") : ""'
+)
+HISTORY_ERROR_FORMS = (
+    r'property\s+string\s+historyError\s*:\s*""',
+    r'root\s*\.\s*historyError\s*===\s*"legacy-data"',
+    r'root\s*\.\s*historyError\s*=\s*reply\s*\.\s*error\s*$',
+    r'root\s*\.\s*historyError\s*=\s*""\s*$',
+)
+HISTORY_CLEAR_STATE_FORMS = (
+    r'property\s+string\s+historyClearState\s*:\s*""',
+    r'page\s*\.\s*historyClearState\s*(?:===|!==)\s*"\w+"',
+    r'page\s*\.\s*historyClearState\s*=\s*"busy"\s*$',
+    r'page\s*\.\s*historyClearState\s*=\s*reply\s*\.\s*ok\s*\?\s*"ok"\s*:\s*reply\s*\.\s*error\s*$',
+    r'page\s*\.\s*historyClearText\s*\(\s*page\s*\.\s*historyClearState\s*\)',
+)
+
+
+def _fixed_text_problems(body, name, also=()):
+    return [f"{name}() may return only fixed text, found {value}" for value in _returns(body)
+            if value != '""' and not re.fullmatch(FIXED_RETURN, value) and value not in also]
+
+
+def _case_returns(body, case):
+    """The return of ``case "...":`` in a switch, through any stacked cases."""
+    match = re.search(rf'case\s*"{case}"\s*:\s*(?:case\s*"[\w-]+"\s*:\s*)*return\s+([^\n]*)', body)
+    return match.group(1).strip() if match else None
+
+
+def _unknown_mentions(code, word, forms):
+    problems = []
+    for match in re.finditer(rf"\b{word}\b", code):
+        line = code[code.rfind("\n", 0, match.start()) + 1:code.find("\n", match.start())]
+        if not any(re.search(form, line) for form in forms):
+            problems.append(f"line {_line_of(code, match.start())}: unexpected use of {word}")
+    return problems
+
+
+def _plain_label_problems(code, opener, name, text):
+    labels = _named_elements(code, opener, name)
+    if len(labels) != 1:
+        return [f"exactly one text element {name} expected, found {len(labels)}"]
+    problems = []
+    if len(re.findall(PLAIN_TEXT_FORMAT, _top_level(labels[0][1]))) != 1:
+        problems.append(f"{name} needs textFormat PlainText")
+    if text is not None and _text_binding(labels[0][1]) != text:
+        problems.append(f"{name} must show {text}, found {_text_binding(labels[0][1])}")
+    return problems
+
+
+def _history_message_problems(main, general, view, library):
+    problems = _pin_problems(main, (HISTORY_NOTICE,), "main.qml")
+    problems += _unknown_mentions(main, "historyError", HISTORY_ERROR_FORMS)
+    problems += _unknown_mentions(general, "historyClearState", HISTORY_CLEAR_STATE_FORMS)
+    problems += _plain_label_problems(view, TEXT_ELEMENT, "usageHistoryNotice", "root.historyNotice")
+    problems += _plain_label_problems(general, TEXT_ELEMENT, "usageHistoryStatus", "page.historyClearText(page.historyClearState)")
+    problems += _plain_label_problems(general, TEXT_ELEMENT, "usageHistoryExplanation", None)
+    problems += _plain_label_problems(general, TEXT_ELEMENT, "usageHistoryOwedNotice", None)
+    body = _function_body(general, "historyClearText")
+    if body is None:
+        return problems + ["exactly one function historyClearText() expected"]
+    problems += _fixed_text_problems(body, "historyClearText")
+    if _case_returns(body, "legacy-data") != f'i18n("{LEGACY_DATA_TEXT}")':
+        problems.append("historyClearText must map legacy-data to the fixed message")
+    parse = _function_body(library, "parseReply")
+    if parse is None:
+        return problems + ["exactly one function parseReply() expected"]
+    problems += _pin_problems(parse, (REPLY_ERROR_CHECK,), "UsageHistory.parseReply()")
+    return problems
+
+
+def test_history_messages_are_fixed_text():
+    problems = _history_message_problems(_read_code(MAIN_QML), _read_code(CONFIG_GENERAL),
+                                         _read_code(USAGE_VIEW), _read_code(USAGE_HISTORY_JS))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (MAIN_QML, ': root.historyError === "legacy-data"\n', ': root.historyError !== ""\n'),
+    (MAIN_QML, "        ? i18n(\"The usage history couldn't be deleted. Use Delete usage history in Settings → General → Privacy.\")\n",
+     "        ? root.historyError\n"),
+    (MAIN_QML, "    function chatNext() {", "    function x() { root.lastError = root.historyError }\n    function chatNext() {"),
+    (MAIN_QML, "                root.historyError = reply.error\n", '                root.historyError = data["stderr"]\n'),
+    (USAGE_VIEW, "        text: root.historyNotice\n", "        text: root.historyError\n"),
+    (USAGE_VIEW, "        textFormat: Text.PlainText\n        text: root.historyNotice\n", "        text: root.historyNotice\n"),
+    (CONFIG_GENERAL, "text: page.historyClearText(page.historyClearState)", "text: page.historyClearState"),
+    (CONFIG_GENERAL, 'return i18n("Couldn\'t delete the usage history. Try again in a moment.")', "return state"),
+    (CONFIG_GENERAL, 'return i18n("Usage history deleted.")', 'return i18n("Deleted: %1", state)'),
+    (CONFIG_GENERAL, '        case "legacy-data":\n            return i18n("Saved sign-ins from the previous version haven\'t been moved yet. Run the installer again with --restart-plasma.")\n        default:\n            return i18n("Couldn\'t delete',
+     '        default:\n            return i18n("Couldn\'t delete'),
+    (CONFIG_GENERAL, 'page.historyClearState = reply.ok ? "ok" : reply.error', 'page.historyClearState = data["stdout"]'),
+    (USAGE_HISTORY_JS, "&& ERRORS.indexOf(reply.error) >= 0 ? { ok: false, error: reply.error } : invalid", "? { ok: false, error: reply.error } : invalid"),
+])
+def test_proof_history_message_rule_catches(path, old, new):
+    versions = {target: _mutated(path, old, new) if path == target else _read_code(target)
+                for target in (MAIN_QML, CONFIG_GENERAL, USAGE_VIEW, USAGE_HISTORY_JS)}
+    assert _history_message_problems(*versions.values())
+
+
+# --- Round 4, phase 6: settings backup ----------------------------------------------------
+
+BACKUP_LIBRARY_PINS = (
+    "var HEX_PATTERN = /^(?:[0-9a-f]{2})+$/",
+    "var STAMP_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/",
+)
+BACKUP_COMMAND_BODY = (
+    '{ if (OPERATIONS.indexOf(op) < 0 || !isCount(run)) return "" '
+    'var command = "env HEARTHWIRE_RUN=" + run + " python3 -P -m hearthwire --settings-backup " + op '
+    'if (op !== "export") return command '
+    'return typeof data === "string" && data.length <= MAX_DATA_HEX && HEX_PATTERN.test(data) '
+    '? command + " --data " + data : "" }'
+)
+BACKUP_EXPORT_PINS = (
+    "BACKUP_KEYS.forEach(function (key) {",
+    "var hex = hexUtf8(JSON.stringify(picked))",
+)
+BACKUP_OPERATIONS = ["status", "export", "import"]
+BACKUP_RUN_ARGS = {'"status"', '"import"', '"export", SettingsBackup.exportPayload(page.backupSettings())', "op, data"}
+
+
+def _backup_library_problems(code):
+    problems = _alert_logic_problems(code) + _access_problems(code)
+    if _js_string_list(code, "OPERATIONS") != BACKUP_OPERATIONS:
+        problems.append(f"OPERATIONS must stay {BACKUP_OPERATIONS}")
+    problems += _pin_problems(code, BACKUP_LIBRARY_PINS, "SettingsBackup.js")
+    command = _function_body(code, "backupCommand")
+    export = _function_body(code, "exportPayload")
+    if None in (command, export):
+        return problems + ["exactly one backupCommand() and exportPayload() expected"]
+    if _squeezed(command) != BACKUP_COMMAND_BODY:
+        problems.append(f"backupCommand must stay {BACKUP_COMMAND_BODY}")
+    problems += _pin_problems(export, BACKUP_EXPORT_PINS, "exportPayload()")
+    return problems
+
+
+def test_settings_backup_js_is_pure_and_builds_checked_commands():
+    problems = _backup_library_problems(_read_code(SETTINGS_BACKUP_JS))
+    assert not problems, f"{_rel(SETTINGS_BACKUP_JS)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    (".pragma library\n", ""),
+    ("function isObject(value) {", "function reach() { return new XMLHttpRequest() }\nfunction isObject(value) {"),
+    ("function isObject(value) {", 'function reach() { return Qt.resolvedUrl("x") }\nfunction isObject(value) {'),
+    ("function isObject(value) {", "function logged(value) { console.log(value) }\nfunction isObject(value) {"),
+    ('var OPERATIONS = ["status", "export", "import"]', 'var OPERATIONS = ["status", "export", "import", "path"]'),
+    ("var HEX_PATTERN = /^(?:[0-9a-f]{2})+$/", "var HEX_PATTERN = /^.*$/"),
+    ('return typeof data === "string" && data.length <= MAX_DATA_HEX && HEX_PATTERN.test(data)',
+     'return typeof data === "string" && data.length <= MAX_DATA_HEX'),
+    ('        ? command + " --data " + data : ""', '        ? command + " --path " + data : ""'),
+    ("if (OPERATIONS.indexOf(op) < 0 || !isCount(run))", "if (!isCount(run))"),
+    ('" python3 -P -m hearthwire --settings-backup "', '" python3 -m hearthwire --settings-backup "'),
+    ("    BACKUP_KEYS.forEach(function (key) {", "    Object.keys(settings).forEach(function (key) {"),
+    ("var hex = hexUtf8(JSON.stringify(picked))", "var hex = hexUtf8(JSON.stringify(settings))"),
+])
+def test_proof_backup_library_rule_catches(old, new):
+    assert _backup_library_problems(_mutated(SETTINGS_BACKUP_JS, old, new))
+
+
+def _backup_command_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        base = _base(name)
+        flags = _hits(r"--settings-backup\b", code)
+        if (base == SETTINGS_BACKUP_JS.name and len(flags) != 1) or (base != SETTINGS_BACKUP_JS.name and flags):
+            problems.append(f"{name}: --settings-backup belongs to backupCommand only (lines {flags})")
+        calls = _hits(r"\bbackupCommand\s*\(", code)
+        expected = 1 if base in (SETTINGS_BACKUP_JS.name, CONFIG_GENERAL.name) else 0
+        if len(calls) != expected:
+            problems.append(f"{name}: {expected} backupCommand mention(s) expected, found {calls}")
+    general = sources.get(_rel(CONFIG_GENERAL), "")
+    problems += _pin_problems(general, ("SettingsBackup.backupCommand(op, page.backupRun, data)",
+                                        "backupSource.connectSource(command)"), "configGeneral.qml")
+    args = {_squeezed(value) for value in re.findall(r"\brunBackup\s*\(([^\n]*)\)\s*(?:\{)?\s*$", general, re.MULTILINE)}
+    if args != BACKUP_RUN_ARGS:
+        problems.append(f"runBackup may be used only as {sorted(BACKUP_RUN_ARGS)}, found {sorted(args)}")
+    for _, body in _blocks(general, r"\bPlasma5Support\s*\.\s*DataSource\s*\{"):
+        if re.search(r"(?:^|[\n;])\s*id\s*:\s*backupSource\b", _top_level_raw(body)) and _hits(r"\bstderr\b", body):
+            problems.append("backupSource must read stdout only")
+    return problems
+
+
+def test_backup_commands_are_built_only_by_the_library():
+    problems = _backup_command_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (CONFIG_GENERAL, "SettingsBackup.backupCommand(op, page.backupRun, data)", "SettingsBackup.backupCommand(op, page.backupRun, page.cfg_chatSites)"),
+    (CONFIG_GENERAL, 'page.runBackup("export", SettingsBackup.exportPayload(page.backupSettings()))', 'page.runBackup("export", page.cfg_chatCustomUrls)'),
+    (CONFIG_GENERAL, 'page.runBackup("import")', "page.runBackup(page.backupMessage)"),
+    (CONFIG_GENERAL, "    function backupStatusText() {\n",
+     '    function g() { backupSource.connectSource("python3 -m hearthwire --settings-backup status") }\n    function backupStatusText() {\n'),
+    (CONFIG_GENERAL, 'SettingsBackup.parseReply(page.backupOp, data["exit code"], data["stdout"])',
+     'SettingsBackup.parseReply(page.backupOp, data["exit code"], data["stderr"])'),
+    (CONFIG_USAGE, "    function setPanelRing(value) {\n",
+     '    function g() { return SettingsBackup.backupCommand("status", 1) }\n    function setPanelRing(value) {\n'),
+])
+def test_proof_backup_command_rule_catches(path, old, new):
+    assert _backup_command_problems(_sources_with(path, old, new))
+
+
+APPLY_BACKUP_DYNAMIC = r"\bpage\s*\[|\bfor\s*\(|\bforEach\b|\bObject\s*\.|\beval\b"
+
+
+def _apply_backup_problems(sources, excluded_keys):
+    problems = []
+    general_name = _rel(CONFIG_GENERAL)
+    for name, code in sources.items():
+        mentions = _hits(r"\bapplyBackup\b", code)
+        if name != general_name and mentions:
+            problems.append(f"{name}: only configGeneral.qml may name applyBackup (lines {mentions})")
+    general = sources.get(general_name, "")
+    if len(_hits(r"\bapplyBackup\b", general)) != 2:
+        problems.append("applyBackup is defined once and called once")
+    body = _function_body(general, "applyBackup")
+    if body is None:
+        return problems + ["exactly one function applyBackup() expected"]
+    confirms = _named_elements(general, r"\bKirigami\s*\.\s*InlineMessage\s*\{", "backupImportConfirm")
+    actions = [] if len(confirms) != 1 else [
+        top for _, action in _blocks(confirms[0][1], r"\bKirigami\s*\.\s*Action\s*\{")
+        for top in [_top_level_raw(action)]
+        if re.search(r"(?:^|[\n;])\s*onTriggered\s*:\s*page\s*\.\s*applyBackup\s*\(\s*\)\s*(?=;|\n|$)", top)
+    ]
+    if len(actions) != 1 or not re.search(r'(?:^|[\n;])\s*text\s*:\s*i18n\(\s*"Replace"\s*\)', actions[0]):
+        problems.append("applyBackup is called only by the Replace action of backupImportConfirm")
+    if _hits(APPLY_BACKUP_DYNAMIC, body):
+        problems.append("applyBackup must assign each key by its own line, with no loop or computed name")
+    for match in re.finditer(rf"\bcfg_(\w+)\b{WRITE_OPERATOR}", body):
+        key = match.group(1)
+        line = _line_at(body, match.start())
+        if key in excluded_keys:
+            problems.append(f"applyBackup must never assign excluded key {key}")
+        if not re.fullmatch(rf"if\s*\(\s*values\s*\.\s*{key}\s*!==\s*undefined\s*\)\s*"
+                            rf"page\s*\.\s*cfg_{key}\s*=\s*values\s*\.\s*{key}", line):
+            problems.append(f"applyBackup: {key} must be assigned by its explicit line, found {line!r}")
+    return problems
+
+
+def test_apply_backup_runs_only_from_replace_and_never_assigns_excluded_keys():
+    problems = _apply_backup_problems(_all_code(), EXCLUDED_KEYS)
+    assert not problems, problems
+
+
+APPLY_END = '        page.backupMessage = "applied"\n'
+
+
+@pytest.mark.parametrize("key", EXCLUDED_KEYS)
+def test_proof_apply_backup_excluded_key_is_caught(key):
+    new = f"        if (values.{key} !== undefined) page.cfg_{key} = values.{key}\n" + APPLY_END
+    problems = _apply_backup_problems(_sources_with(CONFIG_GENERAL, APPLY_END, new), EXCLUDED_KEYS)
+    assert any(f"excluded key {key}" in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (CONFIG_GENERAL, "onTriggered: page.applyBackup()", "onTriggered: page.exportBackup()"),
+    (CONFIG_GENERAL, "    onCfg_chatSignInStorageChanged: page.syncSignInChoice()\n",
+     "    onCfg_chatSignInStorageChanged: page.applyBackup()\n"),
+    (CONFIG_GENERAL, "    function backupStatusText() {\n",
+     "    function applyBackup() { }\n    function backupStatusText() {\n"),
+    (CONFIG_GENERAL, '                    text: i18n("Replace")\n                    icon.name: "document-import"\n',
+     '                    text: i18n("Apply now")\n                    icon.name: "document-import"\n'),
+    (CONFIG_GENERAL, 'objectName: "backupImportConfirm"', 'objectName: "backupConfirm"'),
+    (CONFIG_GENERAL, "        var values = plan.settings\n",
+     "        var values = plan.settings\n        Object.keys(values).forEach(function (key) { page[\"cfg_\" + key] = values[key] })\n"),
+    (CONFIG_GENERAL, "if (values.usageMode !== undefined) page.cfg_usageMode = values.usageMode",
+     "page.cfg_usageMode = values.usageMode"),
+    (CONFIG_USAGE, "    function setPanelRing(value) {\n", "    function applyBackup() { }\n    function setPanelRing(value) {\n"),
+])
+def test_proof_apply_backup_rule_catches(path, old, new):
+    assert _apply_backup_problems(_sources_with(path, old, new), EXCLUDED_KEYS)
+
+
+def test_proof_apply_backup_uses_the_helper_excluded_list():
+    assert _apply_backup_problems(_all_code(), EXCLUDED_KEYS + ("usageMode",))
+
+
+FILE_PICKER = r"\bQtQuick\s*\.\s*Dialogs\b|\bQt\s*\.\s*labs\s*\.\s*platform\b|\b(?:FileDialog|FolderDialog)\b"
+
+
+def _file_picker_offenders(code):
+    return _hits(FILE_PICKER, code)
+
+
+def test_settings_general_page_has_no_file_picker():
+    offenders = _file_picker_offenders(_read_code(CONFIG_GENERAL))
+    assert not offenders, f"{_rel(CONFIG_GENERAL)}: the backup path is fixed by the helper; lines {offenders}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("import QtQuick.Layouts\n", "import QtQuick.Layouts\nimport QtQuick.Dialogs\n"),
+    ("import QtQuick.Layouts\n", "import QtQuick.Layouts\nimport QtQuick.Dialogs as QtDialogs\n"),
+    ("import QtQuick.Layouts\n", "import QtQuick.Layouts\nimport Qt.labs.platform\n"),
+    ("    QQC2.ButtonGroup {\n", "    FileDialog { }\n    QQC2.ButtonGroup {\n"),
+    ("    QQC2.ButtonGroup {\n", "    QtDialogs.FolderDialog { }\n    QQC2.ButtonGroup {\n"),
+])
+def test_proof_file_picker_rule_catches(old, new):
+    assert _file_picker_offenders(_mutated(CONFIG_GENERAL, old, new))
+
+
+BACKUP_STATUS_RETURNS = ('i18n("Last backup: %1", SettingsBackup.shownStamp(page.backupExportedAt))',
+                         "page.backupText(page.backupState)")
+SHOWN_STAMP_BODY = '{ return validStamp(value) ? value.replace("T", " ").replace("Z", " UTC") : "" }'
+BACKUP_PLAN_ARGS = "page.backupPlan ? page.backupPlan.applied : 0, SettingsBackup.shownStamp(page.backupExportedAt))"
+# Counts in replies are whole numbers; the export and import replies keep only them.
+BACKUP_COUNT_PINS = (
+    "isCount(reply.saved) && reply.saved > 0 && isCount(reply.dropped) "
+    "? { ok: true, saved: reply.saved, dropped: reply.dropped } : bad",
+    "&& isObject(reply.settings) && isCount(reply.dropped) "
+    "? { ok: true, exportedAt: reply.exported_at, settings: reply.settings, dropped: reply.dropped } : bad",
+)
+BACKUP_LABELS = {
+    "backupStatus": "page.backupStatusText()",
+    "backupMessage": "page.backupText(page.backupMessage)",
+    "backupDroppedCount": 'i18n("Settings left out: %1", page.backupDropped)',
+    "backupExplanation": None,
+    "backupPlanLabel": None,
+}
+
+
+def _backup_message_problems(general, library):
+    problems = []
+    for name, text in BACKUP_LABELS.items():
+        problems += _plain_label_problems(general, TEXT_ELEMENT, name, text)
+    text = _function_body(general, "backupText")
+    status = _function_body(general, "backupStatusText")
+    if None in (text, status):
+        return problems + ["exactly one backupText() and backupStatusText() expected"]
+    problems += _fixed_text_problems(text, "backupText")
+    problems += _fixed_text_problems(status, "backupStatusText", BACKUP_STATUS_RETURNS)
+    if _case_returns(text, "legacy-data") != f'i18n("{LEGACY_DATA_TEXT}")':
+        problems.append("backupText must map legacy-data to the fixed message")
+    plan = _single_element_top(general, TEXT_ELEMENT, "backupPlanLabel")
+    if plan is None or _pin_problems(plan, (BACKUP_PLAN_ARGS,), "backupPlanLabel"):
+        problems.append(f"backupPlanLabel must show only {BACKUP_PLAN_ARGS}")
+    stamp = _function_body(library, "shownStamp")
+    parse = _function_body(library, "parseReply")
+    if None in (stamp, parse):
+        return problems + ["exactly one shownStamp() and parseReply() expected"]
+    if _squeezed(stamp) != SHOWN_STAMP_BODY:
+        problems.append(f"shownStamp must stay {SHOWN_STAMP_BODY}")
+    problems += _pin_problems(parse, (REPLY_ERROR_CHECK,) + BACKUP_COUNT_PINS, "SettingsBackup.parseReply()")
+    return problems
+
+
+def test_backup_messages_are_fixed_text_by_code():
+    problems = _backup_message_problems(_read_code(CONFIG_GENERAL), _read_code(SETTINGS_BACKUP_JS))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (CONFIG_GENERAL, 'return i18n("Something went wrong with the backup. Nothing was changed.")', "return code"),
+    (CONFIG_GENERAL, 'return i18n("Backup saved.")', 'return i18n("Saved: %1", code)'),
+    (CONFIG_GENERAL, '        case "legacy-data":\n            return i18n("Saved sign-ins from the previous version haven\'t been moved yet. Run the installer again with --restart-plasma.")\n        default:\n            return i18n("Something went wrong',
+     '        default:\n            return i18n("Something went wrong'),
+    (CONFIG_GENERAL, "SettingsBackup.shownStamp(page.backupExportedAt))\n        case", "page.backupExportedAt)\n        case"),
+    (CONFIG_GENERAL, "            return page.backupText(page.backupState)\n", "            return page.backupState\n"),
+    (CONFIG_GENERAL, "text: page.backupText(page.backupMessage)", "text: page.backupMessage"),
+    (CONFIG_GENERAL, 'objectName: "backupMessage"\n            Layout.fillWidth: true\n            visible: text !== ""\n            wrapMode: Text.WordWrap\n            textFormat: Text.PlainText\n',
+     'objectName: "backupMessage"\n            Layout.fillWidth: true\n            visible: text !== ""\n            wrapMode: Text.WordWrap\n'),
+    (CONFIG_GENERAL, 'text: i18n("Settings left out: %1", page.backupDropped)', 'text: i18n("Settings left out: %1", page.backupMessage)'),
+    (CONFIG_GENERAL, "page.backupPlan ? page.backupPlan.applied : 0, SettingsBackup.shownStamp(page.backupExportedAt))",
+     "page.backupPlan ? page.backupPlan.settings.chatSites : 0, SettingsBackup.shownStamp(page.backupExportedAt))"),
+    (SETTINGS_BACKUP_JS, 'return validStamp(value) ? value.replace("T", " ").replace("Z", " UTC") : ""', "return value"),
+    (SETTINGS_BACKUP_JS, "&& ERRORS.indexOf(reply.error) >= 0 ? { ok: false, error: reply.error } : bad",
+     "? { ok: false, error: reply.error } : bad"),
+    (SETTINGS_BACKUP_JS, "&& isCount(reply.dropped) ? { ok: true, saved: reply.saved",
+     "? { ok: true, saved: reply.saved"),
+    (SETTINGS_BACKUP_JS, "&& isObject(reply.settings) && isCount(reply.dropped)", "&& isObject(reply.settings)"),
+    (SETTINGS_BACKUP_JS, "dropped: reply.dropped } : bad\n    }", "dropped: reply.dropped, raw: stdout } : bad\n    }"),
+])
+def test_proof_backup_message_rule_catches(path, old, new):
+    general = _mutated(path, old, new) if path == CONFIG_GENERAL else _read_code(CONFIG_GENERAL)
+    library = _mutated(path, old, new) if path == SETTINGS_BACKUP_JS else _read_code(SETTINGS_BACKUP_JS)
+    assert _backup_message_problems(general, library)

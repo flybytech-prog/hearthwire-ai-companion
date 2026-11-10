@@ -66,11 +66,11 @@ BACKUP_KEYS = (
     "chatCustomUrls",  # D74
 )
 # Never saved, never restored: sign-ins, the encrypted folder, per-site zoom,
-# schema and first-run state, and the history opt-in (D70).
+# schema and first-run state, and the history opt-in (D70) with its owed delete.
 EXCLUDED_KEYS = (
     "chatSignInStorage", "chatProfileGeneration", "chatAutoLockMinutes",
     "chatVaultUnlock", "chatSiteZoom", "configSchemaVersion",
-    "initialSetupComplete", "usageHistoryEnabled",
+    "initialSetupComplete", "usageHistoryEnabled", "usageHistoryClearOwed",
 )
 
 # Chat sites as in plasmoid/contents/ui/ChatSites.js (``sites``) and the
