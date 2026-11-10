@@ -20,7 +20,8 @@ literally and can't make the widget load an image or a link.
 
 Usage snapshots, stale readings, and rate-limit cooldowns live only in the
 Plasma widget process. They disappear when Plasma restarts. Hearthwire does not
-read local chat transcripts, and the widget does not keep usage history.
+read local chat transcripts. The widget keeps no usage history unless you turn
+on **Usage history** (off by default; see [Usage history](#usage-history)).
 
 Usage notifications (**Settings → General → Usage → Notifications**, off by
 default) are sent to Plasma's notification server through KDE's notification
@@ -57,6 +58,10 @@ an account, a plan name, a reading or an error from a provider.
 | `usageMode` | General → Display, or the popup's Left / Used | `remaining` (the default) or `used` |
 | `refreshInterval` | General → Refresh every | Seconds: 60, 300 (the default), 900, 1800 or 3600 |
 | `alertLowEnabled`, `alertLowPercent`, `alertResetEnabled` | General → Notifications | On/off and a percentage left (20 by default) |
+| `panelRing` | AI Provider Settings → Hover popup → Usage ring | `auto` (the default), `off`, or a catalog provider and reading id such as `claude.weekly` (never `extra_usage`); anything else is read as `auto` |
+| `middleClickOpens` | General → Popup → Middle-click opens | `refresh` (the default), `usage`, `ollama`, or a web chat site id such as `claude`; anything else is read as `refresh` |
+| `usageHistoryEnabled` | General → Privacy → Usage history | `true` or `false` (the default) |
+| `usageHistoryClearOwed` | Written by the widget | `true` while turning Usage history off still has to delete the stored history, else `false` (the default) |
 
 Antigravity is the one provider that requires a derived access-token cache
 because its Secret Service entry can contain only a refresh token. That cache
@@ -88,17 +93,116 @@ endpoints and the chat websites you open, plus whatever those sites load, and,
 if you use the built-in Ollama chat, requests over loopback to the Ollama
 server on this computer. No analytics or telemetry are collected.
 
-The helper has two more commands that the widget doesn't use yet: there is no
-button or setting for them in this version, so their files exist only if you
-run the commands by hand. `--usage-history` is opt-in and keeps seven days of
-hourly usage percentages in `~/.local/share/hearthwire/usage-history/`.
-`--settings-backup export` writes your widget settings, without sign-ins or
-passphrases, to `~/.config/hearthwire/settings-backup.json` (mode `0600`).
-`scripts/install.sh --uninstall-web-data` deletes the usage history but leaves
-`~/.config/hearthwire/settings-backup.json` in place.
-
 The project's `.claude/` folder (local development notes and settings) is never
 part of the repository or of the packages.
+
+## Usage history
+
+**Usage history** (Settings → General → Privacy) is off by default. Nothing
+is recorded and no file is made until you turn it on and apply.
+
+What is stored, while it is on:
+
+- For each hour, the percent used (a whole number from 0 to 100) of each
+  reading of each tracked provider, by its catalog ids, for example
+  `claude` and `weekly`. All of a provider's readings are recorded, not only
+  the ones the Usage tab shows. Extra usage (money) is never recorded.
+- The time is the start of the hour (UTC). There is one value per hour; a
+  later reading in the same hour replaces it.
+- Nothing else: no account, plan name, amount, caption, error or reset time
+  from a provider.
+- Only fresh readings count: a provider that failed, or shows an older
+  reading kept from before an error, is left out. The widget records after a
+  successful refresh, at most once every 15 minutes, and only while the Usage
+  tab is shown in settings.
+
+Where and how:
+
+- `$XDG_DATA_HOME/hearthwire/usage-history/` (usually
+  `~/.local/share/hearthwire/usage-history/`), with `history.json` (the data)
+  and `history.lock` (empty; only its lock is used).
+- The folders are mode `0700` and the files mode `0600`, so only you can read
+  them. Symlinks and other users' files are refused. The file is replaced
+  atomically and is never larger than 256 KiB.
+- The helper writes it (`--usage-history`; see
+  [Provider contracts](provider-contracts.md#usage-history-helper)). The
+  widget passes the sample in the helper's process arguments, for example
+  `claude.weekly=38`, so for a moment other local users can see those
+  percentages in the process list, unless `/proc` is mounted with `hidepid`
+  (see [Recommended system settings](#recommended-system-settings)).
+- It is one folder for your account, shared by every Hearthwire widget.
+  The widget keeps its own copy of what the helper last returned in Plasma's
+  memory, only while history is on.
+
+How long: each write drops everything older than 7 days (the current hour and
+the 168 before it).
+
+How to delete it:
+
+- Turn **Usage history** off and apply: the widget forgets what it showed and
+  deletes the whole `usage-history` folder. With several Hearthwire widgets,
+  this deletes it for all of them.
+- **Delete usage history** (next to the setting) deletes it at once and leaves
+  the setting as it is. While history stays on, recording starts again at the
+  next refresh.
+- `scripts/install.sh --uninstall-web-data` deletes it too, after the chat
+  sign-in data. If it can't, it says so and asks you to delete the folder by
+  hand. It doesn't change the setting: a widget that still has history on
+  starts recording again.
+- Removing the widget from the panel does not delete it.
+
+If a delete fails: when the helper is busy the widget tries again up to three
+times, three seconds apart. If it still fails, the Usage tab says "The usage
+history couldn't be deleted. Use Delete usage history in Settings → General →
+Privacy." The widget remembers that a delete is owed
+(`usageHistoryClearOwed`) and tries again at the next Plasma start and each
+time the popup opens; until a delete succeeds the Privacy section says "The
+usage history hasn't been deleted yet." Turning history on again cancels the
+owed delete and keeps the existing file. A delete removes the files normally;
+on copy-on-write file systems and SSDs old blocks may stay on the disk for a
+while.
+
+## Settings backup
+
+**Export** and **Import** (Settings → General → Backup) use one fixed file;
+there is no file dialog.
+
+- Where: `$XDG_CONFIG_HOME/hearthwire/settings-backup.json` (usually
+  `~/.config/hearthwire/settings-backup.json`). The folder is mode `0700`
+  (made, or tightened, by Export) and the file mode `0600`, so only you can
+  read it. It is replaced atomically. A symlink, another user's file, or a
+  folder or file other users may write to is refused and left alone.
+- What is in it: a format name, a version, the settings format (`3`), the
+  time of the export (UTC), and these settings: `trackedProviders`,
+  `providerMetrics`, `providerOrder`, `usageMode`, `refreshInterval`,
+  `tooltipShowsUsage`, `tooltipMetrics`, `usageCompact`, `usageWarnPercent`,
+  `usageCriticalPercent`, `usageNormalColor`, `usageWarnColor`,
+  `usageCriticalColor`, `alertLowEnabled`, `alertResetEnabled`,
+  `alertLowPercent`, `chatSites`, `chatDefaultSite`, `chatOllamaUrl`,
+  `chatKeepOpen`, `showUsageTab`, `showChatTab`, `popupDefaultTab`,
+  `popupSize`, `shortcutOpens`, `panelRing`, `middleClickOpens` and
+  `chatCustomUrls`. So it names the providers and chat sites you use and
+  holds your custom chat addresses in plain text, like the Plasma
+  configuration file does.
+- What is never in it: sign-ins, cookies, passphrases, the KDE Wallet key,
+  prompts, personalities, chat text or model names; and the settings
+  `chatSignInStorage`, `chatProfileGeneration`, `chatAutoLockMinutes`,
+  `chatVaultUnlock`, `chatSiteZoom`, `configSchemaVersion`,
+  `initialSetupComplete`, `usageHistoryEnabled` and `usageHistoryClearOwed`.
+  An import never turns on Usage history or Stay signed in.
+- Export takes the settings as they are now, including changes on the
+  General page not yet applied. It asks before it replaces an existing
+  backup, and never replaces one with an empty one. The settings go to the
+  helper as hexadecimal digits in its process arguments, which anyone can
+  decode: for a moment other local users can see them in the process list,
+  unless `/proc` is mounted with `hidepid`. That is the same information the
+  Plasma configuration file (often mode `0644`) already shows them.
+- Import reads the file; the helper and then the widget check every value,
+  and a value the widget would not store is left out ("Settings left out:
+  N"). After **Replace** the values fill in the settings pages; nothing is
+  saved until you press **Apply** on the General page.
+- The file stays until you delete it. `scripts/install.sh
+  --uninstall-web-data` leaves it in place, and so does removing the widget.
 
 ## Chat tab
 
@@ -340,7 +444,7 @@ What Encrypted mode does not protect against:
 | Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them | Same; Qt WebEngine's own history files, if any, are inside the encrypted folder |
 | Passphrase | Not used | Never stored; typed into kdialog, read by gocryptfs |
 | Passwords and form autofill | Not supported by Qt WebEngine; nothing is saved | Same |
-| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the Ollama address (`chatOllamaUrl`), the zoom of each site and of the Ollama chat, set with the zoom keys or Ctrl+scroll (`chatSiteZoom`, for example `{"claude":1.25}`; sites at 100% are left out), the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `chatKeepOpen`, `chatAutoLockMinutes`, `shortcutOpens`, and
+| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the Ollama address (`chatOllamaUrl`), the zoom of each site and of the Ollama chat, set with the zoom keys or Ctrl+scroll (`chatSiteZoom`, for example `{"claude":1.25}`; sites at 100% are left out), the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `chatKeepOpen`, `chatAutoLockMinutes`, `shortcutOpens`, `middleClickOpens`, and
 `chatVaultUnlock`, Passphrase or KDE Wallet), and the usage settings in the table near the top of this page, in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
 | Ollama conversation | Plasma memory only (and the Ollama server, see below); dropped on Clear conversation, when you turn Ollama off in settings, or on Plasma restart; kept while the popup is closed or another site is shown | Same; never in the encrypted folder |
 | Prompt library | This session's prompts and personalities in Plasma memory only | Saved in the encrypted folder (`library/`); in Plasma memory only while unlocked; never in the configuration |
@@ -356,12 +460,13 @@ The configuration file is readable by other users on many systems (mode
 can log in to this computer.
 
 Apart from your settings and approved downloads, Hearthwire writes to disk
-only in three places: the Antigravity token cache described above; only if
+only in these places: the Antigravity token cache described above; only if
 you choose Encrypted, the encrypted folder (written by Qt WebEngine through
-gocryptfs) and, with Unlock with KDE Wallet, its key slot next to it; and, only
+gocryptfs) and, with Unlock with KDE Wallet, its key slot next to it; only if
+you turn on Usage history, the [usage history](#usage-history) folder; only
+when you press Export, the [settings backup](#settings-backup) file; and, only
 after the one-time upgrade from the previous name, a backup of Plasma's panel
-layout (see the last section of this page). The two helper commands described
-near the top of this page add their files only if you run them by hand.
+layout (see the last section of this page).
 
 The widget never runs scripts in, reads from, or injects anything into the
 pages, sets no `QTWEBENGINE_*` variables or Chromium flags, and does not pass
@@ -369,7 +474,9 @@ chat data to the Python helper, process arguments, or the environment. For
 Stay signed in the widget runs the helper with fixed words and numbers only
 (see [Provider contracts](provider-contracts.md#stay-signed-in-helper)); its
 replies are short codes, never paths. For the Ollama chat and Local web UI it
-runs the helper with the port number only ([port owner helper](provider-contracts.md#port-owner-helper)). Load errors show generic text and are
+runs the helper with the port number only ([port owner helper](provider-contracts.md#port-owner-helper)). A settings export passes
+your settings, custom addresses included, to the helper (see
+[Settings backup](#settings-backup)). Load errors show generic text and are
 not logged. The system file dialog may remember recently used folders, as it
 does for any application.
 
@@ -640,7 +747,8 @@ It does not protect against:
 - swap, hibernation, core dumps, or clipboard managers, unless configured as
   below;
 - other local users seeing, in the process list, the path of a file dropped
-  on the Ollama chat, unless `/proc` is mounted with `hidepid` as below.
+  on the Ollama chat (and, with the features on, usage history percentages
+  and exported settings), unless `/proc` is mounted with `hidepid` as below.
 
 ### Recommended system settings
 
@@ -654,8 +762,9 @@ It does not protect against:
   engine.
 - Use full-disk encryption, or at least encrypted `/home` and encrypted
   swap. Without it, a stolen or lost computer gives away the provider
-  credential files, the Antigravity token cache and your Plasma settings,
-  and memory paged out to disk (or a hibernation image) is readable later.
+  credential files, the Antigravity token cache, your Plasma settings, the
+  usage history and the settings backup (if you have them), and memory paged
+  out to disk (or a hibernation image) is readable later.
   The encrypted folder for saved sign-ins stays protected either way.
 - Disable stored core dumps: for systemd-coredump, create
   `/etc/systemd/coredump.conf.d/50-no-storage.conf` with `[Coredump]` and
@@ -671,7 +780,8 @@ It does not protect against:
   open page, including your sessions, to local connections.
 - On a computer shared with other users, mounting `/proc` with
   `hidepid=invisible` hides your processes, and with them the path of a
-  dropped file, from those users. This needs root and is your choice; some
+  dropped file, the usage history percentages and the exported settings,
+  from those users. This needs root and is your choice; some
   system services expect to see every process, so check your distribution's
   notes first.
 

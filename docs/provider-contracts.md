@@ -357,7 +357,7 @@ paragraph, bullet (`-`, `*`, `+`, nested to depth 2), numbered (`1.`) and
 code (```` ``` ```` fences, unterminated = code to the end) blocks, each with
 spans of plain text marked bold (`**`/`__`), italic (`*`/`_`) or inline code
 (`` ` ``). Unclosed markers stay literal; links, autolinks, images, HTML and
-entities and tables are never recognised. A block over 300 words (or 4000
+entities and tables are never recognized. A block over 300 words (or 4000
 characters) is one plain span with its markers left in. Every block's text
 goes through `revealHidden` first.
 
@@ -848,9 +848,9 @@ the milliseconds between the check and the request; see `docs/privacy.md`.
 
 ## Usage history helper
 
-Opt-in (plan D70), and only a helper command in this version: no widget code
-runs it and there is no setting for it yet, so nothing is recorded unless the
-command is run by hand (`src/hearthwire/core/usagehistory.py`). No network, no
+Opt-in (plan D70): the widget runs it only while **Settings → General →
+Privacy → Usage history** (`usageHistoryEnabled`, off by default) is on, and
+to delete the history (`src/hearthwire/core/usagehistory.py`). No network, no
 credentials, no provider data other than percentages.
 
 - `$XDG_DATA_HOME` (when absolute, else `~/.local/share`)`/hearthwire/usage-history/`
@@ -892,12 +892,46 @@ installer), `os-error` (anything else). Replies never carry a path or text.
 `scripts/install.sh --uninstall-web-data` also runs `--usage-history clear`
 once the chat sign-in data is gone.
 
+### How the plasmoid uses it
+
+`UsageHistory.historyCommand` builds
+`env HEARTHWIRE_RUN=<run> python3 -P -m hearthwire --usage-history <op>`, plus
+`--sample <checked sample>` for `record`; anything odd gives no command. Steps
+run one at a time from a queue, so a `clear` never overtakes a running
+`record`.
+
+- `read` once per Plasma session, when history is on and the Usage tab is
+  shown.
+- `record` after a successful usage refresh, at most once every 15 minutes
+  (`RECORD_MIN_GAP_MS`), while history is on and the Usage tab is shown. The
+  sample holds every catalog reading (not `extra_usage`) of each tracked
+  provider whose status is `ok` and that is not a kept stale reading, with
+  `used_percent` rounded and clamped to 0..100. An empty sample records
+  nothing.
+- `clear` when history is turned off. The widget first sets
+  `usageHistoryClearOwed` to true, drops what it showed and queued, and sets
+  it back to false only after `{"ok":true}`. `busy` is retried up to three
+  times, three seconds apart (`CLEAR_MAX_TRIES`, `CLEAR_RETRY_MS`); any other
+  failure, or the last `busy`, shows a fixed notice in the Usage tab. While
+  the flag is set and history is off, the widget runs `clear` again at
+  Plasma start and each time the popup opens. Turning history on clears the
+  flag. **Delete usage history** on the settings page runs its own `clear`
+  and shows a fixed result text.
+
+`UsageHistory.parseReply` checks a whole reply: exit code 0, at most
+257 KiB of stdout, exactly the keys above, `history_version` 1,
+`bucket_seconds` 3600, catalog pairs only, none twice, points ascending hour
+buckets inside the last 7 days with `used` 0..100, and a known error code.
+Anything else is `invalid` and the shown series are dropped. Only
+`legacy-data` has its own notice; the helper's text is never shown. Each
+reading's sparkline (`usageSparkline`, standard layout only) is drawn from
+these points.
+
 ## Settings backup helper
 
 Saves the widget's settings to one fixed file and reads them back (plan D71;
-no file dialog; `src/hearthwire/core/settingsbackup.py`). Only a helper command
-in this version: the widget has no backup controls yet and doesn't run it. No
-network, no credentials.
+no file dialog; `src/hearthwire/core/settingsbackup.py`). The widget runs it
+from **Settings → General → Backup**. No network, no credentials.
 
 - `$XDG_CONFIG_HOME` (when absolute, else `~/.config`)`/hearthwire/settings-backup.json`.
   The folder is `0700` and made only by `export` (which also tightens a safe
@@ -923,7 +957,8 @@ file. JSON with NaN, Infinity, overflowing numbers or duplicate keys is
 refused. Only `BACKUP_KEYS` are kept, in that order; unknown keys,
 `EXCLUDED_KEYS` (`chatSignInStorage`, `chatProfileGeneration`,
 `chatAutoLockMinutes`, `chatVaultUnlock`, `chatSiteZoom`,
-`configSchemaVersion`, `initialSetupComplete`, `usageHistoryEnabled`) and
+`configSchemaVersion`, `initialSetupComplete`, `usageHistoryEnabled`,
+`usageHistoryClearOwed`) and
 known keys with a value the widget would not store are dropped and counted
 in `dropped`. Strings hold at most 4096 characters (`chatCustomUrls` 32768)
 and no C0/C1 controls or lone surrogates; a boolean is never an integer.
@@ -950,8 +985,8 @@ and no C0/C1 controls or lone surrogates; a boolean is never an integer.
 | `middleClickOpens` | `refresh`, `usage`, `ollama` or a web site id |
 | `chatCustomUrls` | JSON object `{webSiteId: address}` (D74); every address non-empty and valid under the rules of `ChatSites.validateCustomUrl` (https only, http only for Local and only to loopback, at most 2048 UTF-16 units, no whitespace or control characters, no user info, no local address except for Local). One bad entry drops the whole key |
 
-`panelRing` and `middleClickOpens` are accepted ahead of the widget settings
-that will use them; they are not in `main.xml` yet.
+`BACKUP_KEYS` and `EXCLUDED_KEYS` together are every `main.xml` key, with no
+overlap (`tests/test_settings_backup_sync.py`).
 
 The helper is stricter than the widget about custom addresses: it rejects
 every C0 and C1 control character in them, while
@@ -970,6 +1005,34 @@ be), `bad-data` (export input), `symlink`, `not-owned`, `unsafe-mode` (the
 folder or file is group- or other-writable), `legacy-data` (`export` only: the
 previous version's data still waits for the installer), `os-error`. Replies
 never carry a path.
+
+### How the plasmoid uses it
+
+`SettingsBackup.backupCommand` builds
+`env HEARTHWIRE_RUN=<run> python3 -P -m hearthwire --settings-backup <op>`,
+plus `--data <hex>` for `export`; anything odd gives no command. One step
+runs at a time.
+
+- `status` when the General page opens and after each export, for the
+  "Last backup" line.
+- `export` on **Export**, and after an inline **Replace** confirmation when
+  a backup exists (or its status isn't known to be `absent`).
+  `SettingsBackup.exportPayload` sends only `BACKUP_KEYS`, from the General
+  page's current `cfg_` values (so unapplied changes there count). Hex
+  longer than 130000 characters is not sent and shows `too-large`.
+- `import` on **Import**. `SettingsBackup.importPlan` checks every value
+  again with the widget's own rules (the catalog, `ChatSites.siteIds`,
+  `ChatSites.validateCustomUrl`, `OllamaChat.checkedAddress` and the ring
+  pairs), drops what fails, and adds that to the helper's `dropped`. It also
+  drops both levels when the warning level isn't below the critical one, and
+  both tab switches when they would hide both tabs. Only
+  after an inline **Replace** does `applyBackup` set the page's `cfg_` values
+  for backup keys (never an excluded key); Apply on the General page saves
+  them. A plan with nothing to apply shows a fixed message instead.
+
+`SettingsBackup.parseReply` accepts exit code 0, at most 65 KiB of stdout,
+exactly the keys of each reply above and a known error code; anything else
+is `bad-reply`. Every code is shown as fixed text, never the helper's own.
 
 ## Upgrading from Hearthside
 

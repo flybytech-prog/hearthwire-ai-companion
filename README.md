@@ -121,7 +121,13 @@ plasmashell's memory.
   provider shows (all of them by default) and the order of the providers.
 - **Updated N min ago** at the top of the tab, with a **Refresh** button.
   The button is there also while the first reading loads or after it failed,
-  and is greyed out while a refresh is running.
+  and is grayed out while a refresh is running.
+- **Next reset**: a line under it names the soonest reset among the readings
+  the tab shows, such as "Next reset: Claude Code Session in 2h 10m".
+- **Accent strips**: a thin strip in a color of its own runs along the
+  leading edge of each provider's section, so providers are easy to tell
+  apart. It is decoration only, with a light and a dark variant that follow
+  your theme.
 - **Compact layout** (optional): one slim bar per reading with its name,
   value and a short time until reset (such as Weekly, 38%, 2d 4h), without
   plan names or captions; errors still show, on one line.
@@ -129,17 +135,32 @@ plasmashell's memory.
   color from 60% used (40% left) and to its critical color from 85% used
   (15% left). Both levels can be changed in steps of 5%, and each of the
   three colors can be set with a color box (a reset button goes back to
-  the default).
+  the default). A preview next to the color boxes shows a sample bar and dot
+  for each level in the colors you picked, before you apply them.
 - **Hover popup**: hover over the panel icon for a short summary: each
   provider's name in bold, then one reading per line, such as **Session**
-  62% left and **Weekly** 80% left. It shows the Usage tab's readings, or
+  62% left and **Weekly** 80% left, each with a dot in its level color
+  (money and credits get no dot). It shows the Usage tab's readings, or
   readings you choose per provider. Claude Code has no daily limit: its
   **Session** is the 5-hour window and **Weekly** the 7-day one.
+- **Usage ring** (on by default): a ring around the panel icon shows one
+  reading in the level colors. **Automatic** uses the first reading of the
+  first provider in the hover popup that has data; you can pick another
+  reading or turn the ring off. With Left the ring drains as usage grows,
+  with Used it fills. It is dimmed while it shows an old reading, and hidden
+  while the reading has no percentage (for example credits) or the Usage tab
+  is hidden.
+- **Usage history** (optional, off by default): when you turn it on, the
+  widget keeps 7 days of each reading's percent used on this computer and
+  draws a small graph under each bar in the standard layout (not in Compact).
+  Hours without a reading leave a gap. Turning it off deletes it. See
+  [docs/privacy.md](docs/privacy.md#usage-history).
 - Detects installed tools through the Plasma login environment, CLI names, and
   Linux/XDG data locations, and contacts only providers that are both
   installed and tracked.
 - Keeps successful readings in Plasma session memory when a temporary or
-  rate-limit error occurs; the widget never writes usage history to disk.
+  rate-limit error occurs. Usage is written to disk only if you turn on
+  **Usage history**.
 - **Notifications** (optional, off by default): a notification when a plan
   drops to a level of usage left you choose (5% to 50%), and when such a plan
   resets.
@@ -150,7 +171,8 @@ plasmashell's memory.
 ### Settings
 
 Plasma's standard configuration dialog with three pages of its own —
-**General** (popup, usage display, refresh and notifications, privacy),
+**General** (popup, usage display, refresh and notifications, privacy,
+backup),
 **AI Provider Settings** (providers and their order, the Usage tab's
 readings, layout and colors, and the hover popup) and **Chat** (sites and
 addresses) — plus Plasma's **Keyboard Shortcuts** and **About**. Longer explanations sit behind the small **?** buttons. Hearthwire
@@ -170,7 +192,9 @@ starts with Plasma while it remains on a panel.
   cloud models are hidden because they send your messages to ollama.com.
   Enter sends, Shift+Enter adds a line, Esc or **Stop** ends a reply, each
   reply and code block has a Copy button, and **Clear conversation** drops it
-  from memory and asks Ollama to unload the models it used. **Regenerate**
+  from memory and asks Ollama to unload the models it used. Your messages
+  sit on the right in a bubble of your theme's highlight color, replies on
+  the left in a faint one. **Regenerate**
   (on the last reply) asks again, **Edit** (on your last message) puts it back
   into the message box. Replies show headings, lists, bold, italic and inline
   code, with fenced code blocks in a monospace font, all as plain text; links,
@@ -240,7 +264,12 @@ starts with Plasma while it remains on a panel.
   Plasma's own **Keyboard Shortcuts** page; **Keyboard shortcut opens**
   chooses what it opens: the popup as when clicking the icon, Chat, the
   Ollama message box (ready to type; the normal popup while Ollama is off) or
-  Usage. Pressing the shortcut again closes the popup.
+  Usage. Pressing the shortcut again closes the popup. **Middle-click
+  opens** is a mouse action, not a shortcut: a middle-click on the panel icon
+  refreshes usage (the default), or opens the Usage tab, the Ollama message
+  box or a chat site. If the popup already shows that tab or site, it
+  closes; while that tab is hidden or that site is off, a middle-click acts
+  as a normal click.
 - **Usage**: **Display** Left or Used (for the Usage tab and the hover
   popup), **Refresh every**, and **Notifications**: **Notify when
   a plan drops below** a percentage **left** (20% by default, whatever
@@ -249,9 +278,23 @@ starts with Plasma while it remains on a panel.
   tab is shown; a plan already that low when Plasma starts doesn't notify.
   Mute or adjust them under **System Settings → Notifications →
   Hearthwire**.
-- **Privacy**: **Stay signed in** (Off or Encrypted), **Lock automatically**,
-  and under **Show folder actions** **Change passphrase…** and **Delete
-  encrypted folder…**.
+- **Privacy**: **Usage history** (off by default; keeps 7 days of usage for
+  the Usage tab's graphs) with a **Delete usage history** button, **Stay
+  signed in** (Off or Encrypted), **Lock automatically**, and under **Show
+  folder actions** **Change passphrase…** and **Delete encrypted folder…**.
+  Turning Usage history off and applying deletes the stored history; if
+  that fails, the Usage tab says so and the widget tries again later.
+- **Backup**: **Export** saves your settings to one fixed file,
+  `~/.config/hearthwire/settings-backup.json` (only you can read it), and
+  asks first before it replaces an earlier backup. **Import** reads that
+  file back and, after you choose **Replace**, fills in the settings;
+  nothing is saved until you press **Apply** on the General page. Export
+  takes the settings as they are now, including changes on the General page
+  you haven't applied yet. The backup holds the usage, popup and
+  chat site settings, including custom chat addresses. It never holds
+  sign-ins or anything about the encrypted folder (Stay signed in, Lock
+  automatically, Unlock with), the zoom of each site, or the Usage history
+  choice. See [docs/privacy.md](docs/privacy.md#settings-backup).
 
 The hover popup's settings are under **Settings → AI Provider Settings**
 (see below).
@@ -265,7 +308,9 @@ The hover popup's settings are under **Settings → AI Provider Settings**
   defaults read 40% and 15%); when one pick passes the other level, that
   other level moves so the critical one stays further along. The reset button
   next to a color box goes back to the default color; a Critical box left
-  empty uses your Warning color, if you chose one. The **Refresh
+  empty uses your Warning color, if you chose one. **Preview** shows a
+  sample bar and dot for Normal, Warning and Critical in the chosen colors,
+  before you apply them. The **Refresh
   status** button checks the tracked providers once.
 - **Providers and readings**: one row per provider, in the order the Usage
   tab, the hover popup and the notifications list them. The **Move up** and
@@ -282,6 +327,12 @@ The hover popup's settings are under **Settings → AI Provider Settings**
   readings are ticked), or untick it to choose each tracked provider's own
   readings, for example Claude Code's Session, its 5-hour window, next to
   Weekly. Percentages say "left" or "used" as **General → Display** shows.
+- **Usage ring** (in the Hover popup section, next to the panel icon
+  choice): **Automatic** (the default), **Off**, or one reading such as
+  "Claude Code: Weekly". Automatic follows the hover popup's first provider
+  with data and its first reading. Extra usage can't be chosen, since money
+  has no limit to draw. The choice is grayed out while the Usage tab is
+  hidden.
 
 Usage notifications follow the Usage tab's ticked readings, or each
 provider's main reading while all of its readings are ticked.
@@ -294,7 +345,8 @@ shows the same as before, and the Usage tab starts with every reading shown.
 Fresh installs open on Chat, show both tabs at Normal size, track all
 providers in catalog order with every reading shown in the standard layout,
 display usage left, refresh every five minutes, color bars from 60% and 85%
-used, and send no notifications.
+used, show the Automatic usage ring, refresh usage on a middle-click, keep no
+usage history, and send no notifications.
 
 ## Configure usage providers
 
@@ -458,9 +510,15 @@ The JSON v2 response includes the provider catalog, detected provider IDs,
 status/failure classification, available metrics, quota windows, billing
 usage, reset/retry times, and no credential data.
 
+The widget also runs the helper for the usage history (`--usage-history`)
+and the settings backup (`--settings-backup`); see
+[Provider contracts](docs/provider-contracts.md#usage-history-helper).
+
 ## Requirements
 
-- KDE Plasma 6 and Qt 6
+- KDE Plasma 6 and Qt 6, with the Qt Quick Shapes QML module for the usage
+  ring (Arch: `qt6-declarative`; Fedora: usually `qt6-qtdeclarative`;
+  Debian/Ubuntu: `qml6-module-qtquick-shapes`; package names may vary)
 - Python 3.11 or newer; standard library only
 - `secret-tool` when a provider stores its session in Linux Secret Service
 - For the Chat tab only: Qt WebEngine 6.8 or newer with its QML module
@@ -482,7 +540,11 @@ usage, reset/retry times, and no credential data.
 ## Privacy
 
 A usage refresh prints or caches no tokens, credential fingerprints, raw API
-responses, local transcripts, or usage history. Antigravity's derived access-token cache
+responses or local transcripts. Usage history is kept only if you turn it on:
+then the percent used of each reading, one value per hour for 7 days, in
+`~/.local/share/hearthwire/usage-history/` (only you can read it). A settings
+backup exists only if you export one; it names the chat sites and custom
+addresses you use, but never holds sign-ins. Antigravity's derived access-token cache
 is the only authentication cache created by Hearthwire; it is stored with mode
 `0600` under `$XDG_CACHE_HOME/hearthwire` and keyed to a one-way refresh-token
 fingerprint.
