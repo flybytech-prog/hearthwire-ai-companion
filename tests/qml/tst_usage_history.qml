@@ -206,6 +206,17 @@ TestCase {
         rejected(point(many), "more hours than seven days hold")
     }
 
+    function test_clearNext() {
+        compare(UsageHistory.clearNext({ok: true}, 1), "done")
+        compare(UsageHistory.clearNext({ok: false, error: "busy"}, 1), "retry")
+        compare(UsageHistory.clearNext({ok: false, error: "busy"}, UsageHistory.CLEAR_MAX_TRIES - 1), "retry")
+        compare(UsageHistory.clearNext({ok: false, error: "busy"}, UsageHistory.CLEAR_MAX_TRIES), "failed", "bounded")
+        compare(UsageHistory.clearNext({ok: false, error: "os-error"}, 1), "failed")
+        compare(UsageHistory.clearNext({ok: false, error: "invalid"}, 1), "failed", "a malformed reply")
+        compare(UsageHistory.clearNext(null, 1), "failed")
+        compare(UsageHistory.CLEAR_MAX_TRIES, 3)
+    }
+
     function test_acceptsTheOldestBucket() {
         verify(parse(point([[now - 168 * hour, 1]])).ok)
     }

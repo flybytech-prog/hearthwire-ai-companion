@@ -270,7 +270,12 @@ PlasmoidItem {
     property bool historyReadDone: false
     // The last reply's error code; only legacy-data is shown.
     property string historyError: ""
-    readonly property string historyNotice: root.historyError === "legacy-data"
+    // History was turned off but the helper couldn't delete it.
+    property bool historyClearFailed: false
+    property int historyClearTries: 0
+    readonly property string historyNotice: root.historyClearFailed
+        ? i18n("The usage history couldn't be deleted. Use Delete usage history in Settings → General → Privacy.")
+        : root.historyError === "legacy-data"
         ? i18n("Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.") : ""
     // Helper steps, one at a time: a clear never overtakes a running record.
     property var historyQueue: []
@@ -425,9 +430,10 @@ PlasmoidItem {
     function historyFinish(op, exitCode, stdout) {
         root.historyOp = ""
         root.historySourceName = ""
-        // A clear's reply changes nothing shown, and history turned off
-        // meanwhile stays off.
-        if (op !== "clear" && root.usageHistoryEnabled) {
+        if (op === "clear") {
+            root.historyClearFinished(UsageHistory.parseReply(op, exitCode, stdout, Catalog.providers))
+        } else if (root.usageHistoryEnabled) {
+            // History turned off meanwhile stays off.
             var reply = UsageHistory.parseReply(op, exitCode, stdout, Catalog.providers)
             if (reply.ok) {
                 root.historySeries = reply.series
@@ -440,6 +446,34 @@ PlasmoidItem {
             }
         }
         Qt.callLater(root.historyNext)
+    }
+
+    // Turned on again meanwhile: the data is wanted, nothing more to do.
+    function historyClearFinished(reply) {
+        if (root.usageHistoryEnabled)
+            return
+        root.historyClearTries += 1
+        var next = UsageHistory.clearNext(reply, root.historyClearTries)
+        if (next === "done") {
+            root.historyClearFailed = false
+            root.historyClearTries = 0
+            Plasmoid.configuration.usageHistoryClearOwed = false
+        } else if (next === "retry") {
+            historyClearTimer.start()
+        } else {
+            root.historyClearFailed = true
+        }
+    }
+
+    // A clear left over from an earlier session or an earlier failure: once
+    // at start and each time the popup opens, never while one is on its way.
+    function historyPayOwed() {
+        if (root.usageHistoryEnabled || Plasmoid.configuration.usageHistoryClearOwed !== true
+                || root.historyOp === "clear" || historyClearTimer.running
+                || root.historyQueue.some(function (job) { return job.op === "clear" }))
+            return
+        root.historyClearTries = 0
+        root.historyRequest("clear")
     }
 
     // The first read of this session, once history is on and usage is shown.
@@ -470,10 +504,17 @@ PlasmoidItem {
     // Off: everything shown goes at once, queued steps are dropped, and the
     // helper deletes the file after any step still running.
     onUsageHistoryEnabledChanged: {
+        root.historyClearFailed = false
+        root.historyClearTries = 0
+        historyClearTimer.stop()
         if (root.usageHistoryEnabled) {
+            if (Plasmoid.configuration.usageHistoryClearOwed === true)
+                Plasmoid.configuration.usageHistoryClearOwed = false
             root.historyStart()
             return
         }
+        // Stored first, so a restart before the helper answers still owes it.
+        Plasmoid.configuration.usageHistoryClearOwed = true
         root.historySeries = ({})
         root.historyNow = 0
         root.historyError = ""
@@ -1261,6 +1302,13 @@ PlasmoidItem {
         }
     }
 
+    Timer {
+        id: historyClearTimer
+        interval: UsageHistory.CLEAR_RETRY_MS
+        repeat: false
+        onTriggered: root.historyRequest("clear")
+    }
+
     // Prompt library jobs; only stdout's checked fields are used.
     Plasma5Support.DataSource {
         id: librarySource
@@ -1402,6 +1450,7 @@ PlasmoidItem {
         root.droppedRun = ChatStorage.firstRun(Date.now(), Math.random())
         root.historyRun = ChatStorage.firstRun(Date.now(), Math.random())
         root.historyStart()
+        root.historyPayOwed()
         root.chatZoom = SettingsLogic.parseZoomMap(Plasmoid.configuration.chatSiteZoom, root.chatZoomIds)
         // Plasma start, Unlock with KDE Wallet: open the folder silently when
         // the wallet is already open (the helper never prompts here). The
@@ -1441,6 +1490,7 @@ PlasmoidItem {
     onExpandedChanged: {
         if (root.expanded) {
             root.refresh()
+            root.historyPayOwed()
             if (root.chatShown && root.chatStorageMode === "encrypted" && root.chatVaultState !== "")
                 root.chatEnqueue(["status"])
         }
@@ -1483,7 +1533,7 @@ PlasmoidItem {
         if (!root.usageShown || !root.tooltipShowsUsage)
             return ""
         if (root.lastError !== "" && !root.hasData)
-            return i18n("Error: %1", root.lastError)
+            return i18n("Error: %1", UsageLogic.shownText(root.lastError))
         if (!root.hasData)
             return i18n("Loading…")
         if (root.tooltipSections.length === 0)

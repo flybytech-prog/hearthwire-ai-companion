@@ -8,6 +8,9 @@ import org.kde.plasma.plasma5support as Plasma5Support
 import "ChatStorage.js" as ChatStorage
 import "ChatSites.js" as ChatSites
 import "UsageHistory.js" as UsageHistory
+import "SettingsBackup.js" as SettingsBackup
+import "UsageLogic.js" as UsageLogic
+import "OllamaChat.js" as OllamaChat
 import "SettingsLogic.js" as SettingsLogic
 import "ProviderCatalog.js" as Catalog
 
@@ -95,6 +98,10 @@ KCM.SimpleKCM {
     property string cfg_middleClickOpensDefault: "refresh"
     property bool cfg_usageHistoryEnabled: false
     property bool cfg_usageHistoryEnabledDefault: false
+    // Written only by main.qml; kept in step so Apply never writes back an
+    // old value.
+    property bool cfg_usageHistoryClearOwed: false
+    property bool cfg_usageHistoryClearOwedDefault: false
 
     // Page-local only; the folder actions always start collapsed.
     property bool showFolderActions: false
@@ -300,6 +307,210 @@ KCM.SimpleKCM {
         }
     }
 
+    // --- Backup: one fixed file, chosen by the helper ----------------------
+
+    // "" checking, exists, absent, or an error code.
+    property string backupState: ""
+    property string backupExportedAt: ""
+    property string backupOp: ""
+    property string backupSourceName: ""
+    property int backupRun: 0
+    // The last result as a code; backupText() has its fixed text.
+    property string backupMessage: ""
+    property int backupDropped: 0
+    property bool confirmingExport: false
+    property bool confirmingImport: false
+    // What Replace would apply (SettingsBackup.importPlan), until then.
+    property var backupPlan: null
+
+    function backupSettings() {
+        return {
+            trackedProviders: page.cfg_trackedProviders,
+            providerMetrics: page.cfg_providerMetrics,
+            providerOrder: page.cfg_providerOrder,
+            usageMode: page.cfg_usageMode,
+            refreshInterval: page.cfg_refreshInterval,
+            tooltipShowsUsage: page.cfg_tooltipShowsUsage,
+            tooltipMetrics: page.cfg_tooltipMetrics,
+            usageCompact: page.cfg_usageCompact,
+            usageWarnPercent: page.cfg_usageWarnPercent,
+            usageCriticalPercent: page.cfg_usageCriticalPercent,
+            usageNormalColor: page.cfg_usageNormalColor,
+            usageWarnColor: page.cfg_usageWarnColor,
+            usageCriticalColor: page.cfg_usageCriticalColor,
+            alertLowEnabled: page.cfg_alertLowEnabled,
+            alertResetEnabled: page.cfg_alertResetEnabled,
+            alertLowPercent: page.cfg_alertLowPercent,
+            chatSites: page.cfg_chatSites,
+            chatDefaultSite: page.cfg_chatDefaultSite,
+            chatOllamaUrl: page.cfg_chatOllamaUrl,
+            chatKeepOpen: page.cfg_chatKeepOpen,
+            showUsageTab: page.cfg_showUsageTab,
+            showChatTab: page.cfg_showChatTab,
+            popupDefaultTab: page.cfg_popupDefaultTab,
+            popupSize: page.cfg_popupSize,
+            shortcutOpens: page.cfg_shortcutOpens,
+            panelRing: page.cfg_panelRing,
+            middleClickOpens: page.cfg_middleClickOpens,
+            chatCustomUrls: page.cfg_chatCustomUrls
+        }
+    }
+
+    function runBackup(op, data) {
+        if (page.backupOp !== "")
+            return
+        page.backupRun = ChatStorage.nextRun(page.backupRun)
+        var command = SettingsBackup.backupCommand(op, page.backupRun, data)
+        if (command === "") {
+            page.backupMessage = "too-large"
+            return
+        }
+        page.backupOp = op
+        page.backupSourceName = command
+        backupSource.connectSource(command)
+    }
+
+    function requestExport() {
+        page.backupMessage = ""
+        // Only a backup known to be absent can't be overwritten.
+        if (page.backupState === "absent")
+            page.exportBackup()
+        else
+            page.confirmingExport = true
+    }
+
+    function exportBackup() {
+        page.confirmingExport = false
+        // Empty when too long for one argument: runBackup reports it.
+        page.runBackup("export", SettingsBackup.exportPayload(page.backupSettings()))
+    }
+
+    function requestImport() {
+        page.backupMessage = ""
+        page.confirmingImport = false
+        page.backupPlan = null
+        page.runBackup("import")
+    }
+
+    function finishBackup(op, reply) {
+        page.backupOp = ""
+        page.backupSourceName = ""
+        if (op === "status") {
+            page.backupState = reply.ok ? (reply.exists ? "exists" : "absent") : reply.error
+            page.backupExportedAt = reply.ok ? reply.exportedAt : ""
+            return
+        }
+        if (!reply.ok) {
+            page.backupMessage = reply.error
+            return
+        }
+        if (op === "export") {
+            page.backupMessage = "saved"
+            page.backupDropped = reply.dropped
+            page.runBackup("status")
+            return
+        }
+        var plan = SettingsBackup.importPlan(reply.settings, reply.dropped, {
+            providers: Catalog.providers,
+            webSiteIds: ChatSites.siteIds(),
+            ringPairs: UsageLogic.ringOptions(Catalog.providers).map(function (option) { return option.value }),
+            validateCustomUrl: ChatSites.validateCustomUrl,
+            ollamaAddress: OllamaChat.checkedAddress
+        })
+        page.backupDropped = plan.dropped
+        if (plan.applied === 0) {
+            page.backupMessage = "nothing"
+            return
+        }
+        page.backupPlan = plan
+        page.backupExportedAt = reply.exportedAt
+        page.confirmingImport = true
+    }
+
+    // Replace: sets the settings pages' values; Apply saves them. Only keys
+    // that are in a backup are ever assigned here.
+    function applyBackup() {
+        var plan = page.backupPlan
+        page.confirmingImport = false
+        page.backupPlan = null
+        if (!plan)
+            return
+        var values = plan.settings
+        if (values.trackedProviders !== undefined) page.cfg_trackedProviders = values.trackedProviders
+        if (values.providerMetrics !== undefined) page.cfg_providerMetrics = values.providerMetrics
+        if (values.providerOrder !== undefined) page.cfg_providerOrder = values.providerOrder
+        if (values.usageMode !== undefined) page.cfg_usageMode = values.usageMode
+        if (values.refreshInterval !== undefined) page.cfg_refreshInterval = values.refreshInterval
+        if (values.tooltipShowsUsage !== undefined) page.cfg_tooltipShowsUsage = values.tooltipShowsUsage
+        if (values.tooltipMetrics !== undefined) page.cfg_tooltipMetrics = values.tooltipMetrics
+        if (values.usageCompact !== undefined) page.cfg_usageCompact = values.usageCompact
+        if (values.usageWarnPercent !== undefined) page.cfg_usageWarnPercent = values.usageWarnPercent
+        if (values.usageCriticalPercent !== undefined) page.cfg_usageCriticalPercent = values.usageCriticalPercent
+        if (values.usageNormalColor !== undefined) page.cfg_usageNormalColor = values.usageNormalColor
+        if (values.usageWarnColor !== undefined) page.cfg_usageWarnColor = values.usageWarnColor
+        if (values.usageCriticalColor !== undefined) page.cfg_usageCriticalColor = values.usageCriticalColor
+        if (values.alertLowEnabled !== undefined) page.cfg_alertLowEnabled = values.alertLowEnabled
+        if (values.alertResetEnabled !== undefined) page.cfg_alertResetEnabled = values.alertResetEnabled
+        if (values.alertLowPercent !== undefined) page.cfg_alertLowPercent = values.alertLowPercent
+        if (values.chatSites !== undefined) page.cfg_chatSites = values.chatSites
+        if (values.chatDefaultSite !== undefined) page.cfg_chatDefaultSite = values.chatDefaultSite
+        if (values.chatOllamaUrl !== undefined) page.cfg_chatOllamaUrl = values.chatOllamaUrl
+        if (values.chatKeepOpen !== undefined) page.cfg_chatKeepOpen = values.chatKeepOpen
+        if (values.showUsageTab !== undefined) page.cfg_showUsageTab = values.showUsageTab
+        if (values.showChatTab !== undefined) page.cfg_showChatTab = values.showChatTab
+        if (values.popupDefaultTab !== undefined) page.cfg_popupDefaultTab = values.popupDefaultTab
+        if (values.popupSize !== undefined) page.cfg_popupSize = values.popupSize
+        if (values.shortcutOpens !== undefined) page.cfg_shortcutOpens = values.shortcutOpens
+        if (values.panelRing !== undefined) page.cfg_panelRing = values.panelRing
+        if (values.middleClickOpens !== undefined) page.cfg_middleClickOpens = values.middleClickOpens
+        if (values.chatCustomUrls !== undefined) page.cfg_chatCustomUrls = values.chatCustomUrls
+        page.backupMessage = "applied"
+    }
+
+    function backupStatusText() {
+        switch (page.backupState) {
+        case "":
+            return i18n("Checking…")
+        case "exists":
+            return i18n("Last backup: %1", SettingsBackup.shownStamp(page.backupExportedAt))
+        case "absent":
+            return i18n("No backup yet.")
+        default:
+            return page.backupText(page.backupState)
+        }
+    }
+
+    function backupText(code) {
+        switch (code) {
+        case "":
+            return ""
+        case "saved":
+            return i18n("Backup saved.")
+        case "applied":
+            return i18n("Backup loaded. Press Apply to save it.")
+        case "nothing":
+            return i18n("The backup has no settings that can be used.")
+        case "absent":
+            return i18n("There is no backup yet.")
+        case "invalid":
+            return i18n("The backup file is damaged and can't be read.")
+        case "unsupported":
+            return i18n("The backup was made by a different version and can't be read.")
+        case "too-large":
+            return i18n("The settings are too large to back up.")
+        case "bad-data":
+            return i18n("These settings couldn't be backed up.")
+        case "symlink":
+        case "not-owned":
+        case "unsafe-mode":
+            return i18n("The backup file isn't safe to use, so it was left alone. Check the owner and permissions of its folder.")
+        case "legacy-data":
+            return i18n("Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
+        default:
+            return i18n("Something went wrong with the backup. Nothing was changed.")
+        }
+    }
+
     function vaultText(code) {
         switch (code) {
         case "":
@@ -365,6 +576,8 @@ KCM.SimpleKCM {
         page.syncSignInChoice()
         page.vaultRun = ChatStorage.firstRun(Date.now(), Math.random())
         page.historyClearRun = ChatStorage.firstRun(Date.now(), Math.random())
+        page.backupRun = ChatStorage.firstRun(Date.now(), Math.random())
+        page.runBackup("status")
         page.runVault("status")
     }
 
@@ -377,6 +590,8 @@ KCM.SimpleKCM {
                 page.cfg_chatProfileGeneration = value
             else if (key === "chatSiteZoom")
                 page.cfg_chatSiteZoom = value
+            else if (key === "usageHistoryClearOwed")
+                page.cfg_usageHistoryClearOwed = value
         }
     }
 
@@ -403,6 +618,18 @@ KCM.SimpleKCM {
             page.historyClearName = ""
             var reply = UsageHistory.parseReply("clear", data["exit code"], data["stdout"], Catalog.providers)
             page.historyClearState = reply.ok ? "ok" : reply.error
+        }
+    }
+
+    Plasma5Support.DataSource {
+        id: backupSource
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            backupSource.disconnectSource(source)
+            if (source !== page.backupSourceName)
+                return
+            page.finishBackup(page.backupOp, SettingsBackup.parseReply(page.backupOp, data["exit code"], data["stdout"]))
         }
     }
 
@@ -641,6 +868,16 @@ KCM.SimpleKCM {
                 textFormat: Text.PlainText
                 text: page.historyClearText(page.historyClearState)
             }
+        }
+        QQC2.Label {
+            objectName: "usageHistoryOwedNotice"
+            Layout.fillWidth: true
+            visible: page.cfg_usageHistoryClearOwed && !page.cfg_usageHistoryEnabled
+                && page.historyClearState !== "ok"
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            color: Kirigami.Theme.neutralTextColor
+            text: i18n("The usage history hasn't been deleted yet. If this message stays, use Delete usage history.")
         }
 
         RowLayout {
@@ -909,6 +1146,125 @@ KCM.SimpleKCM {
             color: page.vaultMessage === "changed" || page.vaultMessage === "deleted"
                 ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor
             text: page.vaultText(page.vaultMessage)
+        }
+
+        // --- Backup ---------------------------------------------------------
+
+        Kirigami.Separator {
+            Kirigami.FormData.isSection: true
+            Kirigami.FormData.label: i18n("Backup")
+        }
+
+        QQC2.Label {
+            objectName: "backupStatus"
+            Kirigami.FormData.label: i18n("Settings backup:")
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            text: page.backupStatusText()
+        }
+        QQC2.Label {
+            objectName: "backupExplanation"
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            opacity: 0.72
+            text: i18n("One file on this computer, in the hearthwire folder of your configuration folder (usually ~/.config). It holds these settings, including your custom chat addresses. Sign-ins, the encrypted folder, zoom and the usage history setting are not part of it.")
+        }
+        RowLayout {
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.Button {
+                objectName: "backupExport"
+                text: i18n("Export")
+                icon.name: "document-export"
+                enabled: page.backupOp === ""
+                onClicked: page.requestExport()
+            }
+            QQC2.Button {
+                objectName: "backupImport"
+                text: i18n("Import")
+                icon.name: "document-import"
+                enabled: page.backupOp === ""
+                onClicked: page.requestImport()
+            }
+            QQC2.BusyIndicator {
+                visible: page.backupOp !== ""
+                running: visible
+                Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                Layout.preferredWidth: Kirigami.Units.iconSizes.medium
+            }
+        }
+
+        Kirigami.InlineMessage {
+            objectName: "backupExportConfirm"
+            Layout.fillWidth: true
+            visible: page.confirmingExport
+            type: Kirigami.MessageType.Warning
+            text: i18n("Replace the existing backup with the settings shown now?")
+            actions: [
+                Kirigami.Action {
+                    text: i18n("Replace")
+                    icon.name: "document-export"
+                    onTriggered: page.exportBackup()
+                },
+                Kirigami.Action {
+                    text: i18n("Cancel")
+                    icon.name: "dialog-cancel"
+                    onTriggered: page.confirmingExport = false
+                }
+            ]
+        }
+
+        Kirigami.InlineMessage {
+            objectName: "backupImportConfirm"
+            Layout.fillWidth: true
+            visible: page.confirmingImport
+            type: Kirigami.MessageType.Warning
+            text: i18n("Replace the settings on these pages with the backup? Nothing is saved until you press Apply.")
+            actions: [
+                Kirigami.Action {
+                    text: i18n("Replace")
+                    icon.name: "document-import"
+                    onTriggered: page.applyBackup()
+                },
+                Kirigami.Action {
+                    text: i18n("Cancel")
+                    icon.name: "dialog-cancel"
+                    onTriggered: {
+                        page.confirmingImport = false
+                        page.backupPlan = null
+                    }
+                }
+            ]
+        }
+
+        QQC2.Label {
+            objectName: "backupPlanLabel"
+            Layout.fillWidth: true
+            visible: page.confirmingImport
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            text: i18n("Settings to apply: %1. Saved: %2.",
+                page.backupPlan ? page.backupPlan.applied : 0, SettingsBackup.shownStamp(page.backupExportedAt))
+        }
+
+        QQC2.Label {
+            objectName: "backupMessage"
+            Layout.fillWidth: true
+            visible: text !== ""
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            text: page.backupText(page.backupMessage)
+        }
+
+        QQC2.Label {
+            objectName: "backupDroppedCount"
+            Layout.fillWidth: true
+            visible: page.backupDropped > 0
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            text: i18n("Settings left out: %1", page.backupDropped)
         }
     }
 }

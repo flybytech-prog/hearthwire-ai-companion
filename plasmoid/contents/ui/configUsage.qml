@@ -93,6 +93,10 @@ KCM.ScrollViewKCM {
     property string cfg_middleClickOpensDefault: "refresh"
     property bool cfg_usageHistoryEnabled: false
     property bool cfg_usageHistoryEnabledDefault: false
+    // Written only by main.qml; kept in step so Apply never writes back an
+    // old value.
+    property bool cfg_usageHistoryClearOwed: false
+    property bool cfg_usageHistoryClearOwedDefault: false
 
     property var catalogModel: Catalog.providers
     // Off, Automatic, then every reading in the Usage tab's order.
@@ -450,6 +454,8 @@ KCM.ScrollViewKCM {
                 page.cfg_chatProfileGeneration = value
             else if (key === "chatSiteZoom")
                 page.cfg_chatSiteZoom = value
+            else if (key === "usageHistoryClearOwed")
+                page.cfg_usageHistoryClearOwed = value
         }
     }
 

@@ -1022,7 +1022,7 @@ TestCase {
         var page = generalPage()
         compare(page.cfg_usageHistoryEnabled, false)
         compare(generalPart(page, "usageHistoryChoice").checked, false)
-        compare(sourcesOf(page).length, 2, "the vault's and the delete button's")
+        compare(sourcesOf(page).length, 3, "the vault's, the delete button's and the backup's")
         verify(everyCommand(page).length > 0, "its other source is really seen")
         compare(historyCommands(page), [])
     }
@@ -1083,5 +1083,551 @@ TestCase {
         answer(page, JSON.stringify({ok: false, error: "legacy-data"}))
         compare(generalPart(page, "usageHistoryStatus").text,
                 "Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
+    }
+
+    // --- History turned off: the clear is owed until the helper confirms it --
+
+    readonly property string busy: JSON.stringify({ok: false, error: "busy"})
+    readonly property string clearOk: JSON.stringify({ok: true})
+    readonly property string clearNotice: "The usage history couldn't be deleted. Use Delete usage history in Settings → General → Privacy."
+
+    // On, its first steps answered, then turned off and the first clear running.
+    function mainClearing() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([]))
+        answer(main, historyReply([]))
+        Plasmoid.configuration.usageHistoryEnabled = false
+        compare(ops(historyCommands(main)), ["read", "record", "clear"])
+        return main
+    }
+
+    function clearCount(main) {
+        return ops(historyCommands(main)).filter(function (op) { return op === "clear" }).length
+    }
+
+    function test_clearIsOwedUntilConfirmed() {
+        var main = mainClearing()
+        compare(Plasmoid.configuration.usageHistoryClearOwed, true, "stored before the helper answers")
+        answer(main, clearOk)
+        compare(Plasmoid.configuration.usageHistoryClearOwed, false)
+        compare(main.historyNotice, "")
+    }
+
+    function test_clearRetriesBusyAfterADelay() {
+        var main = mainClearing()
+        answer(main, busy)
+        compare(clearCount(main), 1, "not at once")
+        compare(main.historyNotice, "", "not told yet")
+        tryVerify(function () { return clearCount(main) === 2 }, 6000, "retried by its timer")
+    }
+
+    function test_clearGivesUpAfterBoundedBusy() {
+        var main = mainClearing()
+        answer(main, busy)
+        tryVerify(function () { return clearCount(main) === 2 }, 6000, "second try")
+        answer(main, busy)
+        tryVerify(function () { return clearCount(main) === 3 }, 6000, "third try")
+        answer(main, busy)
+        compare(clearCount(main), 3)
+        compare(main.historyNotice, clearNotice)
+        compare(Plasmoid.configuration.usageHistoryClearOwed, true, "still owed")
+        wait(3200)
+        compare(clearCount(main), 3, "no more tries")
+    }
+
+    function test_clearOtherFailureIsToldAtOnce() {
+        var main = mainClearing()
+        answer(main, JSON.stringify({ok: false, error: "not-owned"}))
+        compare(main.historyNotice, clearNotice)
+        compare(clearCount(main), 1, "only busy is retried")
+    }
+
+    function test_clearMalformedReplyIsAFailure() {
+        var main = mainClearing()
+        answer(main, "/home/soul secret", 1)
+        compare(main.historyNotice, clearNotice)
+    }
+
+    function test_clearOwedAtStartIsPaidOnce() {
+        var main = loadMain({usageHistoryEnabled: false, usageHistoryClearOwed: true})
+        compare(ops(historyCommands(main)), ["clear"], "and nothing else")
+        answer(main, clearOk)
+        compare(Plasmoid.configuration.usageHistoryClearOwed, false)
+        goodSnapshot(main, okClaude())
+        wait(20)
+        compare(ops(historyCommands(main)), ["clear"])
+    }
+
+    function test_nothingOwedAtStartRunsNothing() {
+        var main = loadMain({usageHistoryEnabled: false, usageHistoryClearOwed: false})
+        wait(20)
+        compare(historyCommands(main), [])
+    }
+
+    function test_clearNotOwedWhenOnAtStart() {
+        var main = loadMain({usageHistoryEnabled: true, usageHistoryClearOwed: true})
+        compare(Plasmoid.configuration.usageHistoryClearOwed, false)
+        compare(ops(historyCommands(main)), ["read"])
+    }
+
+    function test_turningOnAgainDropsTheDebt() {
+        var main = mainClearing()
+        answer(main, busy)
+        Plasmoid.configuration.usageHistoryEnabled = true
+        compare(Plasmoid.configuration.usageHistoryClearOwed, false)
+        compare(main.historyNotice, "")
+        wait(3200)
+        compare(clearCount(main), 1, "the retry was called off")
+    }
+
+    function test_clearReplyAfterTurningOnChangesNothing() {
+        var main = mainClearing()
+        Plasmoid.configuration.usageHistoryEnabled = true
+        answer(main, busy)
+        compare(main.historyNotice, "")
+        compare(main.historyClearTries, 0)
+    }
+
+    function test_popupOpenPaysTheDebt() {
+        var main = mainClearing()
+        answer(main, JSON.stringify({ok: false, error: "os-error"}))
+        compare(clearCount(main), 1)
+        main.expanded = true
+        compare(clearCount(main), 2)
+        answer(main, clearOk)
+        compare(main.historyNotice, "", "the notice goes once it worked")
+        compare(Plasmoid.configuration.usageHistoryClearOwed, false)
+        main.expanded = false
+        main.expanded = true
+        compare(clearCount(main), 2, "nothing owed any more")
+    }
+
+    function test_popupOpenDoesNotPileUpClears() {
+        var main = mainClearing()
+        main.expanded = true
+        compare(clearCount(main), 1, "one is running")
+        main.expanded = false
+        main.expanded = true
+        compare(main.historyQueue.length, 0, "and none waits behind it")
+        answer(main, clearOk)
+        wait(20)
+        compare(clearCount(main), 1)
+        compare(Plasmoid.configuration.usageHistoryClearOwed, false)
+    }
+
+    // The clear waits behind a running record: opening adds no second one.
+    function test_popupOpenDoesNotAddToAQueuedClear() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([]))
+        compare(ops(historyCommands(main)), ["read", "record"])
+        Plasmoid.configuration.usageHistoryEnabled = false
+        main.expanded = true
+        answer(main, historyReply([]))
+        compare(clearCount(main), 1)
+        answer(main, clearOk)
+        wait(20)
+        compare(clearCount(main), 1)
+    }
+
+    // A debt written back while history is on (a stale settings page) is
+    // never paid by deleting history that is in use.
+    function test_popupOpenNeverClearsWhileOn() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([]))
+        answer(main, historyReply([]))
+        Plasmoid.configuration.usageHistoryClearOwed = true
+        main.expanded = true
+        wait(20)
+        compare(clearCount(main), 0)
+    }
+
+    function test_turningOnClearsTheNotice() {
+        var main = mainClearing()
+        answer(main, JSON.stringify({ok: false, error: "not-owned"}))
+        compare(main.historyNotice, clearNotice)
+        Plasmoid.configuration.usageHistoryEnabled = true
+        compare(main.historyNotice, "")
+    }
+
+    // Off again starts a new count, and the old retry is called off.
+    function test_turningOffAgainStartsOver() {
+        var main = mainClearing()
+        answer(main, busy)
+        tryVerify(function () { return clearCount(main) === 2 }, 6000, "second try")
+        answer(main, busy)
+        compare(main.historyClearTries, 2)
+        Plasmoid.configuration.usageHistoryEnabled = true
+        Plasmoid.configuration.usageHistoryEnabled = false
+        compare(clearCount(main), 3, "a fresh clear")
+        answer(main, busy)
+        compare(main.historyNotice, "", "the first of a new count")
+        compare(main.historyClearTries, 1)
+    }
+
+    function test_turningOffAgainDropsTheOldRetry() {
+        var main = mainClearing()
+        answer(main, busy)
+        Plasmoid.configuration.usageHistoryEnabled = true
+        Plasmoid.configuration.usageHistoryEnabled = false
+        compare(clearCount(main), 2, "the new clear")
+        answer(main, clearOk)
+        wait(3200)
+        compare(clearCount(main), 2, "the old timer did not fire")
+    }
+
+    function test_popupOpenDuringRetryWaits() {
+        var main = mainClearing()
+        answer(main, busy)
+        main.expanded = true
+        compare(clearCount(main), 1, "the retry timer has it")
+    }
+
+    function test_pagesKeepTheDebtInStep() {
+        [testCase.generalPageFile, testCase.usagePageFile,
+         Qt.resolvedUrl("../../plasmoid/contents/ui/configChat.qml")].forEach(function (file) {
+            var page = load(file, {})
+            compare(page.cfg_usageHistoryClearOwed, false)
+            Plasmoid.configuration.usageHistoryClearOwed = true
+            compare(page.cfg_usageHistoryClearOwed, true, "so Apply can't write back an old value")
+            page.destroy()
+        })
+    }
+
+    function test_settingsOwedNotice() {
+        var page = generalPage()
+        var notice = generalPart(page, "usageHistoryOwedNotice")
+        compare(notice.visible, false)
+        compare(notice.textFormat, Text.PlainText)
+        Plasmoid.configuration.usageHistoryClearOwed = true
+        compare(notice.visible, true)
+        page.cfg_usageHistoryEnabled = true
+        compare(notice.visible, false, "history is on again in this page")
+        page.cfg_usageHistoryEnabled = false
+        pressDelete(page)
+        answer(page, clearOk)
+        compare(notice.visible, false, "deleted by hand")
+    }
+
+    // --- Tooltip error --------------------------------------------------------
+
+    function test_tooltipErrorIsCapped() {
+        var main = load(testCase.mainFile, {})
+        verify(!main.hasData, "before any data")
+        main.lastError = new Array(1000).join("x")
+        var text = main.toolTipSubText
+        verify(text.indexOf("Error: ") === 0, text.slice(0, 20))
+        compare(text.length, "Error: ".length + 200)
+        compare(text[text.length - 1], "…")
+        main.lastError = "short"
+        compare(main.toolTipSubText, "Error: short")
+    }
+
+    // --- Backup -------------------------------------------------------------
+
+    function runningOn(owner, marker) {
+        wait(0)
+        var running = null
+        sourcesOf(owner).forEach(function (source) {
+            source.connectedSources.forEach(function (command) {
+                if (command.indexOf(marker) >= 0)
+                    running = {source: source, command: command}
+            })
+        })
+        return running
+    }
+
+    function answerBackup(page, reply, exitCode) {
+        var running = runningOn(page, "--settings-backup")
+        verify(running, "a backup step is running")
+        running.source.newData(running.command, {"exit code": exitCode === undefined ? 0 : exitCode, "stdout": reply})
+        wait(0)
+    }
+
+    function backupCommands(page) {
+        wait(0)
+        return everyCommand(page).filter(function (command) { return command.indexOf("--settings-backup") >= 0 })
+    }
+
+    function backupOps(page) {
+        return backupCommands(page).map(function (command) {
+            return command.split("--settings-backup ")[1].split(" ")[0]
+        })
+    }
+
+    readonly property string backupStamp: "2026-11-06T00:10:29Z"
+    readonly property var goodBackup: ({
+        trackedProviders: "[\"claude\",\"codex\"]",
+        providerMetrics: "{\"claude\":[\"session\",\"weekly\"]}",
+        providerOrder: "[\"codex\",\"claude\"]",
+        usageMode: "used",
+        refreshInterval: 900,
+        tooltipShowsUsage: false,
+        tooltipMetrics: "{\"claude\":[\"weekly\"],\"codex\":[]}",
+        usageCompact: true,
+        usageWarnPercent: 70,
+        usageCriticalPercent: 90,
+        usageNormalColor: "#00aaff",
+        usageWarnColor: "",
+        usageCriticalColor: "#ff0000",
+        alertLowEnabled: true,
+        alertResetEnabled: true,
+        alertLowPercent: 40,
+        chatSites: "[\"claude\",\"ollama\",\"local\"]",
+        chatDefaultSite: "ollama",
+        chatOllamaUrl: "http://[::1]:11434",
+        chatKeepOpen: true,
+        showUsageTab: true,
+        showChatTab: false,
+        popupDefaultTab: "usage",
+        popupSize: "large",
+        shortcutOpens: "ollama",
+        panelRing: "codex.spark_weekly",
+        middleClickOpens: "mscopilot",
+        chatCustomUrls: "{\"claude\":\"https://claude.example.org/new?x=1\",\"local\":\"http://localhost:8080/\"}"
+    })
+
+    // The settings page after its first status check.
+    function backupPage(status) {
+        var page = load(testCase.generalPageFile, {})
+        compare(backupOps(page), ["status"])
+        answerBackup(page, JSON.stringify(status === undefined ? {ok: true, exists: false} : status))
+        return page
+    }
+
+    function importing(page, settings, dropped) {
+        generalPart(page, "backupImport").clicked()
+        answerBackup(page, JSON.stringify({ok: true, exported_at: backupStamp, settings: settings, dropped: dropped || 0}))
+    }
+
+    function exportedSettings(page) {
+        var commands = backupCommands(page).filter(function (command) { return command.indexOf(" export ") >= 0 })
+        verify(commands.length > 0, "an export ran")
+        var hex = commands[commands.length - 1].split("--data ")[1]
+        return JSON.parse(decodeURIComponent(hex.replace(/../g, "%$&")))
+    }
+
+    function test_backupStatusAbsent() {
+        var page = backupPage({ok: true, exists: false})
+        compare(generalPart(page, "backupStatus").text, "No backup yet.")
+    }
+
+    function test_backupStatusExists() {
+        var page = backupPage({ok: true, exists: true, exported_at: backupStamp})
+        compare(generalPart(page, "backupStatus").text, "Last backup: 2026-11-06 00:10:29 UTC")
+        compare(generalPart(page, "backupStatus").textFormat, Text.PlainText)
+    }
+
+    function test_backupStatusErrorIsFixedText() {
+        var page = backupPage({ok: false, error: "unsafe-mode"})
+        compare(generalPart(page, "backupStatus").text,
+                "The backup file isn't safe to use, so it was left alone. Check the owner and permissions of its folder.")
+    }
+
+    function test_backupExplanationIsPlain() {
+        var label = generalPart(backupPage(), "backupExplanation")
+        compare(label.textFormat, Text.PlainText)
+        verify(label.text.indexOf("usage history") >= 0, "says what is left out")
+    }
+
+    function test_backupExportWithoutABackupRunsAtOnce() {
+        var page = backupPage({ok: true, exists: false})
+        generalPart(page, "backupExport").clicked()
+        compare(backupOps(page), ["status", "export"])
+        compare(page.confirmingExport, false)
+    }
+
+    function test_backupExportOverABackupAsksFirst() {
+        var page = backupPage({ok: true, exists: true, exported_at: backupStamp})
+        generalPart(page, "backupExport").clicked()
+        compare(backupOps(page), ["status"], "nothing yet")
+        var box = generalPart(page, "backupExportConfirm")
+        compare(box.visible, true)
+        box.actions[1].trigger()
+        compare(page.confirmingExport, false)
+        compare(backupOps(page), ["status"], "Cancel")
+        generalPart(page, "backupExport").clicked()
+        box.actions[0].trigger()
+        compare(backupOps(page), ["status", "export"], "Replace")
+    }
+
+    // Unknown state: it may exist, so it is not replaced without asking.
+    function test_backupExportAsksWhenStatusFailed() {
+        var page = backupPage({ok: false, error: "os-error"})
+        generalPart(page, "backupExport").clicked()
+        compare(page.confirmingExport, true)
+        compare(backupOps(page), ["status"])
+    }
+
+    function test_backupExportSendsOnlyBackupKeys() {
+        var page = backupPage()
+        page.cfg_usageHistoryEnabled = true
+        page.cfg_chatSignInStorage = "encrypted"
+        generalPart(page, "backupExport").clicked()
+        var sent = exportedSettings(page)
+        compare(Object.keys(sent).length, 28)
+        compare(sent.usageHistoryEnabled, undefined)
+        compare(sent.chatSignInStorage, undefined)
+        compare(sent.panelRing, "auto")
+        compare(sent.middleClickOpens, "refresh")
+    }
+
+    function test_backupExportResultAndNewStatus() {
+        var page = backupPage()
+        generalPart(page, "backupExport").clicked()
+        answerBackup(page, JSON.stringify({ok: true, saved: 27, dropped: 1}))
+        compare(generalPart(page, "backupMessage").text, "Backup saved.")
+        compare(generalPart(page, "backupDroppedCount").text, "Settings left out: 1")
+        compare(backupOps(page), ["status", "export", "status"])
+    }
+
+    function test_backupButtonsWaitWhileRunning() {
+        var page = backupPage()
+        var button = generalPart(page, "backupExport")
+        button.clicked()
+        compare(button.enabled, false)
+        compare(generalPart(page, "backupImport").enabled, false)
+    }
+
+    function test_backupOneStepAtATime() {
+        var page = backupPage()
+        generalPart(page, "backupImport").clicked()
+        page.runBackup("status")
+        compare(backupOps(page), ["status", "import"], "a second step is refused while one runs")
+    }
+
+    function test_backupLateReplyIsIgnored() {
+        var page = backupPage()
+        generalPart(page, "backupImport").clicked()
+        var running = runningOn(page, "--settings-backup")
+        running.source.newData("env HEARTHWIRE_RUN=1 python3 -P -m hearthwire --settings-backup import",
+                               {"exit code": 0, "stdout": JSON.stringify({ok: false, error: "invalid"})})
+        wait(0)
+        compare(generalPart(page, "backupMessage").text, "")
+        compare(page.backupOp, "import")
+    }
+
+    function test_backupImportAsksBeforeApplying() {
+        var page = backupPage()
+        importing(page, {popupSize: "large"}, 2)
+        compare(page.cfg_popupSize, "normal", "nothing applied yet")
+        compare(generalPart(page, "backupImportConfirm").visible, true)
+        var label = generalPart(page, "backupPlanLabel")
+        compare(label.text, "Settings to apply: 1. Saved: 2026-11-06 00:10:29 UTC.")
+        compare(label.textFormat, Text.PlainText)
+        compare(generalPart(page, "backupDroppedCount").text, "Settings left out: 2")
+    }
+
+    function test_backupCancelAppliesNothing() {
+        var page = backupPage()
+        importing(page, {popupSize: "large"})
+        generalPart(page, "backupImportConfirm").actions[1].trigger()
+        compare(page.cfg_popupSize, "normal")
+        compare(page.backupPlan, null)
+        compare(page.confirmingImport, false)
+    }
+
+    function test_backupApplyWithoutAPlanDoesNothing() {
+        var page = backupPage()
+        page.applyBackup()
+        compare(generalPart(page, "backupMessage").text, "")
+    }
+
+    // Every backup key, through the real page's cfg_ properties and back out.
+    function test_backupRoundTripsEveryKey() {
+        var page = backupPage()
+        importing(page, goodBackup)
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        compare(generalPart(page, "backupMessage").text, "Backup loaded. Press Apply to save it.")
+        for (var key in goodBackup)
+            compare(page["cfg_" + key], goodBackup[key], key)
+        compare(Object.keys(goodBackup).length, 28, "the fixture is complete")
+        // The page shows what it took over.
+        compare(generalPart(page, "middleClickChoice").currentValue, "mscopilot")
+        generalPart(page, "backupExport").clicked()
+        generalPart(page, "backupExportConfirm").actions[0].trigger()
+        compare(exportedSettings(page), goodBackup, "and out again")
+    }
+
+    function test_backupKeysAllHaveAcfgProperty() {
+        var page = backupPage()
+        Object.keys(goodBackup).forEach(function (key) {
+            verify(("cfg_" + key) in page, key)
+            verify(Plasmoid.configuration[key] !== undefined, key + " is in main.xml")
+        })
+    }
+
+    function test_backupNeverTurnsHistoryOn() {
+        var page = backupPage()
+        importing(page, {usageHistoryEnabled: true, usageHistoryClearOwed: true, chatSignInStorage: "encrypted",
+                         chatVaultUnlock: "wallet", chatSiteZoom: "{\"claude\":2}", popupSize: "large"})
+        compare(page.backupPlan.applied, 1)
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        compare(page.cfg_usageHistoryEnabled, false)
+        compare(page.cfg_usageHistoryClearOwed, false)
+        compare(page.cfg_chatSignInStorage, "memory")
+        compare(page.cfg_chatVaultUnlock, "passphrase")
+        compare(page.cfg_chatSiteZoom, "{}")
+        compare(page.cfg_popupSize, "large")
+        compare(generalPart(page, "backupDroppedCount").text, "Settings left out: 5")
+    }
+
+    function test_backupImportChecksAgainInTheWidget() {
+        var page = backupPage()
+        importing(page, {chatOllamaUrl: "http://192.168.1.2:11434",
+                         chatCustomUrls: JSON.stringify({claude: "http://claude.example.org/"}),
+                         popupSize: "large"})
+        compare(page.backupPlan.applied, 1, "only the good one")
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        compare(page.cfg_chatOllamaUrl, "http://127.0.0.1:11434")
+        compare(page.cfg_chatCustomUrls, "{}")
+        compare(generalPart(page, "backupDroppedCount").text, "Settings left out: 2")
+    }
+
+    function test_backupImportWithNothingUsable() {
+        var page = backupPage()
+        importing(page, {usageHistoryEnabled: true})
+        compare(page.confirmingImport, false)
+        compare(generalPart(page, "backupMessage").text, "The backup has no settings that can be used.")
+    }
+
+    function checkBackupError(reply, exitCode, expected) {
+        var page = backupPage()
+        generalPart(page, "backupImport").clicked()
+        answerBackup(page, reply, exitCode)
+        var label = generalPart(page, "backupMessage")
+        compare(label.text, expected)
+        compare(label.textFormat, Text.PlainText)
+        compare(page.confirmingImport, false)
+    }
+
+    function test_backupErrorsAreFixedText() {
+        var cases = [
+            ["absent", "There is no backup yet."],
+            ["invalid", "The backup file is damaged and can't be read."],
+            ["unsupported", "The backup was made by a different version and can't be read."],
+            ["too-large", "The settings are too large to back up."],
+            ["bad-data", "These settings couldn't be backed up."],
+            ["symlink", "The backup file isn't safe to use, so it was left alone. Check the owner and permissions of its folder."],
+            ["not-owned", "The backup file isn't safe to use, so it was left alone. Check the owner and permissions of its folder."],
+            ["unsafe-mode", "The backup file isn't safe to use, so it was left alone. Check the owner and permissions of its folder."],
+            ["legacy-data", "Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma."],
+            ["os-error", "Something went wrong with the backup. Nothing was changed."]
+        ]
+        cases.forEach(function (entry) {
+            checkBackupError(JSON.stringify({ok: false, error: entry[0]}), 0, entry[1])
+        })
+    }
+
+    function test_backupNeverShowsHelperText() {
+        checkBackupError("/home/soul/.config boom <b>secret</b>", 1, "Something went wrong with the backup. Nothing was changed.")
+        checkBackupError(JSON.stringify({ok: false, error: "/home/soul secret"}), 0, "Something went wrong with the backup. Nothing was changed.")
+    }
+
+    function test_backupTooLongExportRunsNothing() {
+        var page = backupPage()
+        page.cfg_chatOllamaUrl = new Array(70000).join("x")
+        generalPart(page, "backupExport").clicked()
+        compare(backupOps(page), ["status"])
+        compare(generalPart(page, "backupMessage").text, "The settings are too large to back up.")
     }
 }

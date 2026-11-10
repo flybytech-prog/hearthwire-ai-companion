@@ -91,6 +91,10 @@ KCM.SimpleKCM {
     property string cfg_middleClickOpensDefault: "refresh"
     property bool cfg_usageHistoryEnabled: false
     property bool cfg_usageHistoryEnabledDefault: false
+    // Written only by main.qml; kept in step so Apply never writes back an
+    // old value.
+    property bool cfg_usageHistoryClearOwed: false
+    property bool cfg_usageHistoryClearOwedDefault: false
 
     // Page-local only; the advanced section always starts collapsed.
     property bool showAdvanced: false
@@ -104,6 +108,8 @@ KCM.SimpleKCM {
                 page.cfg_chatProfileGeneration = value
             else if (key === "chatSiteZoom")
                 page.cfg_chatSiteZoom = value
+            else if (key === "usageHistoryClearOwed")
+                page.cfg_usageHistoryClearOwed = value
         }
     }
 

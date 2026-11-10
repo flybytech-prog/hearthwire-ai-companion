@@ -14,6 +14,9 @@ var MAX_PAIRS = 64
 // The helper's file limit (256 KiB) and room for the reply's other fields.
 var MAX_REPLY_CHARS = 262144 + 1024
 var OPERATIONS = ["read", "record", "clear"]
+// How often a clear is tried in a row while the helper answers busy.
+var CLEAR_MAX_TRIES = 3
+var CLEAR_RETRY_MS = 3000
 var ERRORS = ["bad-sample", "symlink", "not-directory", "not-owned", "busy", "legacy-data", "os-error"]
 
 var ID_PATTERN = /^[a-z_]{1,32}$/
@@ -185,6 +188,14 @@ function parseReply(op, exitCode, stdout, catalog) {
         return invalid
     var series = parseSeries(reply.series, reply.now, catalog)
     return series === null ? invalid : { ok: true, now: reply.now, series: series }
+}
+
+// What follows a clear's reply, triesDone counting this one: done, retry
+// (only for busy, a bounded number of times) or failed.
+function clearNext(reply, triesDone) {
+    if (reply && reply.ok === true)
+        return "done"
+    return reply && reply.error === "busy" && triesDone < CLEAR_MAX_TRIES ? "retry" : "failed"
 }
 
 // The sparkline's strokes in a box of width x height: seven days up to the
