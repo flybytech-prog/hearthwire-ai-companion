@@ -37,6 +37,7 @@ CONFIG_QML = CONTENTS / "config" / "config.qml"
 CONFIG_PAGES = (UI / "configGeneral.qml", UI / "configUsage.qml", UI / "configChat.qml")
 SETTINGS_LOGIC_JS = UI / "SettingsLogic.js"
 OLLAMA_CHAT_JS = UI / "OllamaChat.js"
+INSTALL_INFO_JS = UI / "InstallInfo.js"
 OLLAMA_CHAT_VIEW = UI / "OllamaChatView.qml"
 COMPACT_REPRESENTATION = UI / "CompactRepresentation.qml"
 PROMPT_LIBRARY_JS = UI / "PromptLibrary.js"
@@ -3500,12 +3501,37 @@ def test_proof_hidden_chars_regex_rule_catches(old, new):
 
 
 # N3 Every helper the plasmoid starts runs as `python3 -P -m hearthwire`
-# (-P: no working folder on the module path), RefreshGate.js included.
+# (-P: no working folder on the module path), RefreshGate.js included. The
+# one exception is InstallInfo.command, which adds -s (no user site) so the
+# system package answers --install-info even when an older home-folder copy
+# would not: that exact string, once, in that function only.
+
+INSTALL_INFO_LAUNCH = '" python3 -P -s -m hearthwire --install-info"'
+INSTALL_INFO_COMMAND = r"\bfunction\s+command\s*\([^)]*\)\s*\{"
+
+
+def _install_info_launch_spans(name, code):
+    """Offsets of the allowed ``-P -s`` launch; problems if it is anywhere else or twice."""
+    spans, problems = [], []
+    found = [match.start() for match in re.finditer(re.escape(INSTALL_INFO_LAUNCH), code)]
+    if _base(name) == INSTALL_INFO_JS.name:
+        bodies = _block_spans(code, INSTALL_INFO_COMMAND)
+        inside = [start for start in found for low, high in bodies if low <= start < high]
+        if len(bodies) != 1 or len(inside) > 1:
+            problems.append(f"{name}: one function command(), with {INSTALL_INFO_LAUNCH} at most once")
+        else:
+            spans = [(start, start + len(INSTALL_INFO_LAUNCH)) for start in inside]
+    return spans, problems
+
 
 def _helper_launch_problems(sources):
     problems = []
     for name, code in sources.items():
+        allowed, extra = _install_info_launch_spans(name, code)
+        problems += extra
         for match in re.finditer(r"\bpython[0-9.]*\b|-m\s+hearthwire\b|\bhearthwire\s+--", code):
+            if any(low <= match.start() < high for low, high in allowed):
+                continue
             text = match.group(0)
             if text.startswith("python"):
                 if not re.compile(r"python3 -P -m hearthwire(?![\w.])").match(code, match.start()):
@@ -3536,6 +3562,23 @@ REFRESH_GATE_JS = UI / "RefreshGate.js"
     (UI / "configUsage.qml", '"python3 -P -m hearthwire --detect"', '"hearthwire --detect"'),
     (CHAT_STORAGE_JS, ' python3 -P -m hearthwire"', ' /usr/bin/python3 -m hearthwire"'),
     (OLLAMA_CHAT_JS, " python3 -P -m hearthwire --port-owner ", " python3 -m  hearthwire --port-owner "),
+    # The -P -s exception: only that exact launch, only --install-info, only in InstallInfo.command.
+    (INSTALL_INFO_JS, " python3 -P -s -m hearthwire --install-info", " python3 -s -m hearthwire --install-info"),
+    (INSTALL_INFO_JS, " python3 -P -s -m hearthwire --install-info", " python3 -s -P -m hearthwire --install-info"),
+    (INSTALL_INFO_JS, " python3 -P -s -m hearthwire --install-info", " python3 -P -s -I -m hearthwire --install-info"),
+    (INSTALL_INFO_JS, " python3 -P -s -m hearthwire --install-info", " python3 -P -I -m hearthwire --install-info"),
+    (INSTALL_INFO_JS, " python3 -P -s -m hearthwire --install-info", " python3 -P -s -m hearthwire --json"),
+    (INSTALL_INFO_JS, " python3 -P -s -m hearthwire --install-info", " python3 -P -s -m hearthwire.cli --install-info"),
+    (INSTALL_INFO_JS, " python3 -P -s -m hearthwire --install-info", " python3 -P -s -m hearthwire --install-info --json"),
+    (INSTALL_INFO_JS, " python3 -P -s -m hearthwire --install-info", " python3 -P -s  -m hearthwire --install-info"),
+    (INSTALL_INFO_JS, "function isShadowed(info) {",
+     'function again() { return "env x" + " python3 -P -s -m hearthwire --install-info" }\nfunction isShadowed(info) {'),
+    (INSTALL_INFO_JS, '    return "env HEARTHWIRE_RUN="',
+     '    var other = " python3 -P -s -m hearthwire --install-info"\n    return "env HEARTHWIRE_RUN="'),
+    (CHAT_STORAGE_JS, ' python3 -P -m hearthwire"', ' python3 -P -s -m hearthwire"'),
+    (OLLAMA_CHAT_JS, " python3 -P -m hearthwire --port-owner ", " python3 -P -s -m hearthwire --port-owner "),
+    (MAIN_QML, "        var command = InstallInfo.command(",
+     '        var shadow = " python3 -P -s -m hearthwire --install-info"\n        var command = InstallInfo.command('),
 ])
 def test_proof_helper_launch_rule_catches(path, old, new):
     sources = _all_code()
@@ -4181,14 +4224,20 @@ def _mutated_in_block(path, opener, anchor, old, new):
 
 # R2-1 The system role is sent once, by chatRequestBody, for the personality;
 # ROLES (what a transcript row may be) stays user/assistant. The port owner
-# word "system" (OWNERS, trusted) is the only other "system" literal.
+# word "system" (OWNERS, trusted) and the --install-info contract list
+# (InstallInfo.js HELPERS) are the only other "system" literals.
 
 SYSTEM_LITERAL = r"""["'`]system["'`]"""
 SYSTEM_ALLOWED = {
     "chatRequestBody": r'^\s*clean\.push\(\{ role: "system", content: system \}\)\s*$',
     "OWNERS": r'^var OWNERS = \["none", "self", "system", "other"\]\s*$',
     "trusted": r'^\s*return owner === "self" \|\| owner === "system"\s*$',
+    "HELPERS": r'^var HELPERS = \["user", "system", "other"\]\s*$',
 }
+# The one file each allowed line may be in; top-level lists need no function.
+SYSTEM_FILES = {"chatRequestBody": "OllamaChat.js", "OWNERS": "OllamaChat.js", "trusted": "OllamaChat.js",
+                "HELPERS": "InstallInfo.js"}
+SYSTEM_TOP_LEVEL = {"OWNERS", "HELPERS"}
 
 
 def _system_role_problems(sources):
@@ -4201,10 +4250,10 @@ def _system_role_problems(sources):
             line_start = code.rfind("\n", 0, match.start()) + 1
             line = code[line_start:code.find("\n", match.start())]
             kind = next((key for key, pattern in SYSTEM_ALLOWED.items() if re.match(pattern, line)), None)
-            inside = kind == "OWNERS" or (kind in bodies and line in bodies[kind])
-            if not js or kind is None or not inside:
+            inside = kind in SYSTEM_TOP_LEVEL or (kind in bodies and line in bodies[kind])
+            if kind is None or _base(name) != SYSTEM_FILES[kind] or not inside:
                 problems.append(f"{name}:{_line_of(code, match.start())}: \"system\" only as the port owner "
-                                "word or chatRequestBody's personality")
+                                "word, chatRequestBody's personality or the InstallInfo.HELPERS list")
             else:
                 seen[kind] += 1
         if js:
@@ -4240,6 +4289,21 @@ def test_system_role_only_for_the_personality():
     (OLLAMA_CHAT_JS, "ROLES.indexOf(message.role) < 0", "typeof message.role !== \"string\""),
     (OLLAMA_CHAT_JS, "        clean.push({ role: message.role, content: message.content })",
      "        clean.push({ role: message.author, content: message.content })"),
+    # The InstallInfo.HELPERS exception covers that one exact line, in that one file.
+    (INSTALL_INFO_JS, 'var HELPERS = ["user", "system", "other"]', 'var HELPERS = ["user", "system", "other", "system"]'),
+    (INSTALL_INFO_JS, 'var HELPERS = ["user", "system", "other"]', 'var HELPERS = ["user", "other"].concat(["system"])'),
+    (INSTALL_INFO_JS, 'var HELPERS = ["user", "system", "other"]', 'var HELPERS = ["user", "system", "other"]\nvar ROLE = "system"'),
+    (INSTALL_INFO_JS, 'var HELPERS = ["user", "system", "other"]',
+     'var HELPERS = ["user", "system", "other"]\nvar HELPERS = ["user", "system", "other"]'),
+    (INSTALL_INFO_JS, 'var HELPERS = ["user", "system", "other"]', "var HELPERS = ['user', 'system', 'other']"),
+    (INSTALL_INFO_JS, "    if (!info || typeof info !== \"object\")\n        return false\n",
+     "    if (!info || typeof info !== \"object\")\n        return false\n    if (info.helper === \"system\")\n        return false\n"),
+    (INSTALL_INFO_JS, "    if (!info || typeof info !== \"object\")\n        return false\n",
+     "    if (!info || typeof info !== \"object\")\n        return false\n    var HELPERS = [\"user\", \"system\", \"other\"]\n"),
+    (CHAT_STORAGE_JS, 'var MODES = ["memory", "encrypted"]', 'var MODES = ["memory", "encrypted"]\nvar HELPERS = ["user", "system", "other"]'),
+    (OLLAMA_CHAT_JS, 'var ROLES = ["user", "assistant"]', 'var ROLES = ["user", "assistant"]\nvar HELPERS = ["user", "system", "other"]'),
+    (MAIN_QML, "    property var installInfo: InstallInfo.unknown()",
+     "    property var installInfo: InstallInfo.unknown()\n    readonly property bool sys: root.installInfo.helper === \"system\""),
 ])
 def test_proof_system_role_rule_catches(path, old, new):
     assert _system_role_problems(_sources_with(path, old, new))
@@ -8170,8 +8234,8 @@ QUEUE_FORMS = (
 )
 
 
-def _builder_problems(path, code):
-    signature, name, identifiers, literals = BUILDER_RULES[path]
+def _builder_problems(path, code, rule=None):
+    signature, name, identifiers, literals = rule or BUILDER_RULES[path]
     problems = _pin_problems(code, (signature,), path.name)
     body = _function_body(code, name)
     if body is None:
@@ -8276,3 +8340,300 @@ SETTINGS_ARGV_MUTATIONS = [
                          ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(SETTINGS_ARGV_MUTATIONS)])
 def test_proof_settings_in_command_rule_catches(path, old, new):
     assert _settings_in_command_problems(_sources_with(path, old, new))
+
+
+
+# --- install hints (plan install-hints) ------------------------------------------------------------
+#
+# I1 The --install-info command is built only by InstallInfo.command, from
+# fixed text, the run number and the applet id (both checked integers), and
+# runs once per widget start (main.qml) and once per settings page open
+# (configGeneral.qml) through the usual fixed-command pattern: a guard flag,
+# the builder, connectSource(command) on its own DataSource, and a reply read
+# only through InstallInfo.parseReply from the exit code and stdout. Only the
+# checked words of that reply (shadowed, distro) are used.
+
+INSTALL_INFO_FLAG = r"--install-info\b"
+INSTALL_INFO_BUILDER = (
+    "function command(run, applet) {", "command",
+    {"if", "return", "validInt", "run", "applet"},
+    {"", "env HEARTHWIRE_RUN=", " HEARTHWIRE_APPLET=", " python3 -P -s -m hearthwire --install-info"},
+)
+INSTALL_INFO_VALID_INT = ('return typeof value === "number" && Number.isInteger(value) && value >= 0 '
+                          "&& value <= 2147483648")
+# file -> (the page or widget id, the one builder call)
+INSTALL_INFO_CALLERS = {
+    MAIN_QML.name: ("root", "InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()), "
+                            "Math.max(0, root.chatAppletId))"),
+    CONFIG_GENERAL.name: ("page", "InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()), "
+                                  "page.vaultApplet)"),
+}
+INSTALL_INFO_PARSE = 'InstallInfo.parseReply(data["exit code"], data["stdout"])'
+
+
+def _install_info_forms(owner):
+    """Every line that may mention installInfo, installInfoAsked or installInfoSourceName."""
+    o = re.escape(owner)
+    return {
+        "installInfo": (
+            r"^\s*property var installInfo: InstallInfo\.unknown\(\)\s*$",
+            rf'^\s*{o}\.installInfo = InstallInfo\.parseReply\(data\["exit code"\], data\["stdout"\]\)\s*$',
+            rf"\b{o}\.installInfo\.shadowed === true\b",
+            rf"\bChatStorage\.installDistro\({o}\.installInfo\.distro\)",
+        ),
+        "installInfoAsked": (
+            r"^\s*property bool installInfoAsked: false\s*$",
+            rf"^\s*if \({o}\.installInfoAsked\)\s*$",
+            rf"^\s*{o}\.installInfoAsked = true\s*$",
+        ),
+        "installInfoSourceName": (
+            r'^\s*property string installInfoSourceName: ""\s*$',
+            rf"^\s*{o}\.installInfoSourceName = command\s*$",
+            rf"^\s*if \(source !== {o}\.installInfoSourceName\)\s*$",
+            rf'^\s*{o}\.installInfoSourceName = ""\s*$',
+        ),
+    }
+
+
+def _install_info_caller_problems(name, code, owner, call):
+    problems = []
+    where = f"{name} checkInstall()"
+    body = _function_body(code, "checkInstall")
+    if body is None:
+        return [f"{name}: exactly one checkInstall() expected"]
+    problems += _pin_problems(body, (
+        f"if ({owner}.installInfoAsked) return", f"{owner}.installInfoAsked = true", f"var command = {call}",
+        'if (command === "") return', f"{owner}.installInfoSourceName = command",
+        "installInfoSource.connectSource(command)"), where)
+    if len(_hits(rf"\bcommand\b{WRITE_OPERATOR}", body)) != 1:
+        problems.append(f"{where}: command is set once, by InstallInfo.command")
+    problems += [f"{where}: {match} must not be near the command" for match in re.findall(SINK_BANS, body)]
+    if len(_squeezed(_strip_comments(body, blank_strings=True)).split(";")) > 1 or _hits(r"['`]", body):
+        problems.append(f"{where}: no other statements or strings")
+    # Once per start: defined once, called once, from Component.onCompleted.
+    if len(_hits(r"\bcheckInstall\s*\(", code)) != 2:
+        problems.append(f"{name}: checkInstall() is called once")
+    completed = [body for _, body in _blocks(code, r"\bComponent\s*\.\s*onCompleted\s*:\s*\{")]
+    if len(completed) != 1 or len(_hits(rf"(?m)^\s*{owner}\s*\.\s*checkInstall\s*\(\s*\)\s*$", completed[0])) != 1:
+        problems.append(f"{name}: checkInstall() runs from Component.onCompleted")
+    # Its own source, started only here, reading only the exit code and stdout.
+    if len(_hits(r"\binstallInfoSource\s*\.\s*connectSource\s*\(", code)) != 1:
+        problems.append(f"{name}: installInfoSource runs a command only in checkInstall()")
+    if _hits(r"\binstallInfoSource\s*\.\s*connectedSources\b", code):
+        problems.append(f"{name}: installInfoSource's sources are set only by connectSource")
+    sources = [body for _, body in _blocks(code, r"\bPlasma5Support\s*\.\s*DataSource\s*\{")
+               if re.search(r"(?:^|[\n;])\s*id\s*:\s*installInfoSource\b", _top_level_raw(body))]
+    if len(sources) != 1:
+        problems.append(f"{name}: one installInfoSource DataSource expected, found {len(sources)}")
+    else:
+        top = _top_level_raw(sources[0])
+        problems += _pin_problems(top, ('engine: "executable"', "connectedSources: []"), f"{name} installInfoSource")
+        problems += _pin_problems(sources[0], (INSTALL_INFO_PARSE, "installInfoSource.disconnectSource(source)"),
+                                  f"{name} installInfoSource")
+        if _hits(r"\bstderr\b", sources[0]):
+            problems.append(f"{name}: installInfoSource must read stdout only")
+    for word, forms in _install_info_forms(owner).items():
+        problems += [f"{name}: {problem}" for problem in _unknown_mentions(code, word, forms)]
+    return problems
+
+
+def _install_info_command_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        base = _base(name)
+        flags = _hits(INSTALL_INFO_FLAG, code)
+        uses = _hits(r"\bInstallInfo\s*\.\s*command\b", code)
+        if base == INSTALL_INFO_JS.name:
+            body = _function_body(code, "command") or ""
+            if len(flags) != 1 or len(_hits(INSTALL_INFO_FLAG, body)) != 1:
+                problems.append(f"{name}: --install-info belongs to command() only (lines {flags})")
+            if len(_hits(r"\bcommand\s*\(", code)) != 1:
+                problems.append(f"{name}: command() is defined once, and not called here")
+            problems += _builder_problems(INSTALL_INFO_JS, code, INSTALL_INFO_BUILDER)
+            problems += _pin_problems(body, ('if (!validInt(run) || !validInt(applet)) return ""',), f"{name} command()")
+            valid = _function_body(code, "validInt")
+            if valid is None or _squeezed(valid.strip()[1:-1]) != INSTALL_INFO_VALID_INT:
+                problems.append(f"{name}: validInt must stay {INSTALL_INFO_VALID_INT}")
+        elif flags:
+            problems.append(f"{name}: --install-info belongs to InstallInfo.command only (lines {flags})")
+        if base in INSTALL_INFO_CALLERS:
+            owner, call = INSTALL_INFO_CALLERS[base]
+            if len(uses) != 1:
+                problems.append(f"{name}: one InstallInfo.command call expected, found {len(uses)}")
+            problems += _install_info_caller_problems(name, code, owner, call)
+        elif uses:
+            problems.append(f"{name}: must not build the install-info command (lines {uses})")
+    for base in INSTALL_INFO_CALLERS:
+        if not any(_base(name) == base for name in sources):
+            problems.append(f"{base} is missing")
+    return problems
+
+
+def test_install_info_command_is_built_only_from_checked_values():
+    problems = _install_info_command_problems(_all_code())
+    assert not problems, problems
+
+
+INSTALL_INFO_COMMAND_MUTATIONS = [
+    # The builder.
+    (INSTALL_INFO_JS, ' --install-info"', ' --install-info --json"'),
+    (INSTALL_INFO_JS, "function command(run, applet) {", "function command(run, applet, extra) {"),
+    (INSTALL_INFO_JS, "    if (!validInt(run) || !validInt(applet))\n        return \"\"\n", ""),
+    (INSTALL_INFO_JS, '" HEARTHWIRE_APPLET=" + applet', '" HEARTHWIRE_APPLET=" + String(applet)'),
+    (INSTALL_INFO_JS, '" HEARTHWIRE_APPLET=" + applet', "' HEARTHWIRE_APPLET=' + applet"),
+    (INSTALL_INFO_JS, '" HEARTHWIRE_APPLET=" + applet', '" HEARTHWIRE_APPLET=" + applet + " x"'),
+    (INSTALL_INFO_JS, "value <= 2147483648", "value <= 1e300"),
+    (INSTALL_INFO_JS, 'typeof value === "number" && ', ""),
+    (INSTALL_INFO_JS, "function isShadowed(info) {",
+     'function again() { return "python3 -P -m hearthwire --install-info" }\nfunction isShadowed(info) {'),
+    (INSTALL_INFO_JS, "function unknown() {", "function rerun() { return command(1, 1) }\nfunction unknown() {"),
+    # The callers.
+    (MAIN_QML, "Math.random()),\n                                          Math.max(0, root.chatAppletId))",
+     "Math.random()),\n                                          Plasmoid.configuration.chatSites)"),
+    (MAIN_QML, "        var command = InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()),",
+     "        var command = InstallInfo.command(root.chatOpRun,"),
+    (CONFIG_GENERAL, "page.vaultApplet)\n        if (command", "page.cfg_chatCustomUrls)\n        if (command"),
+    (CONFIG_GENERAL, "        page.installInfoSourceName = command\n",
+     "        command += \" \" + page.cfg_chatSites\n        page.installInfoSourceName = command\n"),
+    (CONFIG_GENERAL, "        installInfoSource.connectSource(command)\n",
+     "        installInfoSource.connectSource(command + page.installInfo.helper)\n"),
+    (MAIN_QML, "        installInfoSource.connectSource(command)\n",
+     "        installInfoSource.connectSource(command)\n        installInfoSource.connectSource(command)\n"),
+    (MAIN_QML, "        if (root.installInfoAsked)\n            return\n", ""),
+    (MAIN_QML, "        root.checkInstall()\n", "        root.checkInstall()\n        root.checkInstall()\n"),
+    (MAIN_QML, "    function droppedDone(reply) {",
+     "    function again() { root.installInfoAsked = false; root.checkInstall() }\n    function droppedDone(reply) {"),
+    (CONFIG_GENERAL, "        page.checkInstall()\n", ""),
+    (CONFIG_GENERAL, "    function checkInstall() {",
+     "    function redo() { var command = InstallInfo.command(1, 1) }\n    function checkInstall() {"),
+    (MAIN_QML, "    function droppedDone(reply) {",
+     '    function x() { usageSource.connectSource("python3 -P -m hearthwire --install-info") }\n    function droppedDone(reply) {'),
+    (UI / "UsageView.qml", "        visible: root.installShadowed\n",
+     "        visible: root.installShadowed\n        property string c: InstallInfo.command(1, 1)\n"),
+    # The reply.
+    (MAIN_QML, 'root.installInfo = InstallInfo.parseReply(data["exit code"], data["stdout"])',
+     'root.installInfo = InstallInfo.parseReply(data["exit code"], data["stderr"])'),
+    (CONFIG_GENERAL, 'page.installInfo = InstallInfo.parseReply(data["exit code"], data["stdout"])',
+     'page.installInfo = JSON.parse(data["stdout"])'),
+    (MAIN_QML, "    readonly property bool installShadowed: root.installInfo.shadowed === true",
+     "    readonly property bool installShadowed: root.installInfo.shadowed === true\n"
+     "    readonly property string installWhere: root.installInfo.helper"),
+    (MAIN_QML, '        id: installInfoSource\n        engine: "executable"\n        connectedSources: []\n',
+     '        id: installInfoSource\n        engine: "executable"\n        connectedSources: [root.installInfoSourceName]\n'),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), INSTALL_INFO_COMMAND_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(INSTALL_INFO_COMMAND_MUTATIONS)])
+def test_proof_install_info_command_rule_catches(path, old, new):
+    assert _install_info_command_problems(_sources_with(path, old, new))
+
+
+# I2 The shadowed notices are fixed i18n text with nothing clickable: the
+# Settings → General notice (a Kirigami.InlineMessage, which reads its text as
+# rich text and has no textFormat, so its literal may hold no markup
+# characters), the Usage tab's PlainText label, and a read-only field that
+# shows the fixed remedy for copying. None of them has a handler, an action
+# or a child; none can run a command.
+
+INSTALL_NOTICE_REMEDY = "./scripts/install.sh --remove-script-install"
+REMOVE_SCRIPT_COMMAND = f'readonly property string removeScriptCommand: "{INSTALL_NOTICE_REMEDY}"'
+TEXT_FIELD = r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?TextField\s*\{"
+NOTICE_LITERAL = r'(?:^|[\n;])\s*text\s*:\s*i18n\(\s*"([^"\\<>&]*)"\s*\)\s*(?=;|\n|$)'
+CLICK_BANS = r"\bon[A-Z]\w*\s*:|\bactions\s*:|\bAction\b|\bMouseArea\b|\b\w*Handler\b|\blink\w*\b|\bconnectSource\b"
+
+
+def _quiet_element_problems(code, opener, name, visible):
+    elements = _named_elements(code, opener, name)
+    if len(elements) != 1:
+        return [f"exactly one {name} expected, found {len(elements)}"]
+    body = elements[0][1]
+    blanked = _strip_comments(body, blank_strings=True)
+    problems = []
+    if blanked.count("{") != 1:
+        problems.append(f"{name} may have no child elements or blocks")
+    if _hits(CLICK_BANS, blanked):
+        problems.append(f"{name} may have no handler, action, link or command")
+    problems += _pin_problems(_top_level_raw(body), (f"visible: {visible}",), name)
+    return problems
+
+
+def _notice_text_problems(body, name):
+    match = re.search(NOTICE_LITERAL, _top_level_raw(body))
+    if match is None or len(re.findall(r"(?:^|[\n;])\s*text\s*:", _top_level(body))) != 1:
+        return [f"{name} text must be one fixed i18n literal without markup characters"]
+    if INSTALL_NOTICE_REMEDY not in match.group(1) or "kept" not in match.group(1):
+        return [f"{name} must name {INSTALL_NOTICE_REMEDY} and say the data is kept"]
+    return []
+
+
+def _install_notice_problems(general, view):
+    problems = []
+    notice = _named_elements(general, MESSAGE_ELEMENT, "installShadowedNotice")
+    problems += _quiet_element_problems(general, MESSAGE_ELEMENT, "installShadowedNotice",
+                                        "page.installInfo.shadowed === true")
+    if len(notice) == 1:
+        problems += _notice_text_problems(notice[0][1], "installShadowedNotice")
+    field = _named_elements(general, TEXT_FIELD, "installShadowedCommand")
+    problems += _quiet_element_problems(general, TEXT_FIELD, "installShadowedCommand",
+                                        "page.installInfo.shadowed === true")
+    if len(field) == 1:
+        top = _top_level_raw(field[0][1])
+        problems += _pin_problems(top, ("readOnly: true", "text: page.removeScriptCommand"), "installShadowedCommand")
+        if len(re.findall(r"(?:^|[\n;])\s*(?:readOnly|text)\s*:", top)) != 2:
+            problems.append("installShadowedCommand: readOnly and text are bound once each")
+    problems += _pin_problems(general, (REMOVE_SCRIPT_COMMAND,), "configGeneral.qml")
+    if len(_hits(r"\bremoveScriptCommand\b", general)) != 2 or _hits(r"\bremoveScriptCommand\b", view):
+        problems.append("removeScriptCommand is declared once and shown only by installShadowedCommand")
+    label = _named_elements(view, TEXT_ELEMENT, "usageInstallNotice")
+    problems += _plain_label_problems(view, TEXT_ELEMENT, "usageInstallNotice", None)
+    problems += _quiet_element_problems(view, TEXT_ELEMENT, "usageInstallNotice", "root.installShadowed")
+    if len(label) == 1:
+        problems += _notice_text_problems(label[0][1], "usageInstallNotice")
+    return problems
+
+
+def test_install_notices_are_fixed_text_with_nothing_to_click():
+    problems = _install_notice_problems(_read_code(CONFIG_GENERAL), _read_code(USAGE_VIEW))
+    assert not problems, problems
+
+
+INSTALL_NOTICE_MUTATIONS = [
+    (CONFIG_GENERAL, '            objectName: "installShadowedNotice"\n',
+     '            objectName: "installShadowedNotice"\n            onLinkActivated: (link) => Qt.openUrlExternally(link)\n'),
+    (CONFIG_GENERAL, '            objectName: "installShadowedNotice"\n',
+     '            objectName: "installShadowedNotice"\n            actions: [Kirigami.Action { text: "Fix"; onTriggered: page.runBackup("status") }]\n'),
+    (CONFIG_GENERAL, "text: i18n(\"An older script install of Hearthwire",
+     "text: i18n(\"<a href='x'>An older</a> script install of Hearthwire"),
+    (CONFIG_GENERAL, "text: i18n(\"An older script install of Hearthwire", "text: page.removeScriptCommand + i18n(\"An older script install of Hearthwire"),
+    (CONFIG_GENERAL, "then restart Plasma. Your settings, usage history and saved sign-ins are kept.",
+     "then restart Plasma."),
+    (CONFIG_GENERAL, '            objectName: "installShadowedCommand"\n',
+     '            objectName: "installShadowedCommand"\n            onAccepted: page.runVault("status")\n'),
+    (CONFIG_GENERAL, "            readOnly: true\n            selectByMouse: true\n            text: page.removeScriptCommand\n",
+     "            readOnly: false\n            selectByMouse: true\n            text: page.removeScriptCommand\n"),
+    (CONFIG_GENERAL, "            readOnly: true\n            selectByMouse: true\n            text: page.removeScriptCommand\n",
+     "            selectByMouse: true\n            text: page.removeScriptCommand\n"),
+    (CONFIG_GENERAL, "            text: page.removeScriptCommand\n",
+     "            text: page.removeScriptCommand\n            MouseArea { anchors.fill: parent; onClicked: page.runVault(\"status\") }\n"),
+    (CONFIG_GENERAL, REMOVE_SCRIPT_COMMAND, REMOVE_SCRIPT_COMMAND.replace("install.sh", "install.sh --restart-plasma")),
+    (CONFIG_GENERAL, "            text: page.removeScriptCommand\n", "            text: page.installInfo.helper\n"),
+    (CONFIG_GENERAL, "            text: page.removeScriptCommand\n",
+     "            text: page.removeScriptCommand\n            readOnly: true\n"),
+    (USAGE_VIEW, "        textFormat: Text.PlainText\n        text: i18n(\"An older script install is running",
+     "        textFormat: Text.StyledText\n        text: i18n(\"An older script install is running"),
+    (USAGE_VIEW, "        textFormat: Text.PlainText\n        text: i18n(\"An older script install is running",
+     "        text: i18n(\"An older script install is running"),
+    (USAGE_VIEW, "        visible: root.installShadowed\n",
+     "        visible: root.installShadowed\n        TapHandler { onTapped: root.refresh() }\n"),
+    (USAGE_VIEW, 'objectName: "usageInstallNotice"', 'objectName: "usageInstallNoticeX"'),
+    (USAGE_VIEW, "        visible: root.installShadowed\n", "        visible: true\n"),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), INSTALL_NOTICE_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(INSTALL_NOTICE_MUTATIONS)])
+def test_proof_install_notice_rule_catches(path, old, new):
+    general = _mutated(path, old, new) if path == CONFIG_GENERAL else _read_code(CONFIG_GENERAL)
+    view = _mutated(path, old, new) if path == USAGE_VIEW else _read_code(USAGE_VIEW)
+    assert _install_notice_problems(general, view)
