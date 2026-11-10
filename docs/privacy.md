@@ -199,8 +199,10 @@ there is no file dialog.
 - Export saves the widget's applied settings only: the helper reads them
   itself from Plasma's configuration file
   (`~/.config/plasma-org.kde.plasma.desktop-appletsrc`, or
-  `plasmawindowedrc`) by the widget's id, read-only, and refuses a symlinked
-  file or another user's. A setting the file doesn't have counts as its
+  `plasmawindowedrc` when the first file has no Hearthwire widget with that
+  id) by the widget's id, read-only, and refuses a symlinked file or another
+  user's. It reads only a widget whose plugin is Hearthwire, never another
+  widget's settings. A setting the file doesn't have counts as its
   default. Changes not yet applied on any settings page are not exported, so
   press **Apply** first. It asks before it replaces an existing backup, and
   never replaces one with an empty one.

@@ -957,13 +957,20 @@ nothing the user typed is ever in argv (audit M1). Changes not yet applied
 are not in the backup.
 
 - `$XDG_CONFIG_HOME` (when absolute, else `~/.config`)`/plasma-org.kde.plasma.desktop-appletsrc`,
-  else (when that file is missing or has no such widget) `plasmawindowedrc`
-  next to it. Group `[Containments][C][Applets][N][Configuration][General]`
-  for any containment C; the widget's group `[Containments][C][Applets][N]`
-  must say `plugin=io.github.flybytechprog.hearthwire`. N names exactly one
-  widget in the file (Plasma reads the group name as a number, so `021` and
-  `21` are the same widget); two are `applet-not-found`, never a guess, and
-  the other file is not tried then.
+  else `plasmawindowedrc` next to it. The second file is tried when the
+  first is missing, has no widget N, or its widget N is another plugin
+  (plasmawindowed ids are small, so the desktop often has, say, a pager with
+  the same id). In the desktop file the group is
+  `[Containments][C][Applets][N][Configuration][General]` for any containment
+  C, and the widget's group `[Containments][C][Applets][N]` must say
+  `plugin=io.github.flybytechprog.hearthwire`. plasmawindowed keeps its
+  widget at the top level, so `plasmawindowedrc` also takes `[Applets][N]`
+  and `[Applets][N][Configuration][General]` (the containment form too); the
+  desktop file never takes the top-level form. The settings of a widget of
+  another plugin are never read. N names exactly one widget in a file (Plasma
+  reads the group name as a number, so `021` and `21` are the same widget);
+  two are `applet-not-found`, never a guess, and the other file is not tried
+  then. When both files have our widget N, the desktop file wins.
 - The rc file is opened `O_RDONLY|O_NOFOLLOW|O_NONBLOCK` and never written; a
   symlink, a non-regular file, another user's file or one over 4 MiB is
   `settings-unreadable` (no fallback to the other file).

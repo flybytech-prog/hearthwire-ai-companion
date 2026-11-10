@@ -8,12 +8,17 @@ them itself, read only, from
         plasma-org.kde.plasma.desktop-appletsrc     the desktop and panels
         plasmawindowedrc                            plasmawindowed, tried only
                                                     when the first file is
-                                                    missing or has no such widget
+                                                    missing or has no widget N
+                                                    of ours
 
 group ``[Containments][C][Applets][N][Configuration][General]``, where the
 widget ``[Containments][C][Applets][N]`` must say ``plugin=<our id>``. C is
-any containment; N must name exactly one widget in the file (two are
-``applet-not-found``: nothing is guessed). A key that is not there takes its
+any containment. plasmawindowed keeps its widget at the top level, so that
+file also takes ``[Applets][N]`` and ``[Applets][N][Configuration][General]``;
+the desktop file never does. N must name exactly one widget in a file (two
+are ``applet-not-found``: nothing is guessed, and the other file is not
+tried). A widget N of another plugin is not ours: the settings of another
+plasmoid are never read, and the next file is tried. A key that is not there takes its
 ``main.xml`` default from ``CONFIG_ENTRIES`` (kept equal to main.xml by
 tests/test_applet_config_sync.py), so the result is what the widget applies.
 
@@ -100,6 +105,9 @@ UNREADABLE = _Unreadable()
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
 _GROUP_HEADER = re.compile(rb"(?:\[[^\[\]\n]*\])+")
 _APPLET_GROUP = re.compile(rb"\[Containments\]\[([0-9]+)\]\[Applets\]\[([0-9]+)\]((?:\[[^\[\]\n]*\])*)")
+# plasmawindowedrc: the same, or the widget at the top level (group 1 is None then).
+_WINDOWED_APPLET_GROUP = re.compile(
+    rb"(?:\[Containments\]\[([0-9]+)\])?\[Applets\]\[([0-9]+)\]((?:\[[^\[\]\n]*\])*)")
 _CONFIG_SUFFIX = b"[Configuration][General]"
 _PLAIN_KEY = re.compile(rb"[A-Za-z0-9_.\-]+")
 _HEX_DIGITS = b"0123456789abcdefABCDEF"
@@ -232,20 +240,23 @@ def _same_id(text: bytes, applet: int) -> bool:
     return (text.lstrip(b"0") or b"0") == str(applet).encode("ascii")
 
 
-def find_applet(content: bytes, applet: int) -> Optional[dict[bytes, bytes]]:
-    """The raw General entries of widget ``applet`` (last line wins), None when it isn't there.
+def find_applet(content: bytes, applet: int, *, windowed: bool = False) -> Optional[dict[bytes, bytes]]:
+    """The raw General entries of widget ``applet`` (last line wins), None when it isn't ours here.
 
-    ``applet-not-found`` when two widgets of the file carry the id (in two
-    containments, or spelled with leading zeros), or the one that does is
-    not ours.
+    ``windowed`` (plasmawindowedrc) also takes the top-level ``[Applets][N]``
+    form. None when no widget carries the id, or the one that does is of
+    another plugin (the caller may try the next file). ``applet-not-found``
+    when two widgets of the file carry the id (in two containments, at the top
+    level and in a containment, or spelled with leading zeros).
     """
-    owners: set[tuple[bytes, bytes]] = set()
+    pattern = _WINDOWED_APPLET_GROUP if windowed else _APPLET_GROUP
+    owners: set[tuple[Optional[bytes], bytes]] = set()
     plugin: Optional[bytes] = None
     entries: dict[bytes, bytes] = {}
     for line in content.split(b"\n"):
         line = line.strip()
         if line.startswith(b"[") and _GROUP_HEADER.fullmatch(line):
-            match = _APPLET_GROUP.fullmatch(line)
+            match = pattern.fullmatch(line)
             if match is not None and _same_id(match.group(2), applet):
                 owners.add((match.group(1), match.group(2)))
     if not owners:
@@ -253,7 +264,7 @@ def find_applet(content: bytes, applet: int) -> Optional[dict[bytes, bytes]]:
     if len(owners) > 1:
         raise HelperError("applet-not-found")
     for group, key, value in _groups(content):
-        match = None if group is None else _APPLET_GROUP.fullmatch(group)
+        match = None if group is None else pattern.fullmatch(group)
         if match is None or (match.group(1), match.group(2)) not in owners:
             continue
         if match.group(3) == b"" and key == b"plugin":
@@ -261,7 +272,7 @@ def find_applet(content: bytes, applet: int) -> Optional[dict[bytes, bytes]]:
         elif match.group(3) == _CONFIG_SUFFIX:
             entries[key] = value
     if plugin != PLUGIN.encode("ascii"):
-        raise HelperError("applet-not-found")
+        return None  # Another plasmoid's widget (or none at all): never read, not ours.
     return entries
 
 
@@ -305,7 +316,8 @@ def applied_settings(
 ) -> dict[str, object]:
     """The applied value of each of ``keys`` for widget ``applet``.
 
-    ``applet-not-found`` when no rc file has exactly one such widget of ours;
+    ``applet-not-found`` when no rc file has a widget ``applet`` of ours, or
+    one has two widgets of that id (then the next file is not tried);
     ``settings-unreadable`` when an rc file is a symlink, not a regular file,
     someone else's, or too large; ``os-error`` otherwise.
     """
@@ -324,7 +336,7 @@ def applied_settings(
                 raise HelperError("os-error" if error.code == "os-error" else "settings-unreadable") from None
             if current is None:
                 continue
-            entries = find_applet(current[0], applet)
+            entries = find_applet(current[0], applet, windowed=name == WINDOWED_RC)
             if entries is not None:
                 return applied_from(entries, keys)
     raise HelperError("applet-not-found")

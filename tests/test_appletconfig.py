@@ -33,12 +33,16 @@ def config(tmp_path, monkeypatch):
 
 
 def widget(general=None, *, containment=2, applet=APPLET, plugin=appletconfig.PLUGIN, extra=""):
-    """rc text of one widget: its group, then its General group with ``general`` lines."""
-    text = f"[Containments][{containment}][Applets][{applet}]\nimmutability=1\n"
+    """rc text of one widget: its group, then its General group with ``general`` lines.
+
+    ``containment=None`` is the top-level form plasmawindowedrc really uses.
+    """
+    group = f"[Applets][{applet}]" if containment is None else f"[Containments][{containment}][Applets][{applet}]"
+    text = f"{group}\nimmutability=1\n"
     if plugin is not None:
         text += f"plugin={plugin}\n"
     if general is not None:
-        text += f"\n[Containments][{containment}][Applets][{applet}][Configuration][General]\n"
+        text += f"\n{group}[Configuration][General]\n"
         text += "".join(f"{line}\n" for line in general)
     return text + extra
 
@@ -238,26 +242,100 @@ def test_only_the_asked_keys_are_returned(config):
 # --- the windowed fallback ------------------------------------------------------------------------
 
 
+def windowed(general=None, **kwargs):
+    """plasmawindowedrc text of one widget, at the top level as plasmawindowed writes it."""
+    return widget(general, containment=None, **kwargs)
+
+
+# Sanitized from a fresh plasmawindowed run in the lab (widget 4, no containment prefix).
+REAL_WINDOWED_RC = f"""[$Version]
+update_info=plasma_to_plasmawindowed.upd
+
+[Applets][4]
+activityId=
+formfactor=0
+immutability=1
+location=0
+plugin={appletconfig.PLUGIN}
+
+[Applets][4][Configuration]
+PreloadWeight=0
+
+[Applets][4][Configuration][General]
+usageMode=used
+panelRing=off
+"""
+
+
+def test_the_real_plasmawindowed_layout_is_read(config):
+    write_rc(config, REAL_WINDOWED_RC, name=appletconfig.WINDOWED_RC)
+    result = applied(4)
+    assert (result["usageMode"], result["panelRing"], result["refreshInterval"]) == ("used", "off", 300)
+
+
 def test_plasmawindowed_is_read_when_appletsrc_is_missing(config):
-    write_rc(config, widget(["usageMode=used"], containment=1), name=appletconfig.WINDOWED_RC)
+    write_rc(config, windowed(["usageMode=used"]), name=appletconfig.WINDOWED_RC)
     assert applied()["usageMode"] == "used"
 
 
 def test_plasmawindowed_is_read_when_appletsrc_lacks_the_widget(config):
     write_rc(config, widget(["usageMode=remaining"], applet=22))
+    write_rc(config, windowed(["usageMode=used"]), name=appletconfig.WINDOWED_RC)
+    assert applied()["usageMode"] == "used"
+
+
+@pytest.mark.parametrize("plugin", ["org.kde.plasma.pager", legacy.LEGACY_PLUGIN, None])
+def test_plasmawindowed_is_read_when_the_id_in_appletsrc_is_another_plugin(config, plugin):
+    # plasmawindowed ids are small, so the desktop often has another widget with the same id.
+    write_rc(config, widget(["usageMode=remaining", "panelRing=claude.session"], plugin=plugin))
+    write_rc(config, windowed(["usageMode=used"]), name=appletconfig.WINDOWED_RC)
+    result = applied()
+    assert (result["usageMode"], result["panelRing"]) == ("used", "auto")
+
+
+def test_another_plugin_in_both_files_is_not_found(config):
+    write_rc(config, widget(["usageMode=used"], plugin="org.kde.plasma.pager"))
+    write_rc(config, windowed(["usageMode=used"], plugin="org.kde.plasma.pager"), name=appletconfig.WINDOWED_RC)
+    assert applied() == "applet-not-found"
+
+
+def test_plasmawindowed_may_still_use_the_containment_form(config):
     write_rc(config, widget(["usageMode=used"], containment=1), name=appletconfig.WINDOWED_RC)
+    assert applied()["usageMode"] == "used"
+
+
+def test_the_top_level_form_counts_only_in_plasmawindowed(config):
+    write_rc(config, windowed(["usageMode=used"]))
+    assert applied() == "applet-not-found"
+    write_rc(config, windowed(["usageMode=remaining"]))
+    write_rc(config, windowed(["usageMode=used"]), name=appletconfig.WINDOWED_RC)
     assert applied()["usageMode"] == "used"
 
 
 def test_appletsrc_wins_when_it_has_the_widget(config):
     write_rc(config, widget(["usageMode=used"]))
-    write_rc(config, widget(["usageMode=remaining"], containment=1), name=appletconfig.WINDOWED_RC)
+    write_rc(config, windowed(["usageMode=remaining"]), name=appletconfig.WINDOWED_RC)
     assert applied()["usageMode"] == "used"
 
 
-def test_two_widgets_in_appletsrc_are_not_resolved_by_the_windowed_file(config):
-    write_rc(config, widget(["usageMode=used"]) + widget(None, containment=3))
-    write_rc(config, widget(["usageMode=remaining"], containment=1), name=appletconfig.WINDOWED_RC)
+@pytest.mark.parametrize("text", [
+    widget(["usageMode=used"]) + widget(None, containment=3),
+    widget(["usageMode=used"]) + widget(None, containment=3, plugin="org.kde.plasma.pager"),
+    widget(["usageMode=used"], plugin="org.kde.plasma.pager") + widget(None, applet="021"),
+])
+def test_two_widgets_in_appletsrc_are_not_resolved_by_the_windowed_file(config, text):
+    write_rc(config, text)
+    write_rc(config, windowed(["usageMode=remaining"]), name=appletconfig.WINDOWED_RC)
+    assert applied() == "applet-not-found"
+
+
+@pytest.mark.parametrize("text", [
+    windowed(["usageMode=used"]) + windowed(None, applet=f"0{APPLET}"),
+    windowed(["usageMode=used"]) + widget(None, containment=1),
+    windowed(["usageMode=used"]) + "[Containments][1][Applets][21][Configuration][General]\nusageMode=x\n",
+])
+def test_two_widgets_in_the_windowed_file_are_refused(config, text):
+    write_rc(config, text, name=appletconfig.WINDOWED_RC)
     assert applied() == "applet-not-found"
 
 
@@ -265,13 +343,21 @@ def test_an_unsafe_appletsrc_is_refused_without_falling_back(config, tmp_path):
     real = tmp_path / "real-appletsrc"
     real.write_text(widget(["usageMode=used"]))
     (config / appletconfig.APPLETSRC).symlink_to(real)
-    write_rc(config, widget(["usageMode=remaining"], containment=1), name=appletconfig.WINDOWED_RC)
+    write_rc(config, windowed(["usageMode=remaining"]), name=appletconfig.WINDOWED_RC)
     assert applied() == "settings-unreadable"
 
 
 def test_an_unsafe_windowed_file_is_refused(config, tmp_path):
     real = tmp_path / "real-windowedrc"
-    real.write_text(widget(["usageMode=used"]))
+    real.write_text(windowed(["usageMode=used"]))
+    (config / appletconfig.WINDOWED_RC).symlink_to(real)
+    assert applied() == "settings-unreadable"
+
+
+def test_an_unsafe_windowed_file_is_refused_after_a_foreign_widget(config, tmp_path):
+    write_rc(config, widget(["usageMode=remaining"], plugin="org.kde.plasma.pager"))
+    real = tmp_path / "real-windowedrc"
+    real.write_text(windowed(["usageMode=used"]))
     (config / appletconfig.WINDOWED_RC).symlink_to(real)
     assert applied() == "settings-unreadable"
 

@@ -92,8 +92,9 @@ def write_rc(settings, *, applet=APPLET, name=appletconfig.APPLETSRC, raw_lines=
     """Widget ``applet``'s applied ``settings`` in a fixture rc file under $XDG_CONFIG_HOME."""
     base = Path(os.environ["XDG_CONFIG_HOME"])
     base.mkdir(parents=True, exist_ok=True)
-    lines = [f"[Containments][1][Applets][{applet}]", f"plugin={appletconfig.PLUGIN}", "",
-             f"[Containments][1][Applets][{applet}][Configuration][General]"]
+    # plasmawindowedrc keeps the widget at the top level, the desktop file in a containment.
+    group = f"[Applets][{applet}]" if name == appletconfig.WINDOWED_RC else f"[Containments][1][Applets][{applet}]"
+    lines = [group, f"plugin={appletconfig.PLUGIN}", "", f"{group}[Configuration][General]"]
     lines += [f"{key}={kconfig_text(value)}" for key, value in settings.items()]
     lines += list(raw_lines)
     path = base / name
@@ -573,6 +574,15 @@ def test_export_without_any_rc_file_is_applet_not_found(config, tmp_path):
 
 
 def test_export_falls_back_to_plasmawindowed(config):
+    write_rc({"usageMode": "used"}, name=appletconfig.WINDOWED_RC)
+    assert run("export")["ok"] is True
+    assert run("import")["settings"]["usageMode"] == "used"
+
+
+def test_export_falls_back_to_plasmawindowed_past_another_plugin_with_the_id(config):
+    # The lab case: widget 4 of plasmawindowed, and the desktop's widget 4 is the pager.
+    desktop = write_rc({"usageMode": "remaining"})
+    desktop.write_text(desktop.read_text().replace(appletconfig.PLUGIN, "org.kde.plasma.pager"))
     write_rc({"usageMode": "used"}, name=appletconfig.WINDOWED_RC)
     assert run("export")["ok"] is True
     assert run("import")["settings"]["usageMode"] == "used"
