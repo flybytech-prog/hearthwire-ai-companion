@@ -825,13 +825,24 @@ def test_proof_chat_view_current_rule_catches(with_ollama, old, new):
 HELPER_FLAGS = ("--vault", "--web-data", "--store", "--applet", "--generation", "--keep")
 
 
+# --applet also names the widget in history and backup commands: there it
+# may appear only inside the one builder of UsageHistory.js or SettingsBackup.js.
+APPLET_FLAG_BUILDERS = {"UsageHistory.js": "historyCommand", "SettingsBackup.js": "backupCommand"}
+
+
 def _helper_flag_offenders(sources):
-    return [
-        f"{name}:{line} {flag}"
-        for name, code in sources.items() if not name.endswith("ChatStorage.js")
-        for flag in HELPER_FLAGS
-        for line in _hits(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", code)
-    ]
+    offenders = []
+    for name, code in sources.items():
+        if name.endswith("ChatStorage.js"):
+            continue
+        builder = APPLET_FLAG_BUILDERS.get(name.rsplit("/", 1)[-1])
+        spans = _block_spans(code, rf"\bfunction\s+{builder}\s*\([^)]*\)\s*\{{") if builder else []
+        for flag in HELPER_FLAGS:
+            for match in re.finditer(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", code):
+                if flag == "--applet" and len(spans) == 1 and spans[0][0] <= match.start() < spans[0][1]:
+                    continue
+                offenders.append(f"{name}:{_line_of(code, match.start())} {flag}")
+    return offenders
 
 
 def test_helper_flags_appear_only_in_chat_storage_js():
@@ -1053,6 +1064,21 @@ def test_proof_helper_flag_outside_chat_storage_is_caught():
     code = _mutated(MAIN_QML, "    function chatNext() {",
                     "    function x() { return \"python3 -P -m hearthwire --vault status\" }\n    function chatNext() {")
     assert _helper_flag_offenders({"main.qml": code})
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (MAIN_QML, "    function chatNext() {", '    function x() { return " --applet " + Plasmoid.id }\n    function chatNext() {'),
+    (UI / "UsageHistory.js", "function validApplet(value) {",
+     'function appletArg(applet) { return " --applet " + applet }\nfunction validApplet(value) {'),
+    (UI / "UsageHistory.js", "function validApplet(value) {",
+     'function historyCommand(op) { return " --applet " + op }\nfunction validApplet(value) {'),
+    (UI / "SettingsBackup.js", '" --applet " + applet', '" --applet " + applet + " --store encrypted"'),
+    (UI / "SettingsBackup.js", '" --applet " + applet', '" --applet " + applet + " --keep 1"'),
+    (UI / "configGeneral.qml", "    function backupStatusText() {\n",
+     '    function g() { return "x --applet 1" }\n    function backupStatusText() {\n'),
+])
+def test_proof_applet_flag_outside_the_builders_is_caught(path, old, new):
+    assert _helper_flag_offenders(_sources_with(path, old, new))
 
 
 @pytest.mark.parametrize("old,new", [
@@ -7299,10 +7325,13 @@ def test_proof_clear_owed_writer_rule_catches(path, old, new):
 HISTORY_LIBRARY_PINS = (
     "var ID_PATTERN = /^[a-z_]{1,32}$/",
     "var SAMPLE_PATTERN = /^[a-z_]{1,32}\\.[a-z_]{1,32}=(100|[1-9]?[0-9])$/",
+    "var MAX_APPLET = 2147483648",
 )
+HISTORY_VALID_APPLET_BODY = "{ return isInt(value) && value >= 1 && value <= MAX_APPLET }"
 HISTORY_COMMAND_BODY = (
-    '{ if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0) return "" '
+    '{ if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0 || !validApplet(applet)) return "" '
     'var command = "env HEARTHWIRE_RUN=" + run + " python3 -P -m hearthwire --usage-history " + op '
+    '+ " --applet " + applet '
     'if (op !== "record") return command '
     'return validSample(sample) ? command + " --sample " + sample : "" }'
 )
@@ -7331,6 +7360,9 @@ def _history_library_problems(code):
         return problems + ["exactly one historyCommand(), sampleArg() and validSample() expected"]
     if _squeezed(command) != HISTORY_COMMAND_BODY:
         problems.append(f"historyCommand must stay {HISTORY_COMMAND_BODY}")
+    applet = _function_body(code, "validApplet")
+    if applet is None or _squeezed(applet) != HISTORY_VALID_APPLET_BODY:
+        problems.append(f"validApplet must stay {HISTORY_VALID_APPLET_BODY}")
     problems += _pin_problems(sample, HISTORY_SAMPLE_PINS, "sampleArg()")
     problems += _pin_problems(valid, HISTORY_VALID_SAMPLE_PINS, "validSample()")
     return problems
@@ -7351,8 +7383,16 @@ def test_usage_history_js_is_pure_and_builds_checked_commands():
     ("/^[a-z_]{1,32}\\.[a-z_]{1,32}=(100|[1-9]?[0-9])$/", "/^.*$/"),
     ("var ID_PATTERN = /^[a-z_]{1,32}$/", "var ID_PATTERN = /^.+$/"),
     ('return validSample(sample) ? command + " --sample " + sample : ""', 'return command + " --sample " + sample'),
-    ("if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0)", "if (!isInt(run) || run < 0)"),
-    ("if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0)", "if (OPERATIONS.indexOf(op) < 0)"),
+    ("if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0 || !validApplet(applet))",
+     "if (!isInt(run) || run < 0 || !validApplet(applet))"),
+    ("if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0 || !validApplet(applet))",
+     "if (OPERATIONS.indexOf(op) < 0 || !validApplet(applet))"),
+    ("if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0 || !validApplet(applet))",
+     "if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0)"),
+    ('+ " --applet " + applet\n    if (op !== "record")', '\n    if (op !== "record")'),
+    ("return isInt(value) && value >= 1 && value <= MAX_APPLET", "return value !== undefined"),
+    ("return isInt(value) && value >= 1 && value <= MAX_APPLET", "return isInt(value) && value <= MAX_APPLET"),
+    ("var MAX_APPLET = 2147483648", "var MAX_APPLET = Infinity"),
     ('" python3 -P -m hearthwire --usage-history "', '" python3 -m hearthwire --usage-history "'),
     ('items.push(pairs[index] + "=" + Math.round(Math.max(0, Math.min(100, reading.used_percent))))',
      'items.push(provider.provider_id + "." + reading.kind + "=" + reading.used_percent)'),
@@ -7368,15 +7408,20 @@ def test_proof_history_library_rule_catches(old, new):
 
 HISTORY_FLAG = r"--usage-history\b"
 HISTORY_COMMAND_CALLS = {
-    MAIN_QML.name: "UsageHistory.historyCommand(job.op, root.historyRun, job.sample)",
-    CONFIG_GENERAL.name: 'UsageHistory.historyCommand("clear", page.historyClearRun)',
+    MAIN_QML.name: "UsageHistory.historyCommand(job.op, root.historyRun, Plasmoid.id, job.sample)",
+    CONFIG_GENERAL.name: 'UsageHistory.historyCommand("clear", page.historyClearRun, Plasmoid.id)',
 }
-HISTORY_REQUEST_ARGS = {'"read"': 1, '"record", sample': 1}
+# Reads: the first one (historyStart) and one each time the popup opens (historyReread).
+HISTORY_REQUEST_ARGS = {'"read"': 2, '"record", sample': 1}
 HISTORY_REQUEST_ALLOWED = {'"read"', '"record", sample', '"clear"'}
 HISTORY_MAIN_PINS = (
     "var sample = UsageHistory.sampleArg(tracked, Catalog.providers)",
     "historySource.connectSource(command)",
+    "readonly property bool historyAppletOk: UsageHistory.validApplet(Plasmoid.id)",
 )
+HISTORY_REQUEST_BODY = ('{ if (!root.historyAppletOk) return '
+                        'root.historyQueue = root.historyQueue.concat([{ op: op, sample: sample || "" }]) '
+                        'Qt.callLater(root.historyNext) }')
 
 
 def _history_command_problems(sources):
@@ -7399,6 +7444,9 @@ def _history_command_problems(sources):
     main = sources.get(_rel(MAIN_QML), "")
     general = sources.get(_rel(CONFIG_GENERAL), "")
     problems += _pin_problems(main, HISTORY_MAIN_PINS, "main.qml")
+    request = _function_body(main, "historyRequest")
+    if request is None or _squeezed(request) != HISTORY_REQUEST_BODY:
+        problems.append(f"historyRequest must stay {HISTORY_REQUEST_BODY}")
     problems += _pin_problems(general, ("historyClearSource.connectSource(command)",), "configGeneral.qml")
     args = re.findall(r"\bhistoryRequest\s*\(\s*([^()\n]*?)\s*\)", main)
     args = [_squeezed(value) for value in args if value != "op, sample"]
@@ -7422,8 +7470,14 @@ def test_history_commands_are_built_only_from_checked_values():
 
 
 @pytest.mark.parametrize(("path", "old", "new"), [
-    (MAIN_QML, "UsageHistory.historyCommand(job.op, root.historyRun, job.sample)",
-     "UsageHistory.historyCommand(job.op, root.historyRun, root.snapshot.plan)"),
+    (MAIN_QML, "UsageHistory.historyCommand(job.op, root.historyRun, Plasmoid.id, job.sample)",
+     "UsageHistory.historyCommand(job.op, root.historyRun, Plasmoid.id, root.snapshot.plan)"),
+    (MAIN_QML, "UsageHistory.historyCommand(job.op, root.historyRun, Plasmoid.id, job.sample)",
+     "UsageHistory.historyCommand(job.op, root.historyRun, root.chatAppletId, job.sample)"),
+    (MAIN_QML, "UsageHistory.validApplet(Plasmoid.id)", "UsageHistory.validApplet(root.chatAppletId)"),
+    (MAIN_QML, "        if (!root.historyAppletOk)\n            return\n        root.historyQueue = root.historyQueue.concat(",
+     "        root.historyQueue = root.historyQueue.concat("),
+    (MAIN_QML, '{ op: op, sample: sample || "" }', '{ op: op, sample: sample || Plasmoid.configuration.chatSites }'),
     (MAIN_QML, "UsageHistory.sampleArg(tracked, Catalog.providers)", "UsageHistory.sampleArg(tracked, root.snapshot.catalog)"),
     (MAIN_QML, 'root.historyRequest("record", sample)', 'root.historyRequest("record", tracked[0].plan)'),
     (MAIN_QML, "    function chatNext() {",
@@ -7432,7 +7486,10 @@ def test_history_commands_are_built_only_from_checked_values():
      '    function x() { root.historyRequest("record", root.lastError) }\n    function chatNext() {'),
     (MAIN_QML, 'root.historyFinish(root.historyOp, data["exit code"], data["stdout"])',
      'root.historyFinish(root.historyOp, data["exit code"], data["stderr"])'),
-    (CONFIG_GENERAL, 'UsageHistory.historyCommand("clear", page.historyClearRun)', 'UsageHistory.historyCommand(page.cfg_usageMode, page.historyClearRun)'),
+    (CONFIG_GENERAL, 'UsageHistory.historyCommand("clear", page.historyClearRun, Plasmoid.id)',
+     'UsageHistory.historyCommand(page.cfg_usageMode, page.historyClearRun, Plasmoid.id)'),
+    (CONFIG_GENERAL, 'UsageHistory.historyCommand("clear", page.historyClearRun, Plasmoid.id)',
+     'UsageHistory.historyCommand("clear", page.historyClearRun, page.vaultApplet)'),
     (CONFIG_GENERAL, 'var reply = UsageHistory.parseReply("clear", data["exit code"], data["stdout"], Catalog.providers)',
      'var reply = UsageHistory.parseReply("clear", data["exit code"], data["stderr"], Catalog.providers)'),
     (CONFIG_USAGE, "    function setPanelRing(value) {\n",
@@ -7445,6 +7502,8 @@ def test_proof_history_command_rule_catches(path, old, new):
 HISTORY_RECORD_GUARD = "{ if (!root.usageHistoryEnabled || !root.usageShown) return "
 HISTORY_START_BODY = ('{ if (root.usageHistoryEnabled && root.usageShown && !root.historyReadDone) { '
                       'root.historyReadDone = true root.historyRequest("read") } }')
+HISTORY_REREAD_GUARD = ('{ if (!root.usageHistoryEnabled || !root.usageShown || !root.historyReadDone '
+                        '|| root.historyOp === "read" ')
 HISTORY_OFF_PINS = (
     "root.historyQueue = []",
     'root.historyRequest("clear")',
@@ -7464,6 +7523,13 @@ def _history_guard_problems(code):
         problems.append("the record request belongs to historyRecord")
     if _squeezed(start) != HISTORY_START_BODY:
         problems.append(f"historyStart must stay {HISTORY_START_BODY}")
+    reread = _function_body(code, "historyReread")
+    if reread is None or not _squeezed(reread).startswith(HISTORY_REREAD_GUARD) \
+            or _squeezed(reread).count('root.historyRequest("read")') != 1:
+        problems.append(f"historyReread must start with {HISTORY_REREAD_GUARD} and ask for one read")
+    reads = [at for at in _hits(_code_pattern('root.historyRequest("read")'), code)]
+    if len(reads) != 2:
+        problems.append("a read is asked for only by historyStart and historyReread")
     problems += _pin_problems(finish, ("} else if (root.usageHistoryEnabled) {",), "historyFinish()")
     handlers = [body for _, body in _blocks(code, r"(?<![\w.])onUsageHistoryEnabledChanged\s*:\s*\{")]
     if len(handlers) != 1:
@@ -7493,6 +7559,10 @@ def test_no_history_read_or_record_runs_while_disabled():
     ("if (root.usageHistoryEnabled && root.usageShown && !root.historyReadDone) {", "if (root.usageShown && !root.historyReadDone) {"),
     ('            root.historyRequest("read")\n', '            root.historyRequest("read")\n            root.historyRequest("read")\n'),
     ("} else if (root.usageHistoryEnabled) {", "} else {"),
+    ("if (!root.usageHistoryEnabled || !root.usageShown || !root.historyReadDone",
+     "if (!root.usageShown || !root.historyReadDone"),
+    ("    function historyReread() {\n", "    function historyReread() {\n        root.historyRequest(\"read\")\n"),
+    ("    function chatNext() {", '    function x() { root.historyRequest("read") }\n    function chatNext() {'),
     ('        root.historyQueue = []\n        root.historyRequest("clear")\n', '        root.historyRequest("clear")\n'),
     ('        root.historyQueue = []\n        root.historyRequest("clear")\n', '        root.historyRequest("clear")\n        root.historyQueue = []\n'),
     ("            root.historyStart()\n            return\n", "            root.historyStart()\n"),
@@ -7567,7 +7637,10 @@ LEGACY_DATA_TEXT = ("Saved sign-ins from the previous version haven't been moved
 FIXED_RETURN = r'i18n\("[^"\n]*"\)'
 REPLY_ERROR_CHECK = "ERRORS.indexOf(reply.error) >= 0 ? { ok: false, error: reply.error } :"
 HISTORY_NOTICE = (
-    'readonly property string historyNotice: root.historyClearFailed '
+    'readonly property string historyNotice: !root.historyAppletOk '
+    '&& (root.usageHistoryEnabled || Plasmoid.configuration.usageHistoryClearOwed === true) '
+    '? i18n("This widget couldn\'t be identified, so its usage history can\'t be used.") '
+    ': root.historyClearFailed '
     '? i18n("The usage history couldn\'t be deleted. Use Delete usage history in Settings → General → Privacy.") '
     f': root.historyError === "legacy-data" ? i18n("{LEGACY_DATA_TEXT}") : ""'
 )
@@ -7580,7 +7653,7 @@ HISTORY_ERROR_FORMS = (
 HISTORY_CLEAR_STATE_FORMS = (
     r'property\s+string\s+historyClearState\s*:\s*""',
     r'page\s*\.\s*historyClearState\s*(?:===|!==)\s*"\w+"',
-    r'page\s*\.\s*historyClearState\s*=\s*"busy"\s*$',
+    r'page\s*\.\s*historyClearState\s*=\s*"(?:busy|no-applet)"\s*$',
     r'page\s*\.\s*historyClearState\s*=\s*reply\s*\.\s*ok\s*\?\s*"ok"\s*:\s*reply\s*\.\s*error\s*$',
     r'page\s*\.\s*historyClearText\s*\(\s*page\s*\.\s*historyClearState\s*\)',
 )
@@ -7630,8 +7703,8 @@ def _history_message_problems(main, general, view, library):
     if body is None:
         return problems + ["exactly one function historyClearText() expected"]
     problems += _fixed_text_problems(body, "historyClearText")
-    if _case_returns(body, "legacy-data") != f'i18n("{LEGACY_DATA_TEXT}")':
-        problems.append("historyClearText must map legacy-data to the fixed message")
+    if not re.fullmatch(FIXED_RETURN, _case_returns(body, "no-applet") or ""):
+        problems.append("historyClearText must map no-applet to a fixed message")
     parse = _function_body(library, "parseReply")
     if parse is None:
         return problems + ["exactly one function parseReply() expected"]
@@ -7656,8 +7729,13 @@ def test_history_messages_are_fixed_text():
     (CONFIG_GENERAL, "text: page.historyClearText(page.historyClearState)", "text: page.historyClearState"),
     (CONFIG_GENERAL, 'return i18n("Couldn\'t delete the usage history. Try again in a moment.")', "return state"),
     (CONFIG_GENERAL, 'return i18n("Usage history deleted.")', 'return i18n("Deleted: %1", state)'),
-    (CONFIG_GENERAL, '        case "legacy-data":\n            return i18n("Saved sign-ins from the previous version haven\'t been moved yet. Run the installer again with --restart-plasma.")\n        default:\n            return i18n("Couldn\'t delete',
-     '        default:\n            return i18n("Couldn\'t delete'),
+    (CONFIG_GENERAL, '        case "no-applet":\n            return i18n("This widget couldn\'t be identified, so its usage history can\'t be deleted.")\n',
+     ""),
+    (CONFIG_GENERAL, 'return i18n("This widget couldn\'t be identified, so its usage history can\'t be deleted.")',
+     "return state"),
+    (CONFIG_GENERAL, 'page.historyClearState = "no-applet"', "page.historyClearState = command"),
+    (MAIN_QML, '? i18n("This widget couldn\'t be identified, so its usage history can\'t be used.")',
+     "? root.historyError"),
     (CONFIG_GENERAL, 'page.historyClearState = reply.ok ? "ok" : reply.error', 'page.historyClearState = data["stdout"]'),
     (USAGE_HISTORY_JS, "&& ERRORS.indexOf(reply.error) >= 0 ? { ok: false, error: reply.error } : invalid", "? { ok: false, error: reply.error } : invalid"),
 ])
@@ -7670,22 +7748,18 @@ def test_proof_history_message_rule_catches(path, old, new):
 # --- Round 4, phase 6: settings backup ----------------------------------------------------
 
 BACKUP_LIBRARY_PINS = (
-    "var HEX_PATTERN = /^(?:[0-9a-f]{2})+$/",
     "var STAMP_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/",
+    "var MAX_APPLET = 2147483648",
 )
+BACKUP_VALID_APPLET_BODY = "{ return isCount(value) && value >= 1 && value <= MAX_APPLET }"
 BACKUP_COMMAND_BODY = (
-    '{ if (OPERATIONS.indexOf(op) < 0 || !isCount(run)) return "" '
-    'var command = "env HEARTHWIRE_RUN=" + run + " python3 -P -m hearthwire --settings-backup " + op '
-    'if (op !== "export") return command '
-    'return typeof data === "string" && data.length <= MAX_DATA_HEX && HEX_PATTERN.test(data) '
-    '? command + " --data " + data : "" }'
-)
-BACKUP_EXPORT_PINS = (
-    "BACKUP_KEYS.forEach(function (key) {",
-    "var hex = hexUtf8(JSON.stringify(picked))",
+    '{ if (OPERATIONS.indexOf(op) < 0 || !isCount(run) || !validApplet(applet)) return "" '
+    'return "env HEARTHWIRE_RUN=" + run + " python3 -P -m hearthwire --settings-backup " + op '
+    '+ " --applet " + applet }'
 )
 BACKUP_OPERATIONS = ["status", "export", "import"]
-BACKUP_RUN_ARGS = {'"status"', '"import"', '"export", SettingsBackup.exportPayload(page.backupSettings())', "op, data"}
+# The page's own definition (op) and the three fixed steps; an export sends nothing more.
+BACKUP_RUN_ARGS = {'"status"', '"import"', '"export"', "op"}
 
 
 def _backup_library_problems(code):
@@ -7694,12 +7768,13 @@ def _backup_library_problems(code):
         problems.append(f"OPERATIONS must stay {BACKUP_OPERATIONS}")
     problems += _pin_problems(code, BACKUP_LIBRARY_PINS, "SettingsBackup.js")
     command = _function_body(code, "backupCommand")
-    export = _function_body(code, "exportPayload")
-    if None in (command, export):
-        return problems + ["exactly one backupCommand() and exportPayload() expected"]
+    applet = _function_body(code, "validApplet")
+    if None in (command, applet):
+        return problems + ["exactly one backupCommand() and validApplet() expected"]
     if _squeezed(command) != BACKUP_COMMAND_BODY:
         problems.append(f"backupCommand must stay {BACKUP_COMMAND_BODY}")
-    problems += _pin_problems(export, BACKUP_EXPORT_PINS, "exportPayload()")
+    if _squeezed(applet) != BACKUP_VALID_APPLET_BODY:
+        problems.append(f"validApplet must stay {BACKUP_VALID_APPLET_BODY}")
     return problems
 
 
@@ -7714,14 +7789,16 @@ def test_settings_backup_js_is_pure_and_builds_checked_commands():
     ("function isObject(value) {", 'function reach() { return Qt.resolvedUrl("x") }\nfunction isObject(value) {'),
     ("function isObject(value) {", "function logged(value) { console.log(value) }\nfunction isObject(value) {"),
     ('var OPERATIONS = ["status", "export", "import"]', 'var OPERATIONS = ["status", "export", "import", "path"]'),
-    ("var HEX_PATTERN = /^(?:[0-9a-f]{2})+$/", "var HEX_PATTERN = /^.*$/"),
-    ('return typeof data === "string" && data.length <= MAX_DATA_HEX && HEX_PATTERN.test(data)',
-     'return typeof data === "string" && data.length <= MAX_DATA_HEX'),
-    ('        ? command + " --data " + data : ""', '        ? command + " --path " + data : ""'),
-    ("if (OPERATIONS.indexOf(op) < 0 || !isCount(run))", "if (!isCount(run))"),
+    ("if (OPERATIONS.indexOf(op) < 0 || !isCount(run) || !validApplet(applet))",
+     "if (!isCount(run) || !validApplet(applet))"),
+    ("if (OPERATIONS.indexOf(op) < 0 || !isCount(run) || !validApplet(applet))",
+     "if (OPERATIONS.indexOf(op) < 0 || !validApplet(applet))"),
+    ("if (OPERATIONS.indexOf(op) < 0 || !isCount(run) || !validApplet(applet))",
+     "if (OPERATIONS.indexOf(op) < 0 || !isCount(run))"),
     ('" python3 -P -m hearthwire --settings-backup "', '" python3 -m hearthwire --settings-backup "'),
-    ("    BACKUP_KEYS.forEach(function (key) {", "    Object.keys(settings).forEach(function (key) {"),
-    ("var hex = hexUtf8(JSON.stringify(picked))", "var hex = hexUtf8(JSON.stringify(settings))"),
+    ('+ op + " --applet " + applet\n}', '+ op + " --applet " + applet + " --path /tmp/x"\n}'),
+    ("return isCount(value) && value >= 1 && value <= MAX_APPLET", "return isCount(value)"),
+    ("var MAX_APPLET = 2147483648", "var MAX_APPLET = 9007199254740991"),
 ])
 def test_proof_backup_library_rule_catches(old, new):
     assert _backup_library_problems(_mutated(SETTINGS_BACKUP_JS, old, new))
@@ -7739,7 +7816,7 @@ def _backup_command_problems(sources):
         if len(calls) != expected:
             problems.append(f"{name}: {expected} backupCommand mention(s) expected, found {calls}")
     general = sources.get(_rel(CONFIG_GENERAL), "")
-    problems += _pin_problems(general, ("SettingsBackup.backupCommand(op, page.backupRun, data)",
+    problems += _pin_problems(general, ("SettingsBackup.backupCommand(op, page.backupRun, Plasmoid.id)",
                                         "backupSource.connectSource(command)"), "configGeneral.qml")
     args = {_squeezed(value) for value in re.findall(r"\brunBackup\s*\(([^\n]*)\)\s*(?:\{)?\s*$", general, re.MULTILINE)}
     if args != BACKUP_RUN_ARGS:
@@ -7756,8 +7833,12 @@ def test_backup_commands_are_built_only_by_the_library():
 
 
 @pytest.mark.parametrize(("path", "old", "new"), [
-    (CONFIG_GENERAL, "SettingsBackup.backupCommand(op, page.backupRun, data)", "SettingsBackup.backupCommand(op, page.backupRun, page.cfg_chatSites)"),
-    (CONFIG_GENERAL, 'page.runBackup("export", SettingsBackup.exportPayload(page.backupSettings()))', 'page.runBackup("export", page.cfg_chatCustomUrls)'),
+    (CONFIG_GENERAL, "SettingsBackup.backupCommand(op, page.backupRun, Plasmoid.id)",
+     "SettingsBackup.backupCommand(op, page.backupRun, page.cfg_chatSites)"),
+    (CONFIG_GENERAL, "SettingsBackup.backupCommand(op, page.backupRun, Plasmoid.id)",
+     "SettingsBackup.backupCommand(op, page.backupRun, page.vaultApplet)"),
+    (CONFIG_GENERAL, 'page.runBackup("export")', 'page.runBackup("export", page.cfg_chatCustomUrls)'),
+    (CONFIG_GENERAL, "    function runBackup(op) {", "    function runBackup(op, data) {"),
     (CONFIG_GENERAL, 'page.runBackup("import")', "page.runBackup(page.backupMessage)"),
     (CONFIG_GENERAL, "    function backupStatusText() {\n",
      '    function g() { backupSource.connectSource("python3 -m hearthwire --settings-backup status") }\n    function backupStatusText() {\n'),
@@ -7885,7 +7966,10 @@ BACKUP_LABELS = {
     "backupDroppedCount": 'i18n("Settings left out: %1", page.backupDropped)',
     "backupExplanation": None,
     "backupPlanLabel": None,
+    "backupAddressChanges": "page.addressChangeText(page.backupAddressChanges)",
 }
+# The helper's new codes (export reads Plasma's file) and the page's own.
+BACKUP_NEW_CODES = ("applet-not-found", "settings-unreadable", "no-applet")
 
 
 def _backup_message_problems(general, library):
@@ -7900,6 +7984,9 @@ def _backup_message_problems(general, library):
     problems += _fixed_text_problems(status, "backupStatusText", BACKUP_STATUS_RETURNS)
     if _case_returns(text, "legacy-data") != f'i18n("{LEGACY_DATA_TEXT}")':
         problems.append("backupText must map legacy-data to the fixed message")
+    for code in BACKUP_NEW_CODES:
+        if not re.fullmatch(FIXED_RETURN, _case_returns(text, code) or ""):
+            problems.append(f"backupText must map {code} to a fixed message")
     plan = _single_element_top(general, TEXT_ELEMENT, "backupPlanLabel")
     if plan is None or _pin_problems(plan, (BACKUP_PLAN_ARGS,), "backupPlanLabel"):
         problems.append(f"backupPlanLabel must show only {BACKUP_PLAN_ARGS}")
@@ -7921,8 +8008,17 @@ def test_backup_messages_are_fixed_text_by_code():
 @pytest.mark.parametrize(("path", "old", "new"), [
     (CONFIG_GENERAL, 'return i18n("Something went wrong with the backup. Nothing was changed.")', "return code"),
     (CONFIG_GENERAL, 'return i18n("Backup saved.")', 'return i18n("Saved: %1", code)'),
-    (CONFIG_GENERAL, '        case "legacy-data":\n            return i18n("Saved sign-ins from the previous version haven\'t been moved yet. Run the installer again with --restart-plasma.")\n        default:\n            return i18n("Something went wrong',
-     '        default:\n            return i18n("Something went wrong'),
+    (CONFIG_GENERAL, '        case "legacy-data":\n            return i18n("Saved sign-ins from the previous version haven\'t been moved yet. Run the installer again with --restart-plasma.")\n',
+     ""),
+    (CONFIG_GENERAL, '        case "applet-not-found":\n', ""),
+    (CONFIG_GENERAL, 'return i18n("This widget\'s applied settings weren\'t found. Press Apply, then try again. Nothing was changed.")',
+     "return code"),
+    (CONFIG_GENERAL, '        case "settings-unreadable":\n', '        case "settings-unreadable-old":\n'),
+    (CONFIG_GENERAL, 'return i18n("This widget couldn\'t be identified, so the backup can\'t be used. Nothing was changed.")',
+     'return i18n("No widget %1", Plasmoid.id)'),
+    (CONFIG_GENERAL, "text: page.addressChangeText(page.backupAddressChanges)", "text: page.backupAddressChanges.join(\"\\n\")"),
+    (CONFIG_GENERAL, 'objectName: "backupAddressChanges"\n            Layout.fillWidth: true\n            visible: page.confirmingImport && text !== ""\n            wrapMode: Text.Wrap\n            textFormat: Text.PlainText\n',
+     'objectName: "backupAddressChanges"\n            Layout.fillWidth: true\n            visible: page.confirmingImport && text !== ""\n            wrapMode: Text.Wrap\n            textFormat: Text.AutoText\n'),
     (CONFIG_GENERAL, "SettingsBackup.shownStamp(page.backupExportedAt))\n        case", "page.backupExportedAt)\n        case"),
     (CONFIG_GENERAL, "            return page.backupText(page.backupState)\n", "            return page.backupState\n"),
     (CONFIG_GENERAL, "text: page.backupText(page.backupMessage)", "text: page.backupMessage"),
@@ -7943,3 +8039,240 @@ def test_proof_backup_message_rule_catches(path, old, new):
     general = _mutated(path, old, new) if path == CONFIG_GENERAL else _read_code(CONFIG_GENERAL)
     library = _mutated(path, old, new) if path == SETTINGS_BACKUP_JS else _read_code(SETTINGS_BACKUP_JS)
     assert _backup_message_problems(general, library)
+
+
+# --- Round 4, audit fix batch: import address changes, M1 guard ---------------------------
+
+# I3: Replace first lists the chat addresses it would change. Addresses come
+# from the backup file, so each is capped by UsageLogic.shownText and shown
+# as plain text, never opened.
+
+ADDRESS_CHANGE_PAGE_PINS = (
+    "page.backupAddressChanges = SettingsBackup.addressChanges(",
+    "shownText: UsageLogic.shownText",
+    "list.slice(0, SettingsBackup.MAX_SHOWN_CHANGES).forEach(function (change) {",
+    "var site = change.id === SettingsBackup.OLLAMA_ID ? null : ChatSites.byId(change.id)",
+    'var name = site ? site.name : i18n("Ollama")',
+    'lines.push(i18nc("a chat address: site, old address, new address", "%1: %2 → %3", name, change.from, change.to))',
+)
+ADDRESS_CHANGE_LIBRARY_PINS = (
+    "var MAX_SHOWN_CHANGES = 8",
+    "result.push({id: id, from: tools.shownText(from), to: tools.shownText(to)})",
+    "result.push({id: OLLAMA_ID, from: tools.shownText(now.chatOllamaUrl), to: tools.shownText(next.chatOllamaUrl)})",
+)
+ADDRESS_CHANGE_FORMS = (
+    r"property\s+var\s+backupAddressChanges\s*:\s*\[\s*\]",
+    r"page\s*\.\s*backupAddressChanges\s*=\s*\[\s*\]\s*$",
+    r"page\s*\.\s*backupAddressChanges\s*=\s*SettingsBackup\s*\.\s*addressChanges\s*\(\s*$",
+    r'objectName\s*:\s*"backupAddressChanges"',
+    r"page\s*\.\s*addressChangeText\s*\(\s*page\s*\.\s*backupAddressChanges\s*\)",
+)
+
+
+def _address_change_problems(general, library):
+    problems = _plain_label_problems(general, TEXT_ELEMENT, "backupAddressChanges",
+                                     "page.addressChangeText(page.backupAddressChanges)")
+    problems += _pin_problems(general, ADDRESS_CHANGE_PAGE_PINS, "configGeneral.qml")
+    problems += _unknown_mentions(general, "backupAddressChanges", ADDRESS_CHANGE_FORMS)
+    text = _function_body(general, "addressChangeText")
+    changes = _function_body(library, "addressChanges")
+    if None in (text, changes):
+        return problems + ["exactly one addressChangeText() and addressChanges() expected"]
+    if set(_returns(text)) != {'""', 'lines.join("\\n")'}:
+        problems.append(f"addressChangeText may return only \"\" or the joined lines, found {_returns(text)}")
+    extra = set(re.findall(r"\bchange\s*\.\s*(\w+)", text)) - {"id", "from", "to"}
+    if extra:
+        problems.append(f"addressChangeText may read only change.id, from and to, found {sorted(extra)}")
+    if len(_hits(r"\blines\s*\.\s*push\s*\(", text)) != 2:
+        problems.append("addressChangeText pushes one line per change and one count line")
+    problems += _pin_problems(library, ADDRESS_CHANGE_LIBRARY_PINS, "SettingsBackup.js")
+    if len(_hits(r"\bresult\s*\.\s*push\s*\(", changes)) != 2:
+        problems.append("addressChanges adds entries only through its two capped pushes")
+    return problems
+
+
+def test_import_address_changes_are_plain_and_capped():
+    problems = _address_change_problems(_read_code(CONFIG_GENERAL), _read_code(SETTINGS_BACKUP_JS))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (CONFIG_GENERAL, "shownText: UsageLogic.shownText", "shownText: function (text) { return text }"),
+    (CONFIG_GENERAL, "list.slice(0, SettingsBackup.MAX_SHOWN_CHANGES)", "list"),
+    (CONFIG_GENERAL, "name, change.from, change.to))", "name, change.raw, change.to))"),
+    (CONFIG_GENERAL, 'var name = site ? site.name : i18n("Ollama")', 'var name = change.name'),
+    (CONFIG_GENERAL, '        return lines.join("\\n")\n', '        return lines.join("<br>")\n'),
+    (CONFIG_GENERAL, "        page.backupPlan = plan\n",
+     "        page.backupPlan = plan\n        page.backupAddressChanges = reply.settings.chatCustomUrls\n"),
+    (CONFIG_GENERAL, "            textFormat: Text.PlainText\n            text: page.addressChangeText(page.backupAddressChanges)\n",
+     "            textFormat: Text.RichText\n            text: page.addressChangeText(page.backupAddressChanges)\n"),
+    (SETTINGS_BACKUP_JS, "from: tools.shownText(from), to: tools.shownText(to)", "from: from, to: tools.shownText(to)"),
+    (SETTINGS_BACKUP_JS, "to: tools.shownText(next.chatOllamaUrl)", "to: next.chatOllamaUrl"),
+    (SETTINGS_BACKUP_JS, "var MAX_SHOWN_CHANGES = 8", "var MAX_SHOWN_CHANGES = 1000"),
+    (SETTINGS_BACKUP_JS, "    return result\n}\n", "    result.push({id: \"x\", from: \"\", to: next.chatCustomUrls})\n    return result\n}\n"),
+])
+def test_proof_address_change_rule_catches(path, old, new):
+    general = _mutated(path, old, new) if path == CONFIG_GENERAL else _read_code(CONFIG_GENERAL)
+    library = _mutated(path, old, new) if path == SETTINGS_BACKUP_JS else _read_code(SETTINGS_BACKUP_JS)
+    assert _address_change_problems(general, library)
+
+
+# M1 regression guard: no history or backup command carries settings data.
+# Export used to send the settings (custom chat addresses included) as hex in
+# argv, readable by every local user in /proc. Now a command is built only by
+# its library builder, from fixed text, a known operation, two whole numbers
+# (run and widget id) and, for a history record, a sample of catalog ids and
+# percentages. The checks below close each way around that: other code in the
+# builder, other arguments to it, a changed command before it is run, another
+# command sent to the same source, and the old export helpers.
+
+BUILDER_RULES = {
+    USAGE_HISTORY_JS: (
+        "function historyCommand(op, run, applet, sample) {", "historyCommand",
+        {"if", "return", "var", "OPERATIONS", "indexOf", "op", "isInt", "run", "validApplet", "applet",
+         "command", "validSample", "sample"},
+        {"", "env HEARTHWIRE_RUN=", " python3 -P -m hearthwire --usage-history ", " --applet ", "record", " --sample "},
+    ),
+    SETTINGS_BACKUP_JS: (
+        "function backupCommand(op, run, applet) {", "backupCommand",
+        {"if", "return", "OPERATIONS", "indexOf", "op", "isCount", "run", "validApplet", "applet"},
+        {"", "env HEARTHWIRE_RUN=", " python3 -P -m hearthwire --settings-backup ", " --applet "},
+    ),
+}
+BUILDER_CALLS = {
+    "historyCommand": {"job.op, root.historyRun, Plasmoid.id, job.sample",
+                       '"clear", page.historyClearRun, Plasmoid.id'},
+    "backupCommand": {"op, page.backupRun, Plasmoid.id"},
+}
+# (file, function, source id, the command line) of each place a command runs.
+COMMAND_SINKS = (
+    (MAIN_QML, "historyNext", "historySource",
+     "var command = UsageHistory.historyCommand(job.op, root.historyRun, Plasmoid.id, job.sample)"),
+    (CONFIG_GENERAL, "clearHistory", "historyClearSource",
+     'var command = UsageHistory.historyCommand("clear", page.historyClearRun, Plasmoid.id)'),
+    (CONFIG_GENERAL, "runBackup", "backupSource",
+     "var command = SettingsBackup.backupCommand(op, page.backupRun, Plasmoid.id)"),
+)
+SETTINGS_PAYLOAD_BANS = {
+    "--data": r"--data\b",
+    "old export helper": r"\b(?:exportPayload|hexUtf8|HEX_PATTERN|MAX_DATA_HEX|backupSettings)\b",
+}
+SINK_BANS = r"\bcfg_\w+|\bPlasmoid\s*\.\s*configuration\b|\bJSON\b|\bencodeURI\w*|\btoString\b|\bbtoa\b|\bsnapshot\b"
+QUEUE_FORMS = (
+    r"property\s+var\s+historyQueue\s*:\s*\[\s*\]",
+    r"root\s*\.\s*historyQueue\s*=\s*root\s*\.\s*historyQueue\s*\.\s*concat\s*\(\s*\[\s*\{\s*op\s*:\s*op\s*,\s*"
+    r'sample\s*:\s*sample\s*\|\|\s*""\s*\}\s*\]\s*\)\s*$',
+    r"root\s*\.\s*historyQueue\s*\.\s*length\s*===\s*0",
+    r"var\s+job\s*=\s*root\s*\.\s*historyQueue\s*\[\s*0\s*\]\s*$",
+    r"root\s*\.\s*historyQueue\s*=\s*root\s*\.\s*historyQueue\s*\.\s*slice\s*\(\s*1\s*\)\s*$",
+    r"root\s*\.\s*historyQueue\s*=\s*\[\s*\]\s*$",
+    r'root\s*\.\s*historyQueue\s*\.\s*some\s*\(\s*function\s*\(\s*job\s*\)\s*\{\s*return\s+job\s*\.\s*op\s*===\s*"\w+"\s*\}\s*\)',
+)
+
+
+def _builder_problems(path, code):
+    signature, name, identifiers, literals = BUILDER_RULES[path]
+    problems = _pin_problems(code, (signature,), path.name)
+    body = _function_body(code, name)
+    if body is None:
+        return problems + [f"{path.name}: exactly one {name}() expected"]
+    blanked = _strip_comments(body, blank_strings=True)
+    extra = set(re.findall(r"[A-Za-z_$][\w$]*", blanked)) - identifiers
+    if extra:
+        problems.append(f"{name}() may use only {sorted(identifiers)}, found {sorted(extra)}")
+    strings = set(re.findall(r'"([^"\n]*)"', body))
+    if strings - literals or _hits(r"['`]", body):
+        problems.append(f"{name}() may hold only the literals {sorted(literals)}, found {sorted(strings - literals)}")
+    return problems
+
+
+def _settings_in_command_problems(sources):
+    problems = []
+    for name, code in sources.items():
+        problems += [f"{name}:{line}: {ban}" for ban, pattern in SETTINGS_PAYLOAD_BANS.items()
+                     for line in _hits(pattern, code)]
+        for builder, allowed in BUILDER_CALLS.items():
+            calls = _hits(rf"\.\s*{builder}\s*\(", code)
+            args = [_squeezed(value) for value in re.findall(rf"\.\s*{builder}\s*\(([^()]*)\)", code)]
+            if len(args) != len(calls) or set(args) - allowed:
+                problems.append(f"{name}: {builder} may be called only as {sorted(allowed)}, found {args or calls}")
+    for path in BUILDER_RULES:
+        problems += _builder_problems(path, sources.get(_rel(path), ""))
+    for path, function, source, line in COMMAND_SINKS:
+        code = sources.get(_rel(path), "")
+        body = _function_body(code, function)
+        if body is None:
+            problems.append(f"{path.name}: exactly one {function}() expected")
+            continue
+        problems += _pin_problems(body, (line, f"{source}.connectSource(command)"), f"{path.name} {function}()")
+        if len(_hits(rf"\bcommand\b{WRITE_OPERATOR}", body)) != 1:
+            problems.append(f"{path.name} {function}(): command is set once, by its builder")
+        problems += [f"{path.name} {function}(): {match} must not be near a command"
+                     for match in re.findall(SINK_BANS, body)]
+        if len(_hits(rf"\b{source}\s*\.\s*connectSource\s*\(", code)) != 1:
+            problems.append(f"{path.name}: {source} runs a command only in {function}()")
+        if _hits(rf"\b{source}\s*\.\s*connectedSources\b", code):
+            problems.append(f"{path.name}: {source}'s sources are set only by connectSource")
+        tops = [_top_level_raw(body) for _, body in _blocks(code, r"\bPlasma5Support\s*\.\s*DataSource\s*\{")
+                if re.search(rf"(?:^|[\n;])\s*id\s*:\s*{source}\b", _top_level_raw(body))]
+        if len(tops) != 1 or not re.search(r"(?:^|[\n;])\s*connectedSources\s*:\s*\[\s*\]\s*(?=;|\n|$)", tops[0]):
+            problems.append(f"{path.name}: {source} must start with `connectedSources: []`")
+    main = sources.get(_rel(MAIN_QML), "")
+    problems += _unknown_mentions(main, "historyQueue", QUEUE_FORMS)
+    record = _function_body(main, "historyRecord") or ""
+    if len(_hits(r"\bsample\b" + WRITE_OPERATOR, record)) != 1:
+        problems.append("historyRecord sets its sample once, from UsageHistory.sampleArg")
+    return problems
+
+
+def test_no_history_or_backup_command_carries_settings_data():
+    problems = _settings_in_command_problems(_all_code())
+    assert not problems, problems
+
+
+SETTINGS_ARGV_MUTATIONS = [
+    # The builders.
+    (SETTINGS_BACKUP_JS, '+ op + " --applet " + applet\n}', '+ op + " --applet " + applet + " --data " + data\n}'),
+    (SETTINGS_BACKUP_JS, '+ op + " --applet " + applet\n}', '+ op + " --applet " + applet + " " + JSON.stringify(op)\n}'),
+    (SETTINGS_BACKUP_JS, "function backupCommand(op, run, applet) {", "function backupCommand(op, run, applet, settings) {"),
+    (SETTINGS_BACKUP_JS, '" --applet " + applet\n}', '" --applet " + applet + " https://example.invalid"\n}'),
+    (USAGE_HISTORY_JS, 'command + " --sample " + sample', 'command + " --sample " + encodeURIComponent(sample)'),
+    (USAGE_HISTORY_JS, '+ " --applet " + applet\n    if', "+ ' --applet ' + applet\n    if"),
+    (USAGE_HISTORY_JS, "function historyCommand(op, run, applet, sample) {",
+     "function historyCommand(op, run, applet, sample, extra) {"),
+    # Other arguments to a builder.
+    (MAIN_QML, "Plasmoid.id, job.sample)", "Plasmoid.id, JSON.stringify(Plasmoid.configuration))"),
+    (MAIN_QML, "Plasmoid.id, job.sample)", "Plasmoid.id, job.sample + Plasmoid.configuration.chatSites)"),
+    (CONFIG_GENERAL, "SettingsBackup.backupCommand(op, page.backupRun, Plasmoid.id)",
+     "SettingsBackup.backupCommand(op, page.backupRun, Plasmoid.id) + \" --data \" + page.cfg_chatCustomUrls"),
+    (CONFIG_GENERAL, 'UsageHistory.historyCommand("clear", page.historyClearRun, Plasmoid.id)',
+     'UsageHistory.historyCommand("clear", page.historyClearRun, Plasmoid.id, page.cfg_chatSites)'),
+    # A changed command, or another one, before it runs.
+    (CONFIG_GENERAL, "        page.backupOp = op\n",
+     '        command += " " + page.cfg_chatCustomUrls\n        page.backupOp = op\n'),
+    (CONFIG_GENERAL, "        page.backupOp = op\n",
+     '        command = command + " --da" + "ta " + page.cfg_chatSites\n        page.backupOp = op\n'),
+    (CONFIG_GENERAL, "backupSource.connectSource(command)", "backupSource.connectSource(command + \" \" + page.cfg_chatSites)"),
+    (CONFIG_GENERAL, "historyClearSource.connectSource(command)", "historyClearSource.connectSource(page.cfg_chatCustomUrls)"),
+    (CONFIG_GENERAL, "    function backupStatusText() {\n",
+     "    function g() { backupSource.connectSource(\"env x \" + page.cfg_chatCustomUrls) }\n    function backupStatusText() {\n"),
+    (CONFIG_GENERAL, '        id: backupSource\n        engine: "executable"\n        connectedSources: []\n',
+     '        id: backupSource\n        engine: "executable"\n        connectedSources: [page.cfg_chatCustomUrls]\n'),
+    (CONFIG_GENERAL, "    function backupStatusText() {\n",
+     "    function g() { backupSource.connectedSources = [page.cfg_chatSites] }\n    function backupStatusText() {\n"),
+    (MAIN_QML, "        historySource.connectSource(command)\n",
+     "        historySource.connectSource(command + Plasmoid.configuration.chatSites)\n"),
+    (MAIN_QML, "        root.historyQueue = root.historyQueue.slice(1)\n",
+     "        root.historyQueue = root.historyQueue.slice(1).concat([{op: \"record\", sample: Plasmoid.configuration.chatSites}])\n"),
+    (MAIN_QML, "        if (sample === \"\")\n", "        sample += Plasmoid.configuration.chatSites\n        if (sample === \"\")\n"),
+    # The old export helpers.
+    (SETTINGS_BACKUP_JS, "function validApplet(value) {", "function exportPayload(settings) { return \"\" }\nfunction validApplet(value) {"),
+    (CONFIG_GENERAL, "    function backupStatusText() {\n", "    function backupSettings() { return {} }\n    function backupStatusText() {\n"),
+    (CONFIG_GENERAL, "    function backupStatusText() {\n", '    function g() { return "--data" }\n    function backupStatusText() {\n'),
+]
+
+
+@pytest.mark.parametrize(("path", "old", "new"), SETTINGS_ARGV_MUTATIONS,
+                         ids=[f"{path.name}:{index}" for index, (path, _, _) in enumerate(SETTINGS_ARGV_MUTATIONS)])
+def test_proof_settings_in_command_rule_catches(path, old, new):
+    assert _settings_in_command_problems(_sources_with(path, old, new))

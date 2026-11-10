@@ -153,7 +153,8 @@ plasmashell's memory.
 - **Usage history** (optional, off by default): when you turn it on, the
   widget keeps 7 days of each reading's percent used on this computer and
   draws a small graph under each bar in the standard layout (not in Compact).
-  Hours without a reading leave a gap. Turning it off deletes it. See
+  Hours without a reading leave a gap. Each widget keeps its own history;
+  turning it off deletes that widget's. See
   [docs/privacy.md](docs/privacy.md#usage-history).
 - Detects installed tools through the Plasma login environment, CLI names, and
   Linux/XDG data locations, and contacts only providers that are both
@@ -282,15 +283,18 @@ starts with Plasma while it remains on a panel.
   the Usage tab's graphs) with a **Delete usage history** button, **Stay
   signed in** (Off or Encrypted), **Lock automatically**, and under **Show
   folder actions** **Change passphrase…** and **Delete encrypted folder…**.
-  Turning Usage history off and applying deletes the stored history; if
-  that fails, the Usage tab says so and the widget tries again later.
+  Turning Usage history off and applying deletes this widget's stored
+  history; if that fails, the Usage tab says so and the widget tries again
+  later.
 - **Backup**: **Export** saves your settings to one fixed file,
   `~/.config/hearthwire/settings-backup.json` (only you can read it), and
   asks first before it replaces an earlier backup. **Import** reads that
   file back and, after you choose **Replace**, fills in the settings;
-  nothing is saved until you press **Apply** on the General page. Export
-  takes the settings as they are now, including changes on the General page
-  you haven't applied yet. The backup holds the usage, popup and
+  nothing is saved until you press **Apply** on the General page; the
+  confirmation first lists any chat address the import would change. Export
+  saves the applied settings only, so press **Apply** first: the helper reads
+  them from Plasma's own settings file, and no setting is passed on a command
+  line. The backup holds the usage, popup and
   chat site settings, including custom chat addresses. It never holds
   sign-ins or anything about the encrypted folder (Stay signed in, Lock
   automatically, Unlock with), the zoom of each site, or the Usage history
@@ -401,11 +405,12 @@ encrypted folder in the Chat tab (or turn Stay signed in off), then run:
 ```
 
 It deletes the encrypted folder (with its KDE Wallet key, if you set that
-up), the usage history folder if there is one, the usage alert events file
+up), the usage history of every widget if there is any, the usage alert events file
 (`knotifications6/hearthwire.notifyrc`) and the icons
 (`icons/hicolor/scalable/apps/hearthwire*.svg`, the four listed above) and
 nothing else, and refuses while the folder is unlocked. A settings backup
-file (`~/.config/hearthwire/settings-backup.json`) stays in place.
+file (`~/.config/hearthwire/settings-backup.json`) stays in place, and the
+script says so.
 
 To remove a manual installation:
 
@@ -542,7 +547,8 @@ and the settings backup (`--settings-backup`); see
 A usage refresh prints or caches no tokens, credential fingerprints, raw API
 responses or local transcripts. Usage history is kept only if you turn it on:
 then the percent used of each reading, one value per hour for 7 days, in
-`~/.local/share/hearthwire/usage-history/` (only you can read it). A settings
+`~/.local/share/hearthwire/usage-history/`, one file per widget (only you
+can read it). A settings
 backup exists only if you export one; it names the chat sites and custom
 addresses you use, but never holds sign-ins. Antigravity's derived access-token cache
 is the only authentication cache created by Hearthwire; it is stored with mode

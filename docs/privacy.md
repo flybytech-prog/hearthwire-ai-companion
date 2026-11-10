@@ -119,36 +119,42 @@ What is stored, while it is on:
 Where and how:
 
 - `$XDG_DATA_HOME/hearthwire/usage-history/` (usually
-  `~/.local/share/hearthwire/usage-history/`), with `history.json` (the data)
-  and `history.lock` (empty; only its lock is used).
+  `~/.local/share/hearthwire/usage-history/`), with one file per widget,
+  `applet-<N>.json`, where N is the widget's Plasma id, and `history.lock`
+  (empty; only its lock is used, by every widget).
 - The folders are mode `0700` and the files mode `0600`, so only you can read
   them. Symlinks and other users' files are refused. The file is replaced
   atomically and is never larger than 256 KiB.
 - The helper writes it (`--usage-history`; see
-  [Provider contracts](provider-contracts.md#usage-history-helper)). The
-  widget passes the sample in the helper's process arguments, for example
-  `claude.weekly=38`, so for a moment other local users can see those
-  percentages in the process list, unless `/proc` is mounted with `hidepid`
-  (see [Recommended system settings](#recommended-system-settings)).
-- It is one folder for your account, shared by every Hearthwire widget.
-  The widget keeps its own copy of what the helper last returned in Plasma's
-  memory, only while history is on.
+  [Provider contracts](provider-contracts.md#usage-history-helper)). Its
+  command line holds the widget's id and, when recording, the sample: the
+  provider and reading ids with their percentages, for example
+  `claude.weekly=38`. That sample is the only history data in a command line,
+  so for a moment other local users can see those percentages in the process
+  list, unless `/proc` is mounted with `hidepid` (see
+  [Recommended system settings](#recommended-system-settings)).
+- History is per widget: each Hearthwire widget has its own on/off setting
+  and its own file, and never reads another widget's. The widget keeps its
+  own copy of what the helper last returned in Plasma's memory, only while
+  history is on, and reads the file again each time the popup opens.
 
-How long: each write drops everything older than 7 days (the current hour and
-the 168 before it).
+How long: each record and each read drops everything older than 7 days (the
+current hour and the 168 before it); a file with nothing left is deleted.
 
 How to delete it:
 
 - Turn **Usage history** off and apply: the widget forgets what it showed and
-  deletes the whole `usage-history` folder. With several Hearthwire widgets,
-  this deletes it for all of them.
-- **Delete usage history** (next to the setting) deletes it at once and leaves
-  the setting as it is. While history stays on, recording starts again at the
-  next refresh.
-- `scripts/install.sh --uninstall-web-data` deletes it too, after the chat
-  sign-in data. If it can't, it says so and asks you to delete the folder by
-  hand. It doesn't change the setting: a widget that still has history on
-  starts recording again.
+  deletes its own file. Other widgets' history stays.
+- **Delete usage history** (next to the setting) deletes this widget's file at
+  once and leaves the setting as it is. While history stays on, recording
+  starts again at the next refresh.
+- Either also deletes the shared `history.json` an earlier build may have
+  left, and the `usage-history` folder once no widget's file is left in it.
+- `scripts/install.sh --uninstall-web-data` deletes the history of every
+  widget (the whole `usage-history` folder), after the chat sign-in data. If
+  it can't, it says so and asks you to delete the folder by hand. It doesn't
+  change the setting: a widget that still has history on starts recording
+  again.
 - Removing the widget from the panel does not delete it.
 
 If a delete fails: when the helper is busy the widget tries again up to three
@@ -190,19 +196,27 @@ there is no file dialog.
   `chatVaultUnlock`, `chatSiteZoom`, `configSchemaVersion`,
   `initialSetupComplete`, `usageHistoryEnabled` and `usageHistoryClearOwed`.
   An import never turns on Usage history or Stay signed in.
-- Export takes the settings as they are now, including changes on the
-  General page not yet applied. It asks before it replaces an existing
-  backup, and never replaces one with an empty one. The settings go to the
-  helper as hexadecimal digits in its process arguments, which anyone can
-  decode: for a moment other local users can see them in the process list,
-  unless `/proc` is mounted with `hidepid`. That is the same information the
-  Plasma configuration file (often mode `0644`) already shows them.
+- Export saves the widget's applied settings only: the helper reads them
+  itself from Plasma's configuration file
+  (`~/.config/plasma-org.kde.plasma.desktop-appletsrc`, or
+  `plasmawindowedrc`) by the widget's id, read-only, and refuses a symlinked
+  file or another user's. A setting the file doesn't have counts as its
+  default. Changes not yet applied on any settings page are not exported, so
+  press **Apply** first. It asks before it replaces an existing backup, and
+  never replaces one with an empty one.
+- No setting you entered is passed on a command line: the helper's command
+  holds only fixed words, the step (status, export or import) and two whole
+  numbers (a run number and the widget's id). Other local users can't see
+  your settings in the process list.
 - Import reads the file; the helper and then the widget check every value,
   and a value the widget would not store is left out ("Settings left out:
-  N"). After **Replace** the values fill in the settings pages; nothing is
-  saved until you press **Apply** on the General page.
+  N"). Before **Replace**, the confirmation lists each chat address the
+  import would change, as plain text and shortened when long. After
+  **Replace** the values fill in the settings pages; nothing is saved until
+  you press **Apply** on the General page.
 - The file stays until you delete it. `scripts/install.sh
-  --uninstall-web-data` leaves it in place, and so does removing the widget.
+  --uninstall-web-data` leaves it in place and says where it is, and
+  removing the widget leaves it too.
 
 ## Chat tab
 
@@ -475,7 +489,7 @@ Stay signed in the widget runs the helper with fixed words and numbers only
 (see [Provider contracts](provider-contracts.md#stay-signed-in-helper)); its
 replies are short codes, never paths. For the Ollama chat and Local web UI it
 runs the helper with the port number only ([port owner helper](provider-contracts.md#port-owner-helper)). A settings export passes
-your settings, custom addresses included, to the helper (see
+only the widget's id; the helper reads the applied settings itself (see
 [Settings backup](#settings-backup)). Load errors show generic text and are
 not logged. The system file dialog may remember recently used folders, as it
 does for any application.
@@ -747,8 +761,8 @@ It does not protect against:
 - swap, hibernation, core dumps, or clipboard managers, unless configured as
   below;
 - other local users seeing, in the process list, the path of a file dropped
-  on the Ollama chat (and, with the features on, usage history percentages
-  and exported settings), unless `/proc` is mounted with `hidepid` as below.
+  on the Ollama chat (and, with Usage history on, its percentages), unless
+  `/proc` is mounted with `hidepid` as below.
 
 ### Recommended system settings
 
@@ -780,8 +794,7 @@ It does not protect against:
   open page, including your sessions, to local connections.
 - On a computer shared with other users, mounting `/proc` with
   `hidepid=invisible` hides your processes, and with them the path of a
-  dropped file, the usage history percentages and the exported settings,
-  from those users. This needs root and is your choice; some
+  dropped file and the usage history percentages, from those users. This needs root and is your choice; some
   system services expect to see every process, so check your distribution's
   notes first.
 
