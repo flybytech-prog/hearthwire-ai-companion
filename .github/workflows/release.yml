@@ -1,0 +1,401 @@
+name: Release packages
+
+# A pushed v* tag builds, lints and install-tests the Arch, Fedora and Ubuntu
+# packages, then attaches them with SHA256SUMS to a draft GitHub Release for
+# the tag. The draft is visible only to people with write access, on the
+# repository's Releases page; the maintainer reviews and publishes it by hand.
+# Run by hand (workflow_dispatch) it is a dry run: the same builds and tests,
+# with the files kept as workflow artifacts and no release.
+#
+# Every package is built from one source tarball: `git archive` of the
+# commit that was pushed (packaging/source-archive.sh), never a working tree.
+# The packaging recipes are taken from that tarball too.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Test and make the source tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -P -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Unexpected version: $version"; exit 1 ;;
+          esac
+          if [ "$EVENT_NAME" = push ] && [ "$REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $REF_NAME does not match pyproject.toml version $version (expected v$version)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run the test suite
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet ".[test]"
+          QT_QPA_PLATFORM=offscreen "$RUNNER_TEMP/venv/bin/python" -m pytest
+
+      - name: Make the source tarball
+        run: packaging/source-archive.sh "$GITHUB_SHA" "$RUNNER_TEMP/source"
+
+      - name: Keep the source tarball
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source
+          path: ${{ runner.temp }}/source/hearthwire-${{ steps.version.outputs.version }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # --- Arch Linux, CachyOS, Manjaro -------------------------------------------------------------
+
+  arch-build:
+    name: Build the Arch package
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Artifacts of this run need no token permission.
+    permissions: {}
+    container: archlinux:base-devel
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+    steps:
+      - name: Get the source tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: /tmp/source
+
+      - name: Install the build tools
+        run: pacman -Syu --noconfirm --needed python python-build python-installer python-setuptools python-wheel namcap
+
+      - name: Build
+        run: |
+          useradd --create-home builder
+          install -d -o builder /build
+          tar -xzf "/tmp/source/hearthwire-$VERSION.tar.gz" -C /tmp/source
+          install -m 0644 -o builder "/tmp/source/hearthwire-$VERSION/packaging/arch/PKGBUILD" /build/PKGBUILD
+          install -m 0644 -o builder "/tmp/source/hearthwire-$VERSION.tar.gz" /build/
+          # makepkg refuses to run as root. --nodeps: the build tools are
+          # installed above; the runtime dependencies are checked by the
+          # install test in a fresh container.
+          su builder -c 'cd /build && PACKAGER="flybytech-prog <104578369+flybytech-prog@users.noreply.github.com>" makepkg --nodeps --noconfirm'
+
+      - name: Lint the PKGBUILD (namcap)
+        run: |
+          namcap /build/PKGBUILD | tee /tmp/namcap.txt
+          if grep -q ' E: ' /tmp/namcap.txt; then exit 1; fi
+
+      - name: Keep the package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-arch
+          path: /build/hearthwire-${{ needs.source.outputs.version }}-*-any.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 7
+
+  arch-test:
+    name: Install-test the Arch package
+    needs: [source, arch-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Artifacts of this run need no token permission.
+    permissions: {}
+    container: archlinux:latest
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+    steps:
+      - name: Get the source tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: /tmp/source
+
+      - name: Get the package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-arch
+          path: /tmp/package
+
+      - name: Install the package
+        run: |
+          pacman -Syu --noconfirm
+          pacman -U --noconfirm /tmp/package/hearthwire-*.pkg.tar.zst
+
+      - name: Check what landed
+        run: |
+          tar -xzf "/tmp/source/hearthwire-$VERSION.tar.gz" -C /tmp/source
+          sh "/tmp/source/hearthwire-$VERSION/packaging/check-install.sh" "$VERSION"
+
+      - name: Check again with the optional dependencies
+        run: |
+          pacman -S --noconfirm --needed --asdeps qt6-webengine gocryptfs fuse3 kdialog kwallet qt6-tools openssl libsecret
+          sh "/tmp/source/hearthwire-$VERSION/packaging/check-install.sh" "$VERSION"
+
+      - name: Lint the package (namcap)
+        run: |
+          pacman -S --noconfirm --needed namcap
+          namcap /tmp/package/hearthwire-*.pkg.tar.zst | tee /tmp/namcap.txt
+          if grep -q ' E: ' /tmp/namcap.txt; then exit 1; fi
+
+  # --- Fedora KDE ---------------------------------------------------------------------------------
+
+  fedora-build:
+    name: Build the Fedora package
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Artifacts of this run need no token permission.
+    permissions: {}
+    container: fedora:44
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+    steps:
+      - name: Get the source tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: /tmp/source
+
+      - name: Install the build tools
+        run: dnf -y install rpm-build rpmlint python3-devel pyproject-rpm-macros python3-pip python3-setuptools tar findutils
+
+      - name: Build
+        run: |
+          tar -xzf "/tmp/source/hearthwire-$VERSION.tar.gz" -C /tmp/source
+          spec="/tmp/source/hearthwire-$VERSION/packaging/fedora/hearthwire.spec"
+          rpmlint "$spec"
+          mkdir -p /build/SOURCES
+          cp "/tmp/source/hearthwire-$VERSION.tar.gz" /build/SOURCES/
+          rpmbuild -ba --define "_topdir /build" "$spec"
+
+      - name: Lint the package (rpmlint)
+        run: rpmlint /build/RPMS/noarch/hearthwire-*.noarch.rpm
+
+      - name: Keep the package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-fedora
+          path: /build/RPMS/noarch/hearthwire-${{ needs.source.outputs.version }}-*.noarch.rpm
+          if-no-files-found: error
+          retention-days: 7
+
+  fedora-test:
+    name: Install-test the Fedora package
+    needs: [source, fedora-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Artifacts of this run need no token permission.
+    permissions: {}
+    container: fedora:44
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+    steps:
+      - name: Get the source tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: /tmp/source
+
+      - name: Get the package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-fedora
+          path: /tmp/package
+
+      - name: Install the package
+        run: |
+          dnf -y install /tmp/package/hearthwire-*.noarch.rpm
+          # For unpacking the check script; the container image may not have them.
+          dnf -y install tar findutils
+
+      - name: Check what landed
+        run: |
+          tar -xzf "/tmp/source/hearthwire-$VERSION.tar.gz" -C /tmp/source
+          sh "/tmp/source/hearthwire-$VERSION/packaging/check-install.sh" "$VERSION"
+
+      - name: Check again with the optional dependencies
+        run: |
+          dnf -y install gocryptfs fuse3 kdialog kf6-kwallet qt6-qttools openssl libsecret
+          sh "/tmp/source/hearthwire-$VERSION/packaging/check-install.sh" "$VERSION"
+
+  # --- Ubuntu 26.04 LTS (Kubuntu) -----------------------------------------------------------------
+
+  ubuntu-build:
+    name: Build the Ubuntu package
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Artifacts of this run need no token permission.
+    permissions: {}
+    container: ubuntu:26.04
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Get the source tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: /tmp/source
+
+      - name: Install the build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential debhelper dh-python \
+            pybuild-plugin-pyproject python3-all python3-setuptools lintian
+
+      - name: Build
+        run: |
+          mkdir -p /build
+          cp "/tmp/source/hearthwire-$VERSION.tar.gz" "/build/hearthwire_$VERSION.orig.tar.gz"
+          tar -xzf "/build/hearthwire_$VERSION.orig.tar.gz" -C /build
+          cp -r "/build/hearthwire-$VERSION/packaging/debian" "/build/hearthwire-$VERSION/debian"
+          cd "/build/hearthwire-$VERSION"
+          dpkg-buildpackage -us -uc -b
+
+      - name: Lint the package (lintian)
+        run: lintian --fail-on error --display-info /build/hearthwire_*_all.deb
+
+      - name: Keep the package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-ubuntu
+          path: /build/hearthwire_${{ needs.source.outputs.version }}-*_all.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  ubuntu-test:
+    name: Install-test the Ubuntu package
+    needs: [source, ubuntu-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Artifacts of this run need no token permission.
+    permissions: {}
+    container: ubuntu:26.04
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Get the source tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: /tmp/source
+
+      - name: Get the package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-ubuntu
+          path: /tmp/package
+
+      - name: Install the package
+        run: |
+          apt-get update
+          apt-get install -y /tmp/package/hearthwire_*_all.deb
+
+      - name: Check what landed
+        run: |
+          tar -xzf "/tmp/source/hearthwire-$VERSION.tar.gz" -C /tmp/source
+          sh "/tmp/source/hearthwire-$VERSION/packaging/check-install.sh" "$VERSION"
+
+      - name: Check again with the optional dependencies
+        run: |
+          apt-get install -y gocryptfs fuse3 kdialog kwallet6 qdbus-qt6 openssl libsecret-tools
+          sh "/tmp/source/hearthwire-$VERSION/packaging/check-install.sh" "$VERSION"
+
+  # --- Checksums and the release ------------------------------------------------------------------
+
+  checksums:
+    name: Collect the packages and checksums
+    needs: [source, arch-test, fedora-test, ubuntu-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Artifacts of this run need no token permission.
+    permissions: {}
+    steps:
+      - name: Get the packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: package-*
+          path: ${{ runner.temp }}/release
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
+        working-directory: ${{ runner.temp }}/release
+        run: |
+          set -- *.pkg.tar.zst *.rpm *.deb
+          [ "$#" -eq 3 ] && [ -f "$1" ] && [ -f "$2" ] && [ -f "$3" ] || { echo "::error::Expected exactly three packages"; ls -l; exit 1; }
+          sha256sum -- "$@" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Keep the release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Create the draft GitHub Release
+    needs: [source, checksums]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+    steps:
+      - name: Get the release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release
+
+      - name: Get the source tarball (for the release notes)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: ${{ runner.temp }}/source
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd "$RUNNER_TEMP/source"
+          tar -xzf "hearthwire-$VERSION.tar.gz" "hearthwire-$VERSION/packaging/RELEASE_NOTES-$VERSION.md"
+          notes="$RUNNER_TEMP/source/hearthwire-$VERSION/packaging/RELEASE_NOTES-$VERSION.md"
+          cd "$RUNNER_TEMP/release"
+          sha256sum --check SHA256SUMS
+          # --draft: nothing is public until the maintainer presses Publish.
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "Hearthwire $VERSION" --notes-file "$notes" \
+            ./*.pkg.tar.zst ./*.rpm ./*.deb SHA256SUMS

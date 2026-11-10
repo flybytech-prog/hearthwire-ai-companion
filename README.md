@@ -359,7 +359,84 @@ them in the order you want, and untick the readings you don't need in the
 Usage tab. The hover popup shows the same readings unless you untick
 **Same as the Usage tab** there and choose its own.
 
+## Install from a package
+
+Download the package for your system from the
+[latest release](https://github.com/flybytech-prog/hearthwire-ai-companion/releases/latest),
+together with `SHA256SUMS`, check it, and install it:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+
+# Arch Linux, CachyOS, Manjaro
+sudo pacman -U ./hearthwire-1.0.0-1-any.pkg.tar.zst
+
+# Fedora KDE (Fedora 43 and 44)
+sudo dnf install ./hearthwire-1.0.0-1.fc44.noarch.rpm
+
+# Kubuntu / Ubuntu 26.04 LTS (the first Ubuntu LTS with Plasma 6)
+sudo apt install ./hearthwire_1.0.0-1_all.deb
+```
+
+Then right-click the panel, choose **Add Widgets…**, search for
+**Hearthwire**, and add it. If it isn't listed yet, log out and in again.
+
+A package installs the same files as the script below, but for all users:
+the widget in `/usr/share/plasma/plasmoids/io.github.flybytechprog.hearthwire`,
+the helper as a system Python package (the widget runs it as
+`python3 -P -m hearthwire`), the icons in `/usr/share/icons/hicolor` and the
+usage alert events in `/usr/share/knotifications6`. It pulls in Plasma 6, the
+Qt Quick modules (with Qt Quick Shapes) and Python 3.11 or newer. The optional
+parts are left to you: the Fedora and Ubuntu packages recommend Qt WebEngine
+for the Chat tab, and every package lists the tools for Stay signed in
+(gocryptfs, fuse3, kdialog), Unlock with KDE Wallet (kwallet-query, qdbus6,
+openssl) and `secret-tool` as optional, so install those if you want the
+feature. Ollama is never pulled in; install it yourself for the Ollama chat
+(Ubuntu doesn't package it). Fedora's `qt6-qttools` names the qdbus tool
+`qdbus-qt6`; Hearthwire looks for `qdbus6` first, then `qdbus-qt6`.
+
+What a package leaves to you:
+
+- **Per-user steps**: a package never runs anything as you and never
+  touches your home folder. A fresh install needs nothing more. If you used
+  Hearthwire's previous name, or AI Usage 2.x, run `scripts/install.sh` once
+  from a checkout first (see the upgrade sections below): it moves your data
+  and widgets, which a package can't do for each user. Then remove the
+  script's copy as described under "To remove a manual installation" below,
+  and install the package.
+- **An earlier script install** goes first, too: a copy in your home folder
+  (`pip install --user`, `kpackagetool6 -i`) wins over the package.
+- **Restarting Plasma** after an upgrade, so the running widget picks up the
+  new files: log out and in, or run
+  `systemctl --user restart plasma-plasmashell.service`.
+- **Your data**: removing the package (`sudo pacman -R hearthwire`,
+  `sudo dnf remove hearthwire`, `sudo apt remove hearthwire`) deletes only
+  the package's files. Your usage history, settings backup, encrypted folder
+  with its saved sign-ins, the folder's KDE Wallet key, and your widget
+  settings stay. To delete the chat sign-ins and usage history, lock the
+  encrypted folder first (or turn Stay signed in off), then, before you remove
+  the package, run:
+
+  ```bash
+  python3 -P -m hearthwire --web-data purge
+  python3 -P -m hearthwire --usage-history clear --all
+  ```
+
+  Each prints `{"ok":true,…}` when it worked. A settings backup
+  (`~/.config/hearthwire/settings-backup.json`) stays; delete it by hand if
+  you don't want it.
+
+Hearthwire's packages are built from the release tag by
+[the release workflow](.github/workflows/release.yml); the recipes are in
+[`packaging/`](packaging). The workflow saves each release as a draft: it
+shows up under **Releases** on the repository page, marked Draft and visible
+only to maintainers, until a maintainer checks it and presses **Publish
+release**. Only then does the download link above lead to it.
+
 ## Install
+
+Instead of a package, you can install from a checkout with the script. It
+installs for your user only and also handles the upgrades below.
 
 ```bash
 git clone --branch main https://github.com/flybytech-prog/hearthwire-ai-companion.git
@@ -450,6 +527,10 @@ Hearthwire is the new name of Hearthside. Your data moves over once, when
 `scripts/install.sh` runs. Only the installer does this: after a manual `pip`
 or `kpackagetool6` install nothing has moved, and the encrypted folder can't
 be created or opened until the installer has run (the Chat tab says so).
+The release packages don't do the move either, since a package never runs
+anything as you: to switch to a package, run the installer once as below,
+then remove its copy (see "To remove a manual installation" above), then
+install the package.
 
 What moves:
 

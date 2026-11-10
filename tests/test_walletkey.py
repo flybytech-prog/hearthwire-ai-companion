@@ -422,6 +422,87 @@ def test_status_wallet_field(stubs, capsys):
     assert reply("status", capsys) == {"ok": True, "state": "unavailable", "missing": ["gocryptfs"]}
 
 
+# --- qdbus6 under Fedora's name, qdbus-qt6 ------------------------------------------------------
+
+
+def qdbus_as_fedora_names_it(stubs):
+    """Move the qdbus6 stub off PATH; put a qdbus-qt6 on PATH that runs it."""
+    hidden = stubs.root / "hidden"
+    hidden.mkdir()
+    target = hidden / "qdbus6"
+    os.rename(stubs.bin / "qdbus6", target)
+    wrapper = stubs.bin / "qdbus-qt6"
+    wrapper.write_text(f"#!{sys.executable}\nimport os, sys\nos.execv({str(target)!r}, [{str(target)!r}, *sys.argv[1:]])\n")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def test_qdbus6_is_found_under_its_own_name(stubs):
+    tools, missing = walletkey.find_tools()
+    assert tools["qdbus6"] == str(stubs.bin / "qdbus6")
+    assert walletkey.find_qdbus() == str(stubs.bin / "qdbus6")
+    assert missing == ()
+
+
+def test_qdbus_is_found_under_fedoras_name_and_answers(stubs):
+    wrapper = qdbus_as_fedora_names_it(stubs)
+    tools, missing = walletkey.find_tools()
+    # Still keyed and reported as qdbus6: the status reply's names don't change.
+    assert tools["qdbus6"] == str(wrapper)
+    assert missing == ()
+    assert walletkey.is_enabled(tools["qdbus6"]) is True
+    assert walletkey.local_wallet(tools["qdbus6"]) == "kdewallet"
+    assert [call["argv"][2].rsplit(".", 1)[-1] for call in stubs.calls("qdbus6")] == ["isEnabled", "localWallet"]
+
+
+def test_status_and_wallet_unlock_work_with_only_qdbus_qt6(stubs, capsys):
+    qdbus_as_fedora_names_it(stubs)
+    enrolled(stubs, capsys)
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "set-up"}
+    assert unlock_wallet(capsys) == {"ok": True}
+    assert stubs.mounted()
+
+
+def test_qdbus6_is_preferred_over_qdbus_qt6(stubs):
+    other = stubs.bin / "qdbus-qt6"
+    other.write_text("#!/bin/sh\nexit 97\n")
+    other.chmod(0o755)
+    tools, _ = walletkey.find_tools()
+    assert tools["qdbus6"] == str(stubs.bin / "qdbus6")
+    assert walletkey.find_qdbus() == str(stubs.bin / "qdbus6")
+
+
+def test_without_either_name_qdbus6_is_missing(stubs, capsys):
+    stubs.remove("qdbus6")
+    tools, missing = walletkey.find_tools()
+    assert "qdbus6" not in tools and missing == ("qdbus6",)
+    assert walletkey.find_qdbus() is None
+    stubs.make_locked()
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "unavailable",
+                                       "missing": ["qdbus6"]}
+
+
+def test_a_qdbus_qt6_found_through_a_relative_path_entry_is_missing(stubs, monkeypatch):
+    qdbus_as_fedora_names_it(stubs)
+    monkeypatch.chdir(stubs.root)
+    monkeypatch.setenv("PATH", "bin")
+    tools, missing = walletkey.find_tools()
+    assert "qdbus6" not in tools and "qdbus6" in missing
+    assert walletkey.find_qdbus() is None
+
+
+def test_argv_guard_accepts_exactly_the_two_qdbus_names():
+    for path in ("/usr/bin/qdbus6", "/usr/bin/qdbus-qt6", "/usr/lib64/qt6/bin/qdbus-qt6"):
+        walletkey.check_argv(walletkey.kwallet_argv(path, "isEnabled"))
+        vault._check_argv(walletkey.kwallet_argv(path, "isEnabled"))
+    for path in ("/usr/bin/qdbus", "/usr/bin/qdbus-qt5", "/usr/bin/qdbus-qt6.sh", "qdbus-qt6", "bin/qdbus-qt6"):
+        with pytest.raises(webdata.HelperError):
+            walletkey.check_argv(walletkey.kwallet_argv(path, "isEnabled"))
+    # Fedora's name is held to the same contract as qdbus6.
+    with pytest.raises(webdata.HelperError):
+        walletkey.check_argv(walletkey.kwallet_argv("/usr/bin/qdbus-qt6", "removeFolder", "1", "Hearthwire", "Hearthwire"))
+
+
 def test_status_never_needs_openssl(stubs, capsys):
     enrolled(stubs, capsys)
     stubs.remove("openssl")

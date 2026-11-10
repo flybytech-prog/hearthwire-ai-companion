@@ -501,7 +501,10 @@ when there is none (or anything else is in its place), and `unavailable` when
 (`isEnabled` = false), or `qdbus6` did not answer within 2 seconds. When a
 tool is missing the reply also has `"missing"` with any of `kwallet-query`,
 `qdbus6` and `openssl`, in that order (packages `kwallet`, `qt6-tools` and
-`openssl`). `openssl` is needed only by `add-key` (`remove-key`, `destroy`
+`openssl`). `qdbus6` is looked up on `PATH` as `qdbus6` first, then as
+`qdbus-qt6` (Fedora's `qt6-qttools` installs only that name); either is
+called and reported as `qdbus6`, held to the same argument contract, and,
+like every tool, must resolve to an absolute path. `openssl` is needed only by `add-key` (`remove-key`, `destroy`
 and `purge` skip their best-effort overwrite without it), so when only it is
 missing `wallet` still says `set-up` or `off`. `status` never checks the
 wallet entry or opens the wallet; `unlock --method wallet` does. It does run

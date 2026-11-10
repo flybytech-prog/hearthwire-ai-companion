@@ -48,6 +48,11 @@ from .webdata import HelperError, _close
 # Reported in a status reply's "missing" when absent (kwallet -> kwallet-query,
 # qt6-tools -> qdbus6). openssl is needed only to set up or remove the key.
 TOOLS = ("kwallet-query", "qdbus6")
+# The names qdbus6 is found under, in order of preference: Arch and Debian/Ubuntu
+# install qdbus6, Fedora's qt6-qttools only qdbus-qt6. Either is keyed and
+# reported as "qdbus6" (TOOLS); find_qdbus() is the one lookup.
+QDBUS = "qdbus6"
+QDBUS_NAMES = (QDBUS, "qdbus-qt6")
 KEYGEN_TOOL = "openssl"
 # Only the migration's rollback uses it; without it the copy counts as unproven.
 COMPARE_TOOL = "cmp"
@@ -171,7 +176,7 @@ def check_argv(argv: Sequence[str]) -> None:
                 *(shape(argv[0], argv[5], entry) for shape in (read_argv, write_argv) for entry in ENTRIES),
                 *(shape(argv[0], argv[5], ENTRY, LEGACY_FOLDER) for shape in (read_argv, write_argv))]:
             raise HelperError("os-error")
-    elif tool == "qdbus6":
+    elif tool in QDBUS_NAMES:
         if len(argv) < 4:
             raise HelperError("os-error")
         if argv[1] == KWALLETD_SERVICE:
@@ -206,15 +211,31 @@ def check_argv(argv: Sequence[str]) -> None:
 # --- tools --------------------------------------------------------------------------------------
 
 
+def _which(name: str) -> Optional[str]:
+    """``name``'s absolute path on PATH; a relative PATH entry's result counts as missing."""
+    path = shutil.which(name)
+    return path if path and os.path.isabs(path) else None
+
+
+def find_qdbus() -> Optional[str]:
+    """The first of ``QDBUS_NAMES`` found on PATH, as an absolute path, else None."""
+    for name in QDBUS_NAMES:
+        path = _which(name)
+        if path is not None:
+            return path
+    return None
+
+
 def find_tools() -> tuple[dict[str, str], tuple[str, ...]]:
     """Absolute paths of kwallet-query, qdbus6 and openssl; the missing ``TOOLS``.
 
-    A tool found only through a relative PATH entry counts as missing.
+    qdbus6 is keyed "qdbus6" whichever of ``QDBUS_NAMES`` was found. A tool
+    found only through a relative PATH entry counts as missing.
     """
     found: dict[str, str] = {}
     for name in (*TOOLS, KEYGEN_TOOL, COMPARE_TOOL):
-        path = shutil.which(name)
-        if path and os.path.isabs(path):
+        path = find_qdbus() if name == QDBUS else _which(name)
+        if path is not None:
             found[name] = path
     return found, tuple(name for name in TOOLS if name not in found)
 
@@ -229,7 +250,7 @@ def _query(argv: Sequence[str], timeout: Optional[float] = None) -> Optional[str
     are booleans, the wallet name or an integer handle, never key material.
     """
     check_argv(argv)
-    if os.path.basename(argv[0]) != "qdbus6":
+    if os.path.basename(argv[0]) not in QDBUS_NAMES:
         raise HelperError("os-error")
     try:
         completed = subprocess.run(
@@ -558,6 +579,7 @@ def forget(tools: dict[str, str]) -> bool:
 
 __all__ = [
     "ENTRIES", "ENTRY", "ENTRY_NEW", "FOLDER", "KEYS_DIR", "LEGACY_FOLDER", "SLOT_FILE", "SLOT_NEW", "SLOT_OLD", "TOOLS",
-    "check_argv", "compare_argv", "copy_entry", "entries_equal", "find_tools", "forget", "preflight", "read_argv", "read_key_into_pipe",
+    "QDBUS", "QDBUS_NAMES",
+    "check_argv", "compare_argv", "copy_entry", "entries_equal", "find_qdbus", "find_tools", "forget", "preflight", "read_argv", "read_key_into_pipe",
     "remove_entries", "remove_entry", "remove_legacy_entry", "wallet_locked", "write_new_key",
 ]

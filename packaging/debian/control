@@ -1,0 +1,55 @@
+Source: hearthwire
+Section: kde
+Priority: optional
+Maintainer: flybytech-prog <104578369+flybytech-prog@users.noreply.github.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-sequence-python3,
+ pybuild-plugin-pyproject,
+ python3-all (>= 3.11),
+ python3-setuptools,
+Standards-Version: 4.7.2
+Homepage: https://github.com/flybytech-prog/hearthwire-ai-companion
+Rules-Requires-Root: no
+
+Package: hearthwire
+Architecture: all
+Depends:
+ plasma-desktoptheme,
+ plasma-workspace (>= 4:6.0),
+ python3 (>= 3.11),
+ qml6-module-org-kde-kcmutils,
+ qml6-module-org-kde-kirigami,
+ qml6-module-org-kde-notifications,
+ qml6-module-org-kde-plasma-plasma5support,
+ qml6-module-qtcore,
+ qml6-module-qtquick,
+ qml6-module-qtquick-controls,
+ qml6-module-qtquick-dialogs,
+ qml6-module-qtquick-layouts,
+ qml6-module-qtquick-shapes,
+ qml6-module-qtquick-window,
+ ${misc:Depends},
+ ${python3:Depends},
+Recommends:
+ qml6-module-qtwebengine,
+Suggests:
+ fuse3,
+ gocryptfs,
+ kdialog,
+ kwallet6,
+ libsecret-tools,
+ openssl,
+ qdbus-qt6,
+Description: AI companion for KDE Plasma 6 with AI usage meters and AI chats
+ Hearthwire sits in the KDE Plasma 6 panel. Its Chat tab opens AI chat sites
+ (Claude, ChatGPT, Grok, Gemini, GitHub Copilot, Microsoft Copilot, a local
+ web UI) or a built-in chat with local Ollama models, private by default.
+ Its Usage tab shows how much of each AI coding plan is left (Claude Code,
+ Codex, Cursor, Antigravity, GitHub Copilot, Devin, Grok), read by a small
+ Python helper that uses only the standard library.
+ .
+ The Chat tab needs Qt WebEngine (recommended). Stay signed in needs
+ gocryptfs, fuse3 and kdialog; Unlock with KDE Wallet also needs kwallet6,
+ qdbus-qt6 and openssl. The Ollama chat needs Ollama, which Ubuntu does not
+ package.

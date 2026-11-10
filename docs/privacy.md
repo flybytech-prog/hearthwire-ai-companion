@@ -484,6 +484,14 @@ when you press Export, the [settings backup](#settings-backup) file; and, only
 after the one-time upgrade from the previous name, a backup of Plasma's panel
 layout (see the last section of this page).
 
+Installing or removing a release package (pacman, dnf, apt) changes only
+files under `/usr`. A package runs nothing as you and never reads, moves or
+deletes anything in your home folder, so removing it keeps the usage history,
+the settings backup, the encrypted folder with its key slots, the KDE Wallet
+key, the Antigravity token cache and the widget settings. To delete the
+chat sign-ins and the usage history, use the helper commands in the
+README's "Install from a package" section before you remove the package.
+
 The widget never runs scripts in, reads from, or injects anything into the
 pages, sets no `QTWEBENGINE_*` variables or Chromium flags, and does not pass
 chat data to the Python helper, process arguments, or the environment. For

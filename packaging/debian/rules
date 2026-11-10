@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+# Ubuntu 26.04 LTS (Kubuntu). The source is `git archive` of the release tag
+# (packaging/source-archive.sh); the release workflow copies this folder to
+# debian/ inside the unpacked archive. No maintainer scripts of its own (dh_python3
+# adds the usual ones that byte-compile the helper in /usr), and removing the
+# package never touches a home folder.
+
+export PYBUILD_NAME=hearthwire
+export PYBUILD_DESTDIR=debian/hearthwire
+
+%:
+	dh $@ --buildsystem=pybuild
+
+# The test suite is not in the source archive (export-ignore); the release
+# workflow runs it before building.
+override_dh_auto_test:

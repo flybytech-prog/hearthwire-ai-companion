@@ -367,7 +367,7 @@ def _check_argv(argv: Sequence[str], *, config: Optional[str] = None) -> None:
     elif tool == "kdialog":
         if arguments != new_passphrase_argv(argv[0])[1:]:
             raise HelperError("os-error")
-    elif tool in ("kwallet-query", "qdbus6", "openssl"):
+    elif tool in ("kwallet-query", *walletkey.QDBUS_NAMES, "openssl"):
         walletkey.check_argv(argv)
     else:
         raise HelperError("os-error")

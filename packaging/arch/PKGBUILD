@@ -1,0 +1,77 @@
+# Maintainer: flybytech-prog <104578369+flybytech-prog@users.noreply.github.com>
+#
+# Arch Linux, CachyOS, Manjaro. The source is `git archive` of the release
+# tag, made by packaging/source-archive.sh next to this file:
+#
+#   packaging/source-archive.sh v1.0.0 packaging/arch
+#   cd packaging/arch && makepkg -si
+#
+# The package installs files only: no install scriptlet runs, and removing it
+# never touches anything in a home folder (sign-ins, history, backups stay).
+
+pkgname=hearthwire
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="AI companion for KDE Plasma 6: AI subscription usage meters and chats with AI sites"
+arch=('any')
+url="https://github.com/flybytech-prog/hearthwire-ai-companion"
+license=('MIT')
+depends=(
+  'python'
+  'plasma-workspace'
+  'libplasma'
+  'plasma5support'
+  'kirigami'
+  'kcmutils'
+  'knotifications'
+  'qt6-declarative'
+)
+makedepends=(
+  'python-build'
+  'python-installer'
+  'python-setuptools'
+  'python-wheel'
+)
+optdepends=(
+  'qt6-webengine: Chat tab (AI chat web sites)'
+  'gocryptfs: Stay signed in (encrypted chat sign-ins)'
+  'fuse3: Stay signed in (encrypted chat sign-ins)'
+  'kdialog: Stay signed in (passphrase prompts)'
+  'kwallet: Unlock with KDE Wallet (kwallet-query)'
+  'qt6-tools: Unlock with KDE Wallet (qdbus6)'
+  'openssl: setting up Unlock with KDE Wallet'
+  'libsecret: usage of providers that keep their sign-in in Secret Service (secret-tool)'
+  'ollama: built-in Ollama chat (or ollama-cuda / ollama-rocm)'
+)
+source=("$pkgname-$pkgver.tar.gz")
+# The tarball is made locally from the tag (see above); the release workflow
+# checks it against the tag and publishes SHA256SUMS for the packages.
+sha256sums=('SKIP')
+
+_plugin=io.github.flybytechprog.hearthwire
+
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  # The plasmoid, system-wide (what kpackagetool6 -i does per user).
+  install -d "$pkgdir/usr/share/plasma/plasmoids/$_plugin"
+  cp -r --no-preserve=mode,ownership plasmoid/. "$pkgdir/usr/share/plasma/plasmoids/$_plugin/"
+  find "$pkgdir/usr/share/plasma/plasmoids/$_plugin" -type d -exec chmod 0755 {} +
+  find "$pkgdir/usr/share/plasma/plasmoids/$_plugin" -type f -exec chmod 0644 {} +
+
+  # App icon, settings page icons, and the usage alert events.
+  local _icon
+  for _icon in hearthwire hearthwire-settings-general hearthwire-settings-ai hearthwire-settings-chat; do
+    install -Dm0644 "assets/$_icon.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/$_icon.svg"
+  done
+  install -Dm0644 assets/hearthwire.notifyrc "$pkgdir/usr/share/knotifications6/hearthwire.notifyrc"
+
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm0644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

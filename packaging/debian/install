@@ -1,0 +1,7 @@
+plasmoid/metadata.json usr/share/plasma/plasmoids/io.github.flybytechprog.hearthwire/
+plasmoid/contents usr/share/plasma/plasmoids/io.github.flybytechprog.hearthwire/
+assets/hearthwire.svg usr/share/icons/hicolor/scalable/apps/
+assets/hearthwire-settings-general.svg usr/share/icons/hicolor/scalable/apps/
+assets/hearthwire-settings-ai.svg usr/share/icons/hicolor/scalable/apps/
+assets/hearthwire-settings-chat.svg usr/share/icons/hicolor/scalable/apps/
+assets/hearthwire.notifyrc usr/share/knotifications6/
