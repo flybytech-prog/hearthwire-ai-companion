@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls as QQC2
 import QtTest
 import HearthwireStubs
 import org.kde.kirigami as Kirigami
@@ -1847,5 +1848,96 @@ TestCase {
         compare(lines.length, 10)
         compare(lines[0], "This changes 11 chat addresses:")
         compare(lines[9], "…and 3 more.")
+    }
+
+    // L2: Plasma's Apply and OK call the page's saveConfig() first; then
+    // "press Apply" is no longer true.
+    function test_settingsApplyClearsTheLoadedBackupNote() {
+        var page = backupPage()
+        importing(page, {popupSize: "large"})
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        var label = generalPart(page, "backupMessage")
+        compare(label.text, "Backup loaded. Press Apply to save it.")
+        verify(page.saveConfig, "the hook Plasma looks for")
+        page.saveConfig()
+        compare(label.text, "")
+        compare(label.visible, false)
+        compare(page.cfg_popupSize, "large", "the loaded value is what Apply saves")
+    }
+
+    function test_settingsApplyKeepsOtherBackupResults() {
+        var page = backupPage()
+        generalPart(page, "backupExport").clicked()
+        answerBackup(page, JSON.stringify({ok: true, saved: 27, dropped: 1}))
+        answerBackup(page, JSON.stringify({ok: true, exists: true, exported_at: backupStamp}))
+        page.saveConfig()
+        compare(generalPart(page, "backupMessage").text, "Backup saved.")
+        compare(generalPart(page, "backupDroppedCount").text, "Settings left out: 1")
+        generalPart(page, "backupImport").clicked()
+        answerBackup(page, JSON.stringify({ok: false, error: "invalid"}))
+        page.saveConfig()
+        compare(generalPart(page, "backupMessage").text, "The backup file is damaged and can't be read.")
+    }
+
+    // Every visible text and control under the page's flickable.
+    function shownParts(item, found) {
+        found = found || []
+        if (!item || !item.visible)
+            return found
+        if (item instanceof Text || item instanceof QQC2.Control)
+            found.push(item)
+        var kids = item.children || []
+        for (var index = 0; index < kids.length; index++)
+            shownParts(kids[index], found)
+        return found
+    }
+
+    // The parts that reach past the scrollable content width (the
+    // flickable, which the org.kde.desktop style keeps clear of the
+    // scrollbar, less the page's own padding).
+    function partsPastTheEdge(page) {
+        var flickable = page.flickable
+        var right = flickable.width - page.rightPadding
+        return shownParts(flickable.contentItem).filter(function (part) {
+            var at = part.mapToItem(flickable, 0, 0)
+            return at.x < page.leftPadding - 0.5 || at.x + part.width > right + 0.5
+        }).map(function (part) {
+            var at = part.mapToItem(flickable, 0, 0)
+            return (part.objectName || String(part).split("(")[0]) + " " + String(part.text).slice(0, 24)
+                + ": " + Math.round(at.x) + " + " + Math.round(part.width) + " > " + right
+        })
+    }
+
+    // L1: the long help texts and the inline messages wrap inside the page,
+    // at about the settings dialog's default page width (45 grid units less
+    // the 7 of its sidebar), a little narrower, and at its smallest (30 less 7).
+    function test_settingsGeneralTextFitsThePage_data() {
+        return [{tag: "default", units: 38}, {tag: "narrower", units: 35}, {tag: "smallest", units: 23}]
+    }
+
+    function test_settingsGeneralTextFitsThePage(data) {
+        var page = backupPage({ok: true, exists: true, exported_at: backupStamp})
+        page.width = Kirigami.Units.gridUnit * data.units - 1
+        page.height = Kirigami.Units.gridUnit * 30
+        // Every confirmation and long message at once.
+        page.cfg_usageHistoryClearOwed = true
+        page.historyClearState = "no-applet"
+        page.confirmingWalletOff = true
+        page.confirmingOff = true
+        page.showFolderActions = true
+        page.confirmingDelete = true
+        page.vaultMessage = "wallet-off"
+        page.confirmingExport = true
+        importing(page, {chatOllamaUrl: "http://[::1]:11434", popupSize: "large"}, 2)
+        page.backupMessage = "settings-unreadable"
+        wait(100)
+        var named = ["usageHistoryExplanation", "usageHistoryStatus", "usageHistoryOwedNotice", "walletOffConfirm",
+                     "backupExplanation", "backupExportConfirm", "backupImportConfirm", "backupAddressChanges",
+                     "backupMessage"]
+        named.forEach(function (name) { verify(generalPart(page, name).visible, name + " is shown") })
+        verify(generalPart(page, "usageHistoryExplanation").lineCount > 2, "it wraps")
+        verify(generalPart(page, "backupExplanation").lineCount > 2, "it wraps")
+        verify(shownParts(page.flickable.contentItem).length > 40, "the walk sees the page")
+        compare(partsPastTheEdge(page), [])
     }
 }

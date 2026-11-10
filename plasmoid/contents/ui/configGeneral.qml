@@ -105,6 +105,10 @@ KCM.SimpleKCM {
 
     // Page-local only; the folder actions always start collapsed.
     property bool showFolderActions: false
+    // The width wrapped text asks the form for. Without it a long label asks
+    // for its unwrapped width, the form drops to its narrow mode, and there
+    // its fields are wider than the form, so their right edge is cut off.
+    readonly property real wrappedTextWidth: Kirigami.Units.gridUnit * 22
     readonly property var refreshChoices: [
         { value: 60, text: i18n("1 minute") },
         { value: 300, text: i18n("5 minutes") },
@@ -471,6 +475,13 @@ KCM.SimpleKCM {
         if (values.middleClickOpens !== undefined) page.cfg_middleClickOpens = values.middleClickOpens
         if (values.chatCustomUrls !== undefined) page.cfg_chatCustomUrls = values.chatCustomUrls
         page.backupMessage = "applied"
+    }
+
+    // Plasma calls this on Apply and OK, before it saves the cfg_ values.
+    // A loaded backup is saved then; other results stay true.
+    function saveConfig() {
+        if (page.backupMessage === "applied")
+            page.backupMessage = ""
     }
 
     function backupStatusText() {
@@ -861,8 +872,11 @@ KCM.SimpleKCM {
             textFormat: Text.PlainText
             opacity: 0.72
             text: i18n("Off by default. When on, the percent used of each reading is kept for 7 days, only on this computer, in the hearthwire/usage-history folder of your data folder (usually ~/.local/share). Each widget keeps its own history. It is saved at most every 15 minutes, keeping one value per hour. No names, plans, amounts or accounts are saved. Turning it off and applying deletes this widget's history; Delete usage history deletes it at once.")
+            Layout.preferredWidth: page.wrappedTextWidth
         }
         RowLayout {
+            Layout.fillWidth: true
+            Layout.preferredWidth: page.wrappedTextWidth
             spacing: Kirigami.Units.smallSpacing
 
             QQC2.Button {
@@ -890,6 +904,7 @@ KCM.SimpleKCM {
             textFormat: Text.PlainText
             color: Kirigami.Theme.neutralTextColor
             text: i18n("The usage history hasn't been deleted yet. If this message stays, use Delete usage history.")
+            Layout.preferredWidth: page.wrappedTextWidth
         }
 
         RowLayout {
@@ -1024,6 +1039,7 @@ KCM.SimpleKCM {
 
         ColumnLayout {
             Layout.fillWidth: true
+            Layout.preferredWidth: page.wrappedTextWidth
             visible: page.signInMode === "encrypted" && page.walletMissing.length > 0
             spacing: Kirigami.Units.smallSpacing
 
@@ -1048,10 +1064,12 @@ KCM.SimpleKCM {
             color: page.vaultMessage === "wallet-on" || page.vaultMessage === "wallet-off"
                 ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor
             text: page.vaultText(page.vaultMessage)
+            Layout.preferredWidth: page.wrappedTextWidth
         }
 
         ColumnLayout {
             Layout.fillWidth: true
+            Layout.preferredWidth: page.wrappedTextWidth
             visible: page.vaultState === "unavailable"
             spacing: Kirigami.Units.smallSpacing
 
@@ -1105,6 +1123,7 @@ KCM.SimpleKCM {
             visible: page.showFolderActions
             wrapMode: Text.WordWrap
             text: page.vaultStateText()
+            Layout.preferredWidth: page.wrappedTextWidth
         }
 
         RowLayout {
@@ -1158,6 +1177,7 @@ KCM.SimpleKCM {
             color: page.vaultMessage === "changed" || page.vaultMessage === "deleted"
                 ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor
             text: page.vaultText(page.vaultMessage)
+            Layout.preferredWidth: page.wrappedTextWidth
         }
 
         // --- Backup ---------------------------------------------------------
@@ -1174,6 +1194,7 @@ KCM.SimpleKCM {
             wrapMode: Text.WordWrap
             textFormat: Text.PlainText
             text: page.backupStatusText()
+            Layout.preferredWidth: page.wrappedTextWidth
         }
         QQC2.Label {
             objectName: "backupExplanation"
@@ -1182,6 +1203,7 @@ KCM.SimpleKCM {
             textFormat: Text.PlainText
             opacity: 0.72
             text: i18n("One file on this computer, in the hearthwire folder of your configuration folder (usually ~/.config). It holds these settings, including your custom chat addresses. Sign-ins, the encrypted folder, zoom and the usage history setting are not part of it. Export saves the applied settings: press Apply first, because changes not yet applied on any page are not exported.")
+            Layout.preferredWidth: page.wrappedTextWidth
         }
         RowLayout {
             spacing: Kirigami.Units.smallSpacing
@@ -1260,6 +1282,7 @@ KCM.SimpleKCM {
             textFormat: Text.PlainText
             text: i18n("Settings to apply: %1. Saved: %2.",
                 page.backupPlan ? page.backupPlan.applied : 0, SettingsBackup.shownStamp(page.backupExportedAt))
+            Layout.preferredWidth: page.wrappedTextWidth
         }
 
         // Plain text only: an address is shown, never opened.
@@ -1270,6 +1293,7 @@ KCM.SimpleKCM {
             wrapMode: Text.Wrap
             textFormat: Text.PlainText
             text: page.addressChangeText(page.backupAddressChanges)
+            Layout.preferredWidth: page.wrappedTextWidth
         }
 
         QQC2.Label {
@@ -1279,6 +1303,7 @@ KCM.SimpleKCM {
             wrapMode: Text.WordWrap
             textFormat: Text.PlainText
             text: page.backupText(page.backupMessage)
+            Layout.preferredWidth: page.wrappedTextWidth
         }
 
         QQC2.Label {
@@ -1288,6 +1313,7 @@ KCM.SimpleKCM {
             wrapMode: Text.WordWrap
             textFormat: Text.PlainText
             text: i18n("Settings left out: %1", page.backupDropped)
+            Layout.preferredWidth: page.wrappedTextWidth
         }
     }
 }
