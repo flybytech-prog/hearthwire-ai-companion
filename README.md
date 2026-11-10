@@ -31,23 +31,30 @@ plasmashell's memory.
 
 <table>
 <tr>
-<td align="center"><img src="docs/chat.png" alt="Chat tab showing ChatGPT inside the Hearthwire popup" width="400"><br><sub>Chat sites in the popup</sub></td>
-<td align="center"><img src="docs/ollama.png" alt="Built-in Ollama chat with the llama3 model" width="400"><br><sub>Built-in Ollama chat</sub></td>
+<td align="center"><img src="docs/chat.png" alt="Chat tab showing ChatGPT inside the Hearthwire popup, with the site picker and toolbar above it" width="400"><br><sub>Chat sites in the popup</sub></td>
+<td align="center"><img src="docs/ollama.png" alt="Built-in Ollama chat with the llama3 model: the question in a blue bubble on the right and the answer in its own bubble below" width="400"><br><sub>Built-in Ollama chat with chat bubbles</sub></td>
 </tr>
 <tr>
-<td align="center" colspan="2"><img src="docs/chat-split.png" alt="Split view: Gemini and ChatGPT side by side in the Hearthwire popup, both answering the same question" width="700"><br><sub>Split view: two chat sites side by side</sub></td>
+<td align="center" colspan="2"><img src="docs/chat-split.png" alt="Split view: ChatGPT and Gemini side by side in the Hearthwire popup, both answering the same question" width="700"><br><sub>Split view: two chat sites side by side</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/chat-locked.png" alt="Locked encrypted sign-ins card with Unlock and private-session buttons" width="400"><br><sub>Encrypted sign-ins, locked</sub></td>
-<td align="center"><img src="docs/usage.png" alt="Usage tab with the last-updated time, a Refresh button, and Claude Code session and weekly meters" width="400"><br><sub>Usage meters</sub></td>
+<td align="center"><img src="docs/chat-locked.png" alt="Locked sign-ins card with buttons to unlock with KDE Wallet, use a passphrase, or use a private session" width="400"><br><sub>Encrypted sign-ins, locked</sub></td>
+<td align="center"><img src="docs/usage.png" alt="Usage tab with the next reset line and a colored accent strip beside Claude Code. Its Session, Weekly and Fable meters are green or yellow by how much is left" width="400"><br><sub>Usage meters with the next reset</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/settings-general.png" alt="Settings, General page: popup, usage and privacy options" width="400"><br><sub>Settings → General</sub></td>
-<td align="center"><img src="docs/settings-chat.png" alt="Settings, Chat page: the list of chat sites" width="400"><br><sub>Settings → Chat</sub></td>
+<td align="center"><img src="docs/hover.png" alt="Hover popup over the panel icon: Claude Code Session 74% left and Weekly 35% left, each with a colored level dot" width="344"><br><sub>Hover popup with level dots</sub></td>
+<td align="center"><img src="docs/panel-ring.png" alt="The Hearthwire heart icon on the panel with a green usage ring around it, enlarged 4 times" width="120"><br><sub>Usage ring on the panel icon (4× zoom)</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/settings-providers.png" alt="Settings, AI Provider Settings page: compact layout, warning colors, and the provider list with order arrows, Track switches and reading checkboxes" width="400"><br><sub>Settings → AI Provider Settings</sub></td>
-<td align="center"><img src="docs/settings-hover.png" alt="Settings, AI Provider Settings page, hover popup section: show usage on the panel icon, and the readings chosen for each provider" width="400"><br><sub>Settings → AI Provider Settings → Hover popup</sub></td>
+<td align="center"><img src="docs/settings-general.png" alt="Settings, General page, Popup section: Open on, Show tabs, Size, Keyboard shortcut opens and Middle-click opens" width="400"><br><sub>Settings → General → Popup</sub></td>
+<td align="center"><img src="docs/settings-backup.png" alt="Settings, General page: the Privacy section with usage history and sign-in options, then the Backup section with Export and Import buttons" width="400"><br><sub>Settings → General → Privacy and Backup</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/settings-providers.png" alt="Settings, AI Provider Settings page: normal, warning and critical color boxes with a live Preview row, then the provider list with order arrows, Track switches and reading checkboxes" width="400"><br><sub>Settings → AI Provider Settings: colors and Preview</sub></td>
+<td align="center"><img src="docs/settings-hover.png" alt="Settings, AI Provider Settings page, Hover popup section: the panel icon switch, the Usage ring choice, and the readings chosen for each provider" width="400"><br><sub>Settings → AI Provider Settings → Hover popup</sub></td>
+</tr>
+<tr>
+<td align="center" colspan="2"><img src="docs/settings-chat.png" alt="Settings, Chat page: the list of chat sites, including the built-in Ollama chat, and the Open first choice" width="400"><br><sub>Settings → Chat</sub></td>
 </tr>
 </table>
 
