@@ -35,6 +35,8 @@ ColumnLayout {
     property string profileName: ""
     property var card: ({view: "web", message: ""})
     property var missingTools: []
+    // The install hint's distro family (ChatStorage.installDistro).
+    property string installDistro: "other"
     // "wallet" when Unlock uses KDE Wallet (chosen and set up), else "passphrase".
     property string unlockMethod: "passphrase"
     // KDE Wallet is chosen in the settings and usable: its key can be set up
@@ -775,6 +777,7 @@ ColumnLayout {
                 }
             }
             PlasmaComponents.Label {
+                objectName: "storageCardText"
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
@@ -789,7 +792,9 @@ ColumnLayout {
                             ? i18n("Open them with KDE Wallet for this Plasma session.")
                             : i18n("Enter your passphrase to open them for this Plasma session.")
                     case "install":
-                        return i18n("The encrypted folder for saved sign-ins needs some tools that aren't installed. Install them with this command, then check again:")
+                        return ChatStorage.hasInstallCommand(chatView.installDistro)
+                            ? i18n("The encrypted folder for saved sign-ins needs some tools that aren't installed. Install them with this command, then check again:")
+                            : i18n("The encrypted folder for saved sign-ins needs some tools that aren't installed. Install the packages that provide these tools with your distribution's package manager, then check again:")
                     case "damaged":
                         return i18n("The encrypted folder is damaged and can't be opened. Delete it to start again with a new one; the sign-ins saved in it are lost.")
                     default:
@@ -799,12 +804,13 @@ ColumnLayout {
                 visible: text !== ""
             }
             QQC2.TextField {
+                objectName: "chatInstallCommand"
                 Layout.fillWidth: true
                 visible: storageCard.view === "install"
                 readOnly: true
                 selectByMouse: true
                 horizontalAlignment: Text.AlignHCenter
-                text: ChatStorage.installCommand(chatView.missingTools)
+                text: ChatStorage.installCommand(chatView.missingTools, chatView.installDistro)
             }
             PlasmaComponents.Label {
                 Layout.fillWidth: true

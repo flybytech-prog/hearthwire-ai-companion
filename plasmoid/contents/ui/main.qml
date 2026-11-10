@@ -18,6 +18,7 @@ import "AlertLogic.js" as AlertLogic
 import "TooltipLogic.js" as TooltipLogic
 import "UsageLogic.js" as UsageLogic
 import "UsageHistory.js" as UsageHistory
+import "InstallInfo.js" as InstallInfo
 
 PlasmoidItem {
     id: root
@@ -116,6 +117,16 @@ PlasmoidItem {
     property string pendingDropError: ""
     property string droppedSourceName: ""
     property int droppedRun: 0
+
+    // Where the helper and widget come from (InstallInfo.parseReply), read
+    // once at start; unknown until then and on any odd reply.
+    property var installInfo: InstallInfo.unknown()
+    property string installInfoSourceName: ""
+    property bool installInfoAsked: false
+    // A leftover script install shadows the package: the Usage tab says so.
+    readonly property bool installShadowed: root.installInfo.shadowed === true
+    // The install hints' distro family ("other" until known).
+    readonly property string installDistro: ChatStorage.installDistro(root.installInfo.distro)
 
     // Prompt library (saved prompts and personalities). Saved only inside
     // the unlocked encrypted folder; the helper lists them and main.qml
@@ -1086,6 +1097,19 @@ PlasmoidItem {
         droppedSource.connectSource(command)
     }
 
+    // Once per widget start; the reply is only read through InstallInfo.
+    function checkInstall() {
+        if (root.installInfoAsked)
+            return
+        root.installInfoAsked = true
+        var command = InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()),
+                                          Math.max(0, root.chatAppletId))
+        if (command === "")
+            return
+        root.installInfoSourceName = command
+        installInfoSource.connectSource(command)
+    }
+
     function droppedDone(reply) {
         root.droppedSourceName = ""
         if (reply.ok && reply.text !== "")
@@ -1353,6 +1377,20 @@ PlasmoidItem {
         }
     }
 
+    // The one --install-info run; only stdout's checked words are used.
+    Plasma5Support.DataSource {
+        id: installInfoSource
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            installInfoSource.disconnectSource(source)
+            if (source !== root.installInfoSourceName)
+                return
+            root.installInfoSourceName = ""
+            root.installInfo = InstallInfo.parseReply(data["exit code"], data["stdout"])
+        }
+    }
+
     Plasma5Support.DataSource {
         id: storageSource
         engine: "executable"
@@ -1469,6 +1507,7 @@ PlasmoidItem {
         root.historyRun = ChatStorage.firstRun(Date.now(), Math.random())
         root.historyStart()
         root.historyPayOwed()
+        root.checkInstall()
         root.chatZoom = SettingsLogic.parseZoomMap(Plasmoid.configuration.chatSiteZoom, root.chatZoomIds)
         // Plasma start, Unlock with KDE Wallet: open the folder silently when
         // the wallet is already open (the helper never prompts here). The

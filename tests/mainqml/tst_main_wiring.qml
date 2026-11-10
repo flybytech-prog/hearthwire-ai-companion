@@ -91,7 +91,7 @@ TestCase {
             else if (typeof object.createObject === "function")
                 notifications.push(object)
         }
-        compare(sources.length, 5, "usage, history, library, dropped and storage sources")
+        compare(sources.length, 6, "usage, history, library, dropped, install info and storage sources")
         sources.forEach(function (source) { compare(source.isStub, true, "a stub DataSource") })
         compare(notifications.length, 1, "the alert notification's Component")
         var notification = notifications[0].createObject(main, {})
@@ -1042,7 +1042,7 @@ TestCase {
         var page = generalPage()
         compare(page.cfg_usageHistoryEnabled, false)
         compare(generalPart(page, "usageHistoryChoice").checked, false)
-        compare(sourcesOf(page).length, 3, "the vault's, the delete button's and the backup's")
+        compare(sourcesOf(page).length, 4, "the vault's, the install info's, the delete button's and the backup's")
         verify(everyCommand(page).length > 0, "its other source is really seen")
         compare(historyCommands(page), [])
     }
@@ -1930,8 +1930,9 @@ TestCase {
         page.confirmingExport = true
         importing(page, {chatOllamaUrl: "http://[::1]:11434", popupSize: "large"}, 2)
         page.backupMessage = "settings-unreadable"
+        answerInstall(page, installReply({user_helper: true}))
         wait(100)
-        var named = ["usageHistoryExplanation", "usageHistoryStatus", "usageHistoryOwedNotice", "walletOffConfirm",
+        var named = ["installShadowedNotice", "installShadowedCommand", "usageHistoryExplanation", "usageHistoryStatus", "usageHistoryOwedNotice", "walletOffConfirm",
                      "backupExplanation", "backupExportConfirm", "backupImportConfirm", "backupAddressChanges",
                      "backupMessage"]
         named.forEach(function (name) { verify(generalPart(page, name).visible, name + " is shown") })
@@ -1939,5 +1940,221 @@ TestCase {
         verify(generalPart(page, "backupExplanation").lineCount > 2, "it wraps")
         verify(shownParts(page.flickable.contentItem).length > 40, "the walk sees the page")
         compare(partsPastTheEdge(page), [])
+    }
+
+    // --- Install info: a script install shadowing the package ---------------
+
+    readonly property string installPattern:
+        "^env HEARTHWIRE_RUN=[0-9]+ HEARTHWIRE_APPLET=7 python3 -P -s -m hearthwire --install-info$"
+    readonly property string popupInstallNotice: "An older script install is running instead of the installed package. To fix it, run ./scripts/install.sh --remove-script-install from the Hearthwire source folder, then restart Plasma. Your settings and data are kept."
+    readonly property string settingsInstallNotice: "An older script install of Hearthwire is running instead of the installed package. To use the package, run ./scripts/install.sh --remove-script-install from the Hearthwire source folder, then restart Plasma. Your settings, usage history and saved sign-ins are kept."
+
+    function installCommands(owner) {
+        wait(0)
+        return everyCommand(owner).filter(function (command) { return command.indexOf("--install-info") >= 0 })
+    }
+
+    function answerInstall(owner, reply, exitCode) {
+        var running = runningOn(owner, "--install-info")
+        verify(running, "the install info check is running")
+        running.source.newData(running.command, {"exit code": exitCode === undefined ? 0 : exitCode, "stdout": reply})
+        wait(0)
+    }
+
+    // The contract's reply: a system package alone, on Arch, unless changed.
+    function installReply(changes) {
+        var value = {ok: true, install_info_version: 1, helper: "system", system_helper: true,
+                     user_helper: false, user_plasmoid: false, system_plasmoid: true, distro: "arch"}
+        for (var key in changes)
+            value[key] = changes[key]
+        return JSON.stringify(value)
+    }
+
+    // Each combination of the four flags, and replies that mean unknown.
+    function installRows() {
+        var rows = []
+        for (var bits = 0; bits < 16; bits++) {
+            var flags = {user_helper: !!(bits & 1), system_helper: !!(bits & 2),
+                         user_plasmoid: !!(bits & 4), system_plasmoid: !!(bits & 8)}
+            rows.push({tag: "flags " + bits, reply: installReply(flags), exitCode: 0,
+                       shown: (flags.user_helper && flags.system_helper)
+                              || (flags.user_plasmoid && flags.system_plasmoid)})
+        }
+        var shadowed = {user_helper: true, user_plasmoid: true}
+        rows.push({tag: "exit code 1", reply: installReply(shadowed), exitCode: 1, shown: false})
+        rows.push({tag: "old helper", reply: "", exitCode: 2, shown: false})
+        rows.push({tag: "os-error", reply: JSON.stringify({ok: false, error: "os-error"}), exitCode: 0, shown: false})
+        rows.push({tag: "extra key", reply: installReply({user_helper: true, path: "/home/x"}), exitCode: 0, shown: false})
+        rows.push({tag: "later version", reply: installReply({user_helper: true, install_info_version: 2}), exitCode: 0,
+                   shown: false})
+        rows.push({tag: "text flag", reply: installReply({user_helper: "true"}), exitCode: 0, shown: false})
+        rows.push({tag: "not json", reply: "usage: hearthwire [-h] <b>boom</b>", exitCode: 0, shown: false})
+        rows.push({tag: "no reply", reply: null, exitCode: 0, shown: false})
+        return rows
+    }
+
+    function installPopup(main) {
+        var full = createTemporaryObject(main.fullRepresentation, main, {width: 600, height: 800})
+        verify(full, "the real popup")
+        return full
+    }
+
+    // Once at start, the fixed command; nothing later runs it again.
+    function test_installInfoRunsOnceAtStart() {
+        var main = loadMain({})
+        var commands = installCommands(main)
+        compare(commands.length, 1, "once")
+        verify(new RegExp(testCase.installPattern).test(commands[0]), commands[0])
+        main.expanded = true
+        main.refresh()
+        main.expanded = false
+        main.expanded = true
+        answerInstall(main, installReply({}))
+        main.checkInstall()
+        main.expanded = false
+        main.expanded = true
+        compare(installCommands(main).length, 1, "still once")
+        compare(runningOn(main, "--install-info"), null, "and done")
+    }
+
+    // Also with the Usage tab hidden: the install hints need the distro.
+    function test_installInfoRunsWithoutTheUsageTab() {
+        var main = loadMain({showUsageTab: false})
+        compare(installCommands(main).length, 1)
+    }
+
+    function test_installNoticeInThePopup_data() {
+        return installRows()
+    }
+
+    function test_installNoticeInThePopup(data) {
+        var main = loadMain({showChatTab: false})
+        var full = installPopup(main)
+        var notice = null
+        tryVerify(function () {
+            notice = allNamed(full, "usageInstallNotice")[0] || null
+            return notice !== null
+        }, 5000, "the Usage tab is built")
+        compare(notice.visible, false, "not before the reply")
+        if (data.reply !== null)
+            answerInstall(main, data.reply, data.exitCode)
+        compare(main.installShadowed, data.shown)
+        compare(notice.visible, data.shown)
+        compare(notice.text, testCase.popupInstallNotice)
+        compare(notice.textFormat, Text.PlainText)
+    }
+
+    function test_installNoticeInSettings_data() {
+        return installRows()
+    }
+
+    function test_installNoticeInSettings(data) {
+        var page = generalPage()
+        var commands = installCommands(page)
+        compare(commands.length, 1, "once per page open")
+        verify(new RegExp(testCase.installPattern).test(commands[0]), commands[0])
+        var notice = generalPart(page, "installShadowedNotice")
+        var command = generalPart(page, "installShadowedCommand")
+        compare(notice.visible, false, "not before the reply")
+        if (data.reply !== null)
+            answerInstall(page, data.reply, data.exitCode)
+        tryCompare(notice, "visible", data.shown)
+        compare(command.visible, data.shown)
+        compare(notice.text, testCase.settingsInstallNotice)
+        compare(notice.type, Kirigami.MessageType.Warning)
+        compare(notice.actions.length, 0, "nothing to click")
+        compare(command.text, "./scripts/install.sh --remove-script-install")
+        compare(command.readOnly, true)
+        page.checkInstall()
+        compare(installCommands(page).length, 1, "still once")
+    }
+
+    function test_installNoticeIsTheFirstSettingsPart() {
+        var page = generalPage()
+        page.width = Kirigami.Units.gridUnit * 38
+        page.height = Kirigami.Units.gridUnit * 30
+        answerInstall(page, installReply({user_plasmoid: true}))
+        var notice = generalPart(page, "installShadowedNotice")
+        tryCompare(notice, "visible", true)
+        wait(100)
+        var content = page.flickable.contentItem
+        var top = notice.mapToItem(content, 0, 0).y
+        var above = shownParts(content).filter(function (part) {
+            return part.mapToItem(content, 0, 0).y < top - 0.5
+        }).map(function (part) { return part.objectName || String(part).split("(")[0] })
+        verify(shownParts(content).length > 40, "the walk sees the page")
+        compare(above, [], "at the top of Settings → General")
+    }
+
+    readonly property var everyTool: ["gocryptfs", "gocryptfs-v2", "kdialog", "fusermount3", "kwallet-query", "qdbus6", "openssl"]
+
+    function test_installHintsPerDistroInSettings_data() {
+        return [
+            {tag: "unknown", reply: null, vault: "gocryptfs kdialog fusermount3 kwallet-query qdbus6 openssl",
+             wallet: "kwallet-query qdbus6 openssl"},
+            {tag: "arch", reply: installReply({distro: "arch"}),
+             vault: "sudo pacman -S --needed gocryptfs kdialog fuse3 kwallet qt6-tools openssl",
+             wallet: "sudo pacman -S --needed kwallet qt6-tools openssl"},
+            {tag: "fedora", reply: installReply({distro: "fedora"}),
+             vault: "sudo dnf install gocryptfs kdialog fuse3 kf6-kwallet qt6-qttools openssl",
+             wallet: "sudo dnf install kf6-kwallet qt6-qttools openssl"},
+            {tag: "debian", reply: installReply({distro: "debian"}),
+             vault: "sudo apt install gocryptfs kdialog fuse3 kwallet6 qdbus-qt6 openssl",
+             wallet: "sudo apt install kwallet6 qdbus-qt6 openssl"},
+            {tag: "other", reply: installReply({distro: "other"}),
+             vault: "gocryptfs kdialog fusermount3 kwallet-query qdbus6 openssl",
+             wallet: "kwallet-query qdbus6 openssl"},
+            {tag: "odd reply", reply: installReply({distro: "ubuntu"}),
+             vault: "gocryptfs kdialog fusermount3 kwallet-query qdbus6 openssl",
+             wallet: "kwallet-query qdbus6 openssl"}
+        ]
+    }
+
+    function test_installHintsPerDistroInSettings(data) {
+        var page = generalPage()
+        page.vaultMissing = testCase.everyTool
+        if (data.reply !== null)
+            answerInstall(page, data.reply)
+        compare(generalPart(page, "vaultInstallCommand").text, data.vault)
+        compare(generalPart(page, "walletInstallCommand").text, data.wallet)
+    }
+
+    function test_installHintsPerDistroInThePopup_data() {
+        return [
+            {tag: "unknown", reply: null, command: "fusermount3 qdbus6"},
+            {tag: "arch", reply: installReply({distro: "arch"}), command: "sudo pacman -S --needed fuse3 qt6-tools"},
+            {tag: "fedora", reply: installReply({distro: "fedora"}), command: "sudo dnf install fuse3 qt6-qttools"},
+            {tag: "debian", reply: installReply({distro: "debian"}), command: "sudo apt install fuse3 qdbus-qt6"},
+            {tag: "other", reply: installReply({distro: "other"}), command: "fusermount3 qdbus6"},
+            {tag: "odd reply", reply: installReply({distro: "arch", extra: 1}), command: "fusermount3 qdbus6"}
+        ]
+    }
+
+    function test_installHintsPerDistroInThePopup(data) {
+        var main = loadMain({})
+        if (data.reply !== null)
+            answerInstall(main, data.reply)
+        main.chatVaultMissing = ["qdbus6", "fusermount3"]
+        var full = installPopup(main)
+        var field = null
+        tryVerify(function () {
+            field = allNamed(full, "chatInstallCommand")[0] || null
+            return field !== null
+        }, 5000, "the Chat tab is built")
+        compare(field.text, data.command)
+    }
+
+    // A late or foreign reply on the source changes nothing.
+    function test_installInfoForeignReplyIsIgnored() {
+        var main = loadMain({})
+        var running = runningOn(main, "--install-info")
+        verify(running)
+        running.source.newData(running.command + " x", {"exit code": 0, "stdout": installReply({user_helper: true})})
+        wait(0)
+        compare(main.installShadowed, false)
+        answerInstall(main, installReply({}))
+        running.source.newData(running.command, {"exit code": 0, "stdout": installReply({user_helper: true})})
+        wait(0)
+        compare(main.installShadowed, false, "only the first reply counts")
     }
 }

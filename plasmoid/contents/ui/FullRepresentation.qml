@@ -573,6 +573,7 @@ PlasmaExtras.Representation {
                     profileName: root.chatProfileName
                     card: root.chatCard
                     missingTools: root.chatVaultMissing
+                    installDistro: root.installDistro
                     unlockMethod: root.chatUnlockMethod
                     walletChosen: root.chatUnlockSetting === "wallet" && root.chatVaultWallet !== "unavailable"
                 walletNotApplied: root.chatWalletNotApplied

@@ -424,10 +424,21 @@ What a package leaves to you:
   Hearthwire's previous name, or AI Usage 2.x, run `scripts/install.sh` once
   from a checkout first (see the upgrade sections below): it moves your data
   and widgets, which a package can't do for each user. Then remove the
-  script's copy as described under "To remove a manual installation" below,
-  and install the package.
-- **An earlier script install** goes first, too: a copy in your home folder
-  (`pip install --user`, `kpackagetool6 -i`) wins over the package.
+  script's copy as below, and install the package.
+- **An earlier script install** goes first, too. Its copies in your home
+  folder (the helper from `pip install --user`, the widget from
+  `kpackagetool6 -i`) win over the package, so the old version silently keeps
+  running. Remove them from your checkout, then restart Plasma:
+
+  ```bash
+  ./scripts/install.sh --remove-script-install --restart-plasma
+  ```
+
+  It removes only the script's helper, widget, icons and events file, and
+  prints each one; your data, settings and sign-ins stay. It never uses
+  `sudo` and is safe to run again. If no package is installed yet, it warns
+  that Hearthwire will be gone until you install one. A widget that finds a
+  script copy hiding the package says so on **Settings → General**.
 - **Restarting Plasma** after an upgrade, so the running widget picks up the
   new files: log out and in, or run
   `systemctl --user restart plasma-plasmashell.service`.
@@ -540,7 +551,10 @@ nothing else, and refuses while the folder is unlocked. A settings backup
 file (`~/.config/hearthwire/settings-backup.json`) stays in place, and the
 script says so.
 
-To remove a manual installation:
+To remove a script install, for example to switch to a package, run
+`./scripts/install.sh --remove-script-install` (see
+[Install from a package](#install-from-a-package)). To remove a manual
+installation by hand:
 
 ```bash
 kpackagetool6 -t Plasma/Applet -r io.github.flybytechprog.hearthwire
@@ -580,8 +594,8 @@ or `kpackagetool6` install nothing has moved, and the encrypted folder can't
 be created or opened until the installer has run (the Chat tab says so).
 The release packages don't do the move either, since a package never runs
 anything as you: to switch to a package, run the installer once as below,
-then remove its copy (see "To remove a manual installation" above), then
-install the package.
+then remove its copy with `./scripts/install.sh --remove-script-install`,
+then install the package. A script copy left in place hides the package.
 
 What moves:
 
@@ -649,7 +663,10 @@ usage, reset/retry times, and no credential data.
 
 The widget also runs the helper for the usage history (`--usage-history`)
 and the settings backup (`--settings-backup`); see
-[Provider contracts](docs/provider-contracts.md#usage-history-helper).
+[Provider contracts](docs/provider-contracts.md#usage-history-helper). Once at
+start it runs `--install-info`, which says in fixed words whether a script
+install hides the package
+([Provider contracts](docs/provider-contracts.md#install-info-helper)).
 
 ## Requirements
 

@@ -91,6 +91,19 @@ ColumnLayout {
         font: Kirigami.Theme.smallFont
     }
 
+    // A leftover script install shadows the package (InstallInfo); fixed
+    // text, never the helper's. Settings → General says the same.
+    PlasmaComponents.Label {
+        objectName: "usageInstallNotice"
+        Layout.fillWidth: true
+        visible: root.installShadowed
+        textFormat: Text.PlainText
+        text: i18n("An older script install is running instead of the installed package. To fix it, run ./scripts/install.sh --remove-script-install from the Hearthwire source folder, then restart Plasma. Your settings and data are kept.")
+        wrapMode: Text.Wrap
+        color: Kirigami.Theme.neutralTextColor
+        font: Kirigami.Theme.smallFont
+    }
+
     PlasmaExtras.PlaceholderMessage {
         Layout.fillWidth: true
         Layout.fillHeight: true

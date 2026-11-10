@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 
 from . import __version__
-from .core import droppedfile, legacy, portowner, promptstore, settingsbackup, usagehistory, vault, webdata
+from .core import droppedfile, installinfo, legacy, portowner, promptstore, settingsbackup, usagehistory, vault, webdata
 from .core.catalog import PROVIDER_IDS
 from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
 
@@ -123,6 +123,13 @@ def parser() -> argparse.ArgumentParser:
         "this loopback port (reads /proc/net only; no network, no credentials).",
     )
     result.add_argument(
+        "--install-info",
+        action="store_true",
+        help="Say where the helper and the widget are installed (user, system or other) and which "
+        "distribution family this is, to spot a script install hiding the package "
+        "(fixed words only; no network, no credentials).",
+    )
+    result.add_argument(
         "--usage-history",
         choices=usagehistory.OPERATIONS,
         help="Opt-in usage history of one widget (--applet N): read the last 7 days, record one "
@@ -205,8 +212,8 @@ def _check_history_and_backup_arguments(args: argparse.Namespace, argument_parse
 
 
 def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.ArgumentParser) -> None:
-    """--web-data, --vault, --prompts, --read-dropped, --port-owner, --usage-history,
-    --settings-backup and --migrate stand alone."""
+    """--web-data, --vault, --prompts, --read-dropped, --port-owner, --install-info,
+    --usage-history, --settings-backup and --migrate stand alone."""
     if args.method is not None and args.vault is None:
         argument_parser.error("--method needs --vault")
     if args.vault is not None:
@@ -223,6 +230,7 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
             ("--prompts", args.prompts is not None),
             ("--read-dropped", args.read_dropped is not None),
             ("--port-owner", args.port_owner is not None),
+            ("--install-info", args.install_info),
             ("--usage-history", args.usage_history is not None),
             ("--settings-backup", args.settings_backup is not None),
             ("--migrate", args.migrate is not None),
@@ -253,7 +261,7 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
             argument_parser.error(f"{others[0]} cannot be combined with {modes[0]}")
         return
     if (args.port_owner is not None or args.prompts is not None or args.read_dropped is not None
-            or args.migrate is not None):
+            or args.migrate is not None or args.install_info):
         others = snapshot_options + web_options
         if others:
             argument_parser.error(f"{others[0]} cannot be combined with {modes[0]}")
@@ -301,6 +309,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     _check_helper_arguments(args, argument_parser)
     if args.port_owner is not None:
         payload = _port_owner_reply(args.port_owner)
+    elif args.install_info:
+        payload = _helper_reply(installinfo.run)
     elif args.web_data == "purge":
         payload = _helper_reply(vault.purge)
     elif args.web_data is not None:

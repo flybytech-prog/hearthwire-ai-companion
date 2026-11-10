@@ -6,17 +6,21 @@ project_directory=$(CDPATH= cd -- "$script_directory/.." && pwd)
 restart_plasma=false
 uninstall_web_data=false
 rollback=false
+remove_script_install=false
 
 # --uninstall-web-data only deletes data, it never installs. --rollback-hearthwire
-# undoes the one-time migration (see below); --restart-plasma may follow it.
+# undoes the one-time migration (see below); --remove-script-install removes
+# this script's copy so a package is used. --restart-plasma may follow either.
 case "$#:${1:-}:${2:-}" in
     0::) ;;
     1:--restart-plasma:) restart_plasma=true ;;
     1:--uninstall-web-data:) uninstall_web_data=true ;;
     1:--rollback-hearthwire:) rollback=true ;;
     2:--rollback-hearthwire:--restart-plasma) rollback=true; restart_plasma=true ;;
+    1:--remove-script-install:) remove_script_install=true ;;
+    2:--remove-script-install:--restart-plasma) remove_script_install=true; restart_plasma=true ;;
     *)
-        echo "Usage: $0 [--restart-plasma | --uninstall-web-data | --rollback-hearthwire [--restart-plasma]]" >&2
+        echo "Usage: $0 [--restart-plasma | --uninstall-web-data | --rollback-hearthwire [--restart-plasma] | --remove-script-install [--restart-plasma]]" >&2
         exit 2
         ;;
 esac
@@ -66,6 +70,15 @@ stop_plasma() {
 plasma_started_again() {
     start_plasma
     trap - EXIT INT TERM HUP
+}
+# --restart-plasma after the files changed: reload the running Plasma.
+restart_plasma_session() {
+    if systemctl --user is-active plasma-plasmashell.service >/dev/null 2>&1; then
+        systemctl --user restart plasma-plasmashell.service
+    else
+        kquitapp6 plasmashell >/dev/null 2>&1 || true
+        kstart plasmashell >/dev/null 2>&1
+    fi
 }
 
 # Ask before stopping Plasma, unless --restart-plasma said yes already. Without
@@ -242,6 +255,121 @@ if [ "$uninstall_web_data" = true ]; then
             exit 1
             ;;
     esac
+    exit 0
+fi
+
+# Remove what this script installs in your home folder, so a Hearthwire
+# package (which those copies hide) is used: the helper in the Python user
+# site (pip install --user), the widget in $XDG_DATA_HOME/plasma/plasmoids
+# (kpackagetool6 -i), and the copied icons and usage alert events file. Your
+# data stays: usage history, settings backup, the encrypted chat folder with
+# its sign-ins and KDE Wallet key, ~/.config/hearthwire, ~/.local/share/hearthwire,
+# your notification choices and widget settings. Nothing outside your home
+# folder is touched and nothing runs with sudo. Running it again is harmless.
+if [ "$remove_script_install" = true ]; then
+    if [ "$(id -u)" = 0 ]; then
+        echo "Run this as your own user, not as root: it removes only what this script installed in your home folder. Nothing was removed." >&2
+        exit 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "Required command not found: python3. Nothing was removed." >&2
+        exit 1
+    fi
+    case "${XDG_DATA_HOME:-}" in
+        /*) user_data_home=$XDG_DATA_HOME ;;
+        *) user_data_home=$HOME/.local/share ;;
+    esac
+    case "$user_data_home" in
+        /*) ;;
+        *)
+            echo "HOME is not an absolute path. Nothing was removed." >&2
+            exit 1
+            ;;
+    esac
+    user_icon_directory="$user_data_home/icons/hicolor/scalable/apps"
+    user_plasmoid="$user_data_home/plasma/plasmoids/io.github.flybytechprog.hearthwire"
+    # The helper from this checkout says whether a package is installed
+    # (fixed words and booleans only; read only, no network).
+    if ! install_info=$(helper --install-info); then
+        install_info=""
+    fi
+    case "$install_info" in
+        '{"ok":true,"install_info_version":1,'*'"system_helper":true,'*'"system_plasmoid":true,'*) ;;
+        *)
+            echo "Warning: no Hearthwire package was found. After this, Hearthwire is gone until you install the package for your system (see \"Install from a package\" in README.md) or run ./scripts/install.sh again."
+            ;;
+    esac
+    removed_any=false
+    # The helper: only a copy in the Python user site, and only when pip
+    # resolves the name to exactly that copy, never a system one.
+    user_site=$(python3 -P -c 'import site; print(site.getusersitepackages())' </dev/null 2>/dev/null) || user_site=""
+    case "$user_site" in
+        /*) ;;
+        *) user_site="" ;;
+    esac
+    user_helper_present() {
+        [ -n "$user_site" ] || return 1
+        for entry in "$user_site/hearthwire" "$user_site"/hearthwire-*.dist-info; do
+            if [ -e "$entry" ] || [ -L "$entry" ]; then
+                return 0
+            fi
+        done
+        return 1
+    }
+    if user_helper_present; then
+        pip_location=$(python3 -P -m pip show hearthwire </dev/null 2>/dev/null | sed -n 's/^Location: //p') || pip_location=""
+        if [ "$pip_location" = "$user_site" ] \
+            && python3 -P -m pip uninstall -y --break-system-packages hearthwire </dev/null >/dev/null 2>&1 \
+            && ! user_helper_present; then
+            echo "Removed: the Hearthwire helper in your Python user site ($user_site)."
+            removed_any=true
+        else
+            echo "Could not remove the Hearthwire helper in your Python user site with pip. Remove $user_site/hearthwire and $user_site/hearthwire-*.dist-info by hand." >&2
+            exit 1
+        fi
+    fi
+    # The widget: that one folder (or a link in its place, never its target).
+    if [ -L "$user_plasmoid" ]; then
+        rm -f -- "$user_plasmoid"
+        echo "Removed: the link to the Hearthwire widget ($user_plasmoid)."
+        removed_any=true
+    elif [ -d "$user_plasmoid" ]; then
+        if [ ! -O "$user_plasmoid" ]; then
+            echo "The Hearthwire widget folder $user_plasmoid is not yours; it was left in place." >&2
+            exit 1
+        fi
+        rm -rf -- "$user_plasmoid"
+        echo "Removed: the Hearthwire widget ($user_plasmoid)."
+        removed_any=true
+    elif [ -e "$user_plasmoid" ]; then
+        echo "$user_plasmoid is not a folder; it was left in place." >&2
+        exit 1
+    fi
+    # The icons and the usage alert events file this script copies (rm unlinks
+    # a symlink, never its target). Your notification choices live in
+    # ~/.config/hearthwire.notifyrc and stay.
+    for installed_file in "$user_icon_directory/hearthwire.svg" \
+        "$user_icon_directory/hearthwire-settings-general.svg" \
+        "$user_icon_directory/hearthwire-settings-ai.svg" \
+        "$user_icon_directory/hearthwire-settings-chat.svg" \
+        "$user_data_home/knotifications6/hearthwire.notifyrc"; do
+        if [ -e "$installed_file" ] || [ -L "$installed_file" ]; then
+            rm -f -- "$installed_file"
+            echo "Removed: $installed_file"
+            removed_any=true
+        fi
+    done
+    if [ "$removed_any" = false ]; then
+        echo "No script install of Hearthwire found in your home folder; nothing was removed."
+    fi
+    echo "Kept: your Hearthwire data and settings (usage history, settings backup, encrypted chat folder and sign-ins, widget settings)."
+    if [ "$removed_any" = true ]; then
+        if [ "$restart_plasma" = true ]; then
+            restart_plasma_session
+        else
+            echo "Restart Plasma so the widget from the package is used: log out and in, or run systemctl --user restart plasma-plasmashell.service"
+        fi
+    fi
     exit 0
 fi
 
@@ -566,12 +694,7 @@ chmod 0644 -- "$notifyrc_directory/hearthwire.notifyrc"
 if [ "$plasma_stopped" = true ]; then
     plasma_started_again
 elif [ "$restart_plasma" = true ]; then
-    if systemctl --user is-active plasma-plasmashell.service >/dev/null 2>&1; then
-        systemctl --user restart plasma-plasmashell.service
-    else
-        kquitapp6 plasmashell >/dev/null 2>&1 || true
-        kstart plasmashell >/dev/null 2>&1
-    fi
+    restart_plasma_session
 fi
 
 version=$(python3 -P -m hearthwire --version)

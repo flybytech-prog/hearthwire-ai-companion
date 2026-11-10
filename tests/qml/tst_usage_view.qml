@@ -59,6 +59,7 @@ TestCase {
         function valueColor(value) { return "black" }
         function barColor(value) { return value >= 50 ? "#ff0000" : "black" }
         property string historyNotice: ""
+        property bool installShadowed: false
         property double historyNow: 0
         property var historyData: ({})
         function historyPoints(providerId, metricId) { return historyData[providerId + "." + metricId] || [] }
@@ -633,5 +634,20 @@ TestCase {
         root.historyNotice = testCase.marker
         tryCompare(label, "visible", true)
         compare(label.textFormat, Text.PlainText)
+    }
+
+    // Fixed plain text, only while a script install shadows the package.
+    function test_installNoticeFollowsShadowed() {
+        var items = []
+        collect(usage, items)
+        var label = items.filter(function (item) { return item.objectName === "usageInstallNotice" })[0]
+        compare(label.visible, false)
+        root.installShadowed = true
+        tryCompare(label, "visible", true)
+        compare(label.textFormat, Text.PlainText)
+        verify(label.text.indexOf("./scripts/install.sh --remove-script-install") >= 0, label.text)
+        verify(label.text.indexOf("restart Plasma") >= 0, label.text)
+        root.installShadowed = false
+        compare(label.visible, false)
     }
 }

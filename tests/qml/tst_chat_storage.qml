@@ -186,13 +186,59 @@ TestCase {
     }
 
     function test_installCommand() {
-        compare(ChatStorage.installCommand(["gocryptfs"]), "sudo pacman -S --needed gocryptfs")
-        compare(ChatStorage.installCommand(["gocryptfs-v2"]), "sudo pacman -S --needed gocryptfs")
-        compare(ChatStorage.installCommand(["fusermount3", "gocryptfs", "kdialog", "gocryptfs-v2"]),
+        compare(ChatStorage.installCommand(["gocryptfs"], "arch"), "sudo pacman -S --needed gocryptfs")
+        compare(ChatStorage.installCommand(["gocryptfs-v2"], "arch"), "sudo pacman -S --needed gocryptfs")
+        compare(ChatStorage.installCommand(["fusermount3", "gocryptfs", "kdialog", "gocryptfs-v2"], "arch"),
                 "sudo pacman -S --needed gocryptfs kdialog fuse3")
-        compare(ChatStorage.installCommand([]), "sudo pacman -S --needed gocryptfs")
-        compare(ChatStorage.installCommand(["evil; rm"]), "sudo pacman -S --needed gocryptfs")
-        compare(ChatStorage.installCommand(null), "sudo pacman -S --needed gocryptfs")
+        compare(ChatStorage.installCommand([], "arch"), "sudo pacman -S --needed gocryptfs")
+        compare(ChatStorage.installCommand(["evil; rm"], "arch"), "sudo pacman -S --needed gocryptfs")
+        compare(ChatStorage.installCommand(null, "arch"), "sudo pacman -S --needed gocryptfs")
+    }
+
+    // Each family's own package manager and package names (the packaging
+    // files' optdepends / Suggests).
+    function test_installCommandPerDistro() {
+        var every = ["gocryptfs", "gocryptfs-v2", "kdialog", "fusermount3", "kwallet-query", "qdbus6", "openssl"]
+        compare(ChatStorage.installCommand(every, "arch"),
+                "sudo pacman -S --needed gocryptfs kdialog fuse3 kwallet qt6-tools openssl")
+        compare(ChatStorage.installCommand(every, "fedora"),
+                "sudo dnf install gocryptfs kdialog fuse3 kf6-kwallet qt6-qttools openssl")
+        compare(ChatStorage.installCommand(every, "debian"),
+                "sudo apt install gocryptfs kdialog fuse3 kwallet6 qdbus-qt6 openssl")
+        compare(ChatStorage.installCommand(every, "other"),
+                "gocryptfs kdialog fusermount3 kwallet-query qdbus6 openssl")
+        compare(ChatStorage.installCommand(["qdbus6"], "fedora"), "sudo dnf install qt6-qttools")
+        compare(ChatStorage.installCommand(["qdbus6"], "debian"), "sudo apt install qdbus-qt6")
+        compare(ChatStorage.installCommand([], "fedora"), "sudo dnf install gocryptfs")
+        compare(ChatStorage.installCommand([], "other"), "gocryptfs")
+        compare(ChatStorage.installCommand(["evil; rm"], "debian"), "sudo apt install gocryptfs")
+    }
+
+    // Not known yet or not a known family: only the tool names, no command.
+    function test_installDistroFallback() {
+        compare(ChatStorage.installDistro("arch"), "arch")
+        compare(ChatStorage.installDistro("fedora"), "fedora")
+        compare(ChatStorage.installDistro("debian"), "debian")
+        var odd = ["other", "", undefined, null, "Arch", " arch", "ubuntu", "__proto__", "constructor",
+                   "hasOwnProperty", "toString", 1, true, ["arch"], {}]
+        odd.forEach(function (value) {
+            compare(ChatStorage.installDistro(value), "other", String(value))
+            compare(ChatStorage.hasInstallCommand(value), false, String(value))
+            compare(ChatStorage.installCommand(["qdbus6"], value), "qdbus6", String(value))
+        })
+        compare(ChatStorage.installCommand(["qdbus6"]), "qdbus6", "no distro given")
+        compare(ChatStorage.hasInstallCommand("arch"), true)
+        compare(ChatStorage.hasInstallCommand("fedora"), true)
+        compare(ChatStorage.hasInstallCommand("debian"), true)
+    }
+
+    // Every family covers every tool the helper can report missing.
+    function test_toolPackagesCoverEveryTool() {
+        var tools = ChatStorage.MISSING_TOOLS.concat(ChatStorage.WALLET_TOOLS)
+        compare(Object.keys(ChatStorage.TOOL_PACKAGES).sort(), ["arch", "debian", "fedora", "other"])
+        Object.keys(ChatStorage.TOOL_PACKAGES).forEach(function (family) {
+            compare(Object.keys(ChatStorage.TOOL_PACKAGES[family]).sort(), tools.slice().sort(), family)
+        })
     }
 
     function test_messageFor() {
@@ -565,9 +611,9 @@ TestCase {
         // Only locked/unlocked carry the wallet.
         compare(ChatStorage.parseReply("{\"ok\":true,\"state\":\"absent\",\"wallet\":\"set-up\"}"),
                 {ok: true, state: "absent"})
-        compare(ChatStorage.installCommand(["kwallet-query", "qdbus6", "openssl"]),
+        compare(ChatStorage.installCommand(["kwallet-query", "qdbus6", "openssl"], "arch"),
                 "sudo pacman -S --needed kwallet qt6-tools openssl")
-        compare(ChatStorage.installCommand(["qdbus6"]), "sudo pacman -S --needed qt6-tools")
+        compare(ChatStorage.installCommand(["qdbus6"], "arch"), "sudo pacman -S --needed qt6-tools")
     }
 
     function test_walletErrors() {

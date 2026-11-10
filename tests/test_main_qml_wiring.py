@@ -1,4 +1,4 @@
-"""Runs the real main.qml and configUsage.qml under qmltestrunner (tests/mainqml/).
+"""Runs the real main.qml, configUsage.qml and configGeneral.qml under qmltestrunner (tests/mainqml/).
 
 The stubs need an import path and a compiled plugin (see plasmoidstub.cpp), so
 this file builds them in a temporary folder and runs the test there; they
@@ -15,10 +15,10 @@ import pytest
 
 HARNESS = Path(__file__).resolve().parent / "mainqml"
 PATH = "/usr/lib/qt6:/usr/lib/qt6/bin:/usr/bin:/bin"
-# The 127 test functions of tst_main_wiring.qml, one of them run once for each
-# of its three data rows, plus QtTest's initTestCase and cleanupTestCase, which
-# count as passed even when no test ran.
-MIN_PASSED = 131
+# The 135 test functions of tst_main_wiring.qml, five of them run once for
+# each of their data rows (3, 24, 24, 6 and 6), plus QtTest's initTestCase and
+# cleanupTestCase, which count as passed even when no test ran.
+MIN_PASSED = 195
 
 
 def _run(command, env, cwd):

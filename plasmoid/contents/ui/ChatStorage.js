@@ -20,15 +20,54 @@ var WALLET_STATES = ["set-up", "off", "unavailable"]
 var MISSING_TOOLS = ["gocryptfs", "gocryptfs-v2", "kdialog", "fusermount3"]
 // Tools only the KDE Wallet unlock needs (reported with locked/unlocked).
 var WALLET_TOOLS = ["kwallet-query", "qdbus6", "openssl"]
-// Arch packages that provide each missing tool.
+// The packages that provide each missing tool, per distro family as
+// --install-info reports it, exactly as the packaging files name them
+// (packaging/arch/PKGBUILD optdepends, packaging/fedora/hearthwire.spec and
+// packaging/debian/control Suggests). "other" (or not known yet) names only
+// the tools, for any package manager.
 var TOOL_PACKAGES = {
-    "gocryptfs": "gocryptfs",
-    "gocryptfs-v2": "gocryptfs",
-    "kdialog": "kdialog",
-    "fusermount3": "fuse3",
-    "kwallet-query": "kwallet",
-    "qdbus6": "qt6-tools",
-    "openssl": "openssl"
+    "arch": {
+        "gocryptfs": "gocryptfs",
+        "gocryptfs-v2": "gocryptfs",
+        "kdialog": "kdialog",
+        "fusermount3": "fuse3",
+        "kwallet-query": "kwallet",
+        "qdbus6": "qt6-tools",
+        "openssl": "openssl"
+    },
+    "fedora": {
+        "gocryptfs": "gocryptfs",
+        "gocryptfs-v2": "gocryptfs",
+        "kdialog": "kdialog",
+        "fusermount3": "fuse3",
+        "kwallet-query": "kf6-kwallet",
+        "qdbus6": "qt6-qttools",
+        "openssl": "openssl"
+    },
+    "debian": {
+        "gocryptfs": "gocryptfs",
+        "gocryptfs-v2": "gocryptfs",
+        "kdialog": "kdialog",
+        "fusermount3": "fuse3",
+        "kwallet-query": "kwallet6",
+        "qdbus6": "qdbus-qt6",
+        "openssl": "openssl"
+    },
+    "other": {
+        "gocryptfs": "gocryptfs",
+        "gocryptfs-v2": "gocryptfs",
+        "kdialog": "kdialog",
+        "fusermount3": "fusermount3",
+        "kwallet-query": "kwallet-query",
+        "qdbus6": "qdbus6",
+        "openssl": "openssl"
+    }
+}
+// Each family's own package manager; "other" has none.
+var INSTALL_COMMANDS = {
+    "arch": "sudo pacman -S --needed",
+    "fedora": "sudo dnf install",
+    "debian": "sudo apt install"
 }
 var HELPER_ERRORS = [
     "symlink", "not-owned", "not-directory", "os-error", "missing-tool", "exists",
@@ -230,18 +269,33 @@ function profilePath(runtimeDir, applet, generation) {
     return base + "/hearthwire/vault/web/" + name
 }
 
-function installCommand(missing) {
+// The table for a reported distro family; anything else is "other".
+function installDistro(distro) {
+    return typeof distro === "string" && distro !== "other"
+        && Object.prototype.hasOwnProperty.call(INSTALL_COMMANDS, distro) ? distro : "other"
+}
+
+// Whether installCommand gives a command to run (else only the tool names).
+function hasInstallCommand(distro) {
+    return installDistro(distro) !== "other"
+}
+
+// The install command for the missing tools on this distro family, or for
+// "other" just the tool names; gocryptfs when none is known.
+function installCommand(missing, distro) {
+    var family = installDistro(distro)
+    var table = TOOL_PACKAGES[family]
     var names = Array.isArray(missing) ? missing : []
     var packages = []
     var tools = MISSING_TOOLS.concat(WALLET_TOOLS)
     for (var index = 0; index < tools.length; index++) {
         var tool = tools[index]
-        if (names.indexOf(tool) >= 0 && packages.indexOf(TOOL_PACKAGES[tool]) < 0)
-            packages.push(TOOL_PACKAGES[tool])
+        if (names.indexOf(tool) >= 0 && packages.indexOf(table[tool]) < 0)
+            packages.push(table[tool])
     }
     if (packages.length === 0)
-        packages.push("gocryptfs")
-    return "sudo pacman -S --needed " + packages.join(" ")
+        packages.push(table["gocryptfs"])
+    return family === "other" ? packages.join(" ") : INSTALL_COMMANDS[family] + " " + packages.join(" ")
 }
 
 // Helper error → message code the Chat tab shows ("" = nothing to say).

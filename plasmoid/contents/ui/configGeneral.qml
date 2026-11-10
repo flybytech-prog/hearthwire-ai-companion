@@ -13,6 +13,7 @@ import "UsageLogic.js" as UsageLogic
 import "OllamaChat.js" as OllamaChat
 import "SettingsLogic.js" as SettingsLogic
 import "ProviderCatalog.js" as Catalog
+import "InstallInfo.js" as InstallInfo
 
 KCM.SimpleKCM {
     id: page
@@ -176,6 +177,26 @@ KCM.SimpleKCM {
     readonly property var walletMissing: page.vaultMissing.filter(function (name) {
         return ChatStorage.WALLET_TOOLS.indexOf(name) >= 0
     })
+
+    // Where the helper and widget come from, read once per page open (this
+    // page can't reach main.qml's copy); unknown until then.
+    property var installInfo: InstallInfo.unknown()
+    property string installInfoSourceName: ""
+    property bool installInfoAsked: false
+    readonly property string installDistro: ChatStorage.installDistro(page.installInfo.distro)
+    // The remedy the notice names, offered for copying.
+    readonly property string removeScriptCommand: "./scripts/install.sh --remove-script-install"
+
+    function checkInstall() {
+        if (page.installInfoAsked)
+            return
+        page.installInfoAsked = true
+        var command = InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()), page.vaultApplet)
+        if (command === "")
+            return
+        page.installInfoSourceName = command
+        installInfoSource.connectSource(command)
+    }
 
     function normalizedRefresh(value) {
         var best = page.refreshChoices[0].value
@@ -602,6 +623,7 @@ KCM.SimpleKCM {
         page.backupRun = ChatStorage.firstRun(Date.now(), Math.random())
         page.runBackup("status")
         page.runVault("status")
+        page.checkInstall()
     }
 
     // main.qml may move to a new generation or store a zoom while this page
@@ -627,6 +649,20 @@ KCM.SimpleKCM {
             if (source !== page.vaultSourceName)
                 return
             page.finishVault(page.vaultOp, ChatStorage.replyFor(data["exit code"], data["stdout"]))
+        }
+    }
+
+    // The page's one --install-info run; only stdout's checked words are used.
+    Plasma5Support.DataSource {
+        id: installInfoSource
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            installInfoSource.disconnectSource(source)
+            if (source !== page.installInfoSourceName)
+                return
+            page.installInfoSourceName = ""
+            page.installInfo = InstallInfo.parseReply(data["exit code"], data["stdout"])
         }
     }
 
@@ -661,6 +697,24 @@ KCM.SimpleKCM {
     }
 
     Kirigami.FormLayout {
+        // A leftover script install shadows the package (InstallInfo); fixed
+        // text, never the helper's. The Usage tab says the same.
+        Kirigami.InlineMessage {
+            objectName: "installShadowedNotice"
+            Layout.fillWidth: true
+            visible: page.installInfo.shadowed === true
+            type: Kirigami.MessageType.Warning
+            text: i18n("An older script install of Hearthwire is running instead of the installed package. To use the package, run ./scripts/install.sh --remove-script-install from the Hearthwire source folder, then restart Plasma. Your settings, usage history and saved sign-ins are kept.")
+        }
+        QQC2.TextField {
+            objectName: "installShadowedCommand"
+            Layout.fillWidth: true
+            visible: page.installInfo.shadowed === true
+            readOnly: true
+            selectByMouse: true
+            text: page.removeScriptCommand
+        }
+
         // --- Popup ----------------------------------------------------------
 
         Kirigami.Separator {
@@ -1046,13 +1100,16 @@ KCM.SimpleKCM {
             QQC2.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: i18n("Unlocking with KDE Wallet needs tools that aren't installed. Install them with:")
+                text: ChatStorage.hasInstallCommand(page.installDistro)
+                    ? i18n("Unlocking with KDE Wallet needs tools that aren't installed. Install them with:")
+                    : i18n("Unlocking with KDE Wallet needs tools that aren't installed. Install the packages that provide them with your distribution's package manager:")
             }
             QQC2.TextField {
                 Layout.fillWidth: true
                 readOnly: true
                 selectByMouse: true
-                text: ChatStorage.installCommand(page.walletMissing)
+                objectName: "walletInstallCommand"
+                text: ChatStorage.installCommand(page.walletMissing, page.installDistro)
             }
         }
 
@@ -1076,13 +1133,16 @@ KCM.SimpleKCM {
             QQC2.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: i18n("This needs gocryptfs, which isn't installed. Install it with:")
+                text: ChatStorage.hasInstallCommand(page.installDistro)
+                    ? i18n("This needs gocryptfs, which isn't installed. Install it with:")
+                    : i18n("This needs gocryptfs, which isn't installed. Install it with your distribution's package manager:")
             }
             QQC2.TextField {
                 Layout.fillWidth: true
                 readOnly: true
                 selectByMouse: true
-                text: ChatStorage.installCommand(page.vaultMissing)
+                objectName: "vaultInstallCommand"
+                text: ChatStorage.installCommand(page.vaultMissing, page.installDistro)
             }
         }
 

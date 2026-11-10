@@ -422,6 +422,45 @@ TestCase {
         compare(card.message.indexOf("/"), -1)
     }
 
+    // The install card names the distro family's packages and command, or
+    // only the tools with generic wording when the family isn't known.
+    function test_installCardPerDistro_data() {
+        return [
+            {tag: "arch", distro: "arch", command: "sudo pacman -S --needed gocryptfs fuse3", generic: false},
+            {tag: "fedora", distro: "fedora", command: "sudo dnf install gocryptfs fuse3", generic: false},
+            {tag: "debian", distro: "debian", command: "sudo apt install gocryptfs fuse3", generic: false},
+            {tag: "other", distro: "other", command: "gocryptfs fusermount3", generic: true},
+            {tag: "odd", distro: "ubuntu", command: "gocryptfs fusermount3", generic: true}
+        ]
+    }
+
+    function test_installCardPerDistro(data) {
+        var view = make({
+            current: true,
+            storageMode: "encrypted",
+            card: {view: "install", message: ""},
+            installDistro: data.distro
+        })
+        // Set as main.qml's binding does (a creation property comes in as a
+        // list that isn't a JS array).
+        view.missingTools = ["fusermount3", "gocryptfs"]
+        verify(findChild(view, "storageCard").visible)
+        var field = findChild(view, "chatInstallCommand")
+        verify(field.visible)
+        compare(field.text, data.command)
+        compare(field.readOnly, true)
+        var text = findChild(view, "storageCardText").text
+        compare(text.indexOf("package manager") >= 0, data.generic, text)
+        compare(text.indexOf("with this command") >= 0, !data.generic, text)
+    }
+
+    function test_installCardDefaultsToTheToolNames() {
+        var view = make({current: true, storageMode: "encrypted", card: {view: "install", message: ""}})
+        view.missingTools = ["qdbus6"]
+        compare(view.installDistro, "other")
+        compare(findChild(view, "chatInstallCommand").text, "qdbus6")
+    }
+
     // --- Local owner check messages (M2) -------------------------------------
 
     function test_localOwnerMessages() {

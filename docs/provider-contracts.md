@@ -591,8 +591,9 @@ never reads, and never appears in argv, the environment or a reply.
 Argument rules (argparse exits 2 with a usage message on stderr otherwise):
 
 - `--web-data`, `--vault`, `--prompts`, `--read-dropped`, `--port-owner`,
-  `--usage-history`, `--settings-backup`, and `--migrate` cannot be combined
-  with each other or with `--json`, `--providers`, `--catalog`, or `--detect`.
+  `--install-info`, `--usage-history`, `--settings-backup`, and `--migrate`
+  cannot be combined with each other or with `--json`, `--providers`,
+  `--catalog`, or `--detect`.
 - `--method passphrase|wallet` needs `--vault unlock`, `add-key`, or
   `remove-key`; `add-key` and `remove-key` need `--method wallet`; `unlock`
   defaults to `passphrase`.
@@ -1104,6 +1105,76 @@ anything odd gives no command. One step runs at a time.
 `SettingsBackup.parseReply` accepts exit code 0, at most 65 KiB of stdout,
 exactly the keys of each reply above and a known error code; anything else
 is `bad-reply`. Every code is shown as fixed text, never the helper's own.
+
+## Install info helper
+
+A script install (`scripts/install.sh`: `pip install --user`,
+`kpackagetool6 -i`) puts the helper in the Python user site and the widget in
+`$XDG_DATA_HOME/plasma/plasmoids`. Both win over a system package, so after a
+package is installed an older script copy keeps running. The widget runs
+`hearthwire --install-info` once at start to notice that, and to pick the
+package names of the distribution family for its install hints
+(`src/hearthwire/core/installinfo.py`). `scripts/install.sh
+--remove-script-install` runs the checkout's copy to see whether a package is
+installed before it removes the script copy.
+
+Read only: no network, no credentials, nothing written or started, and no
+Hearthwire copy is imported (each directory is checked with
+`importlib.machinery.PathFinder.find_spec`). It stands alone like the other
+helper modes (argparse exits 2 otherwise).
+
+Reply (one JSON object on stdout, exit 0, keys in this order):
+
+    {"ok":true,"install_info_version":1,"helper":"user"|"system"|"other","system_helper":BOOL,"user_helper":BOOL,"user_plasmoid":BOOL,"system_plasmoid":BOOL,"distro":"arch"|"fedora"|"debian"|"other"}
+
+| Key | Meaning |
+| --- | --- |
+| `helper` | Where the running `hearthwire` package lives: `user` in `site.getusersitepackages()`, `system` in a site directory of the base interpreter (`site.getsitepackages()`, `/usr/local` included), `other` anywhere else (a checkout, a venv, `PYTHONPATH`) |
+| `user_helper` | A regular `hearthwire` package (with `__init__.py`) is in the user site directory |
+| `system_helper` | One is in a system site directory |
+| `user_plasmoid` | `$XDG_DATA_HOME/plasma/plasmoids/io.github.flybytechprog.hearthwire/metadata.json` is a regular file (links followed); `$XDG_DATA_HOME` defaults to `~/.local/share` when unset or relative |
+| `system_plasmoid` | The same under any absolute `$XDG_DATA_DIRS` entry (`/usr/local/share:/usr/share` when unset or without one), except an entry that is the data home itself |
+| `distro` | The family from os-release, see below |
+
+The site directories come from `site`, not from `sys.path`, so the reply is
+the same under `python3 -s` or in a venv. Empty and relative entries and the
+current directory are never searched.
+
+`distro` reads `/etc/os-release`, or `/usr/lib/os-release` only when that does
+not exist. The file, after following links, must be inside `/etc` or
+`/usr/lib`, be a regular file and hold at most 64 KiB; it must be UTF-8 without
+NUL, and every line must be blank, a `#` comment, or `KEY=value` with the
+value unquoted (no spaces, quotes, `\`, `` ` `` or `$`) or in matching quotes.
+Anything else makes `distro` `other`. `ID` is looked up first, then each
+`ID_LIKE` word in order; the first known word wins:
+
+| Word | `distro` |
+| --- | --- |
+| `arch`, `cachyos`, `manjaro`, `endeavouros` | `arch` |
+| `fedora` | `fedora` |
+| `debian`, `ubuntu`, `kubuntu`, `neon` | `debian` |
+| anything else, or no os-release | `other` |
+
+Any surprise is `{"ok":false,"error":"os-error"}`. The reply never holds a
+path, version, name or file text. The widget treats the install as shadowed
+when `(user_helper && system_helper) || (user_plasmoid && system_plasmoid)`.
+A helper too old to know `--install-info` exits 2 with a usage message.
+
+`scripts/install.sh --remove-script-install [--restart-plasma]` removes what
+the script installs in the home folder and nothing else: the helper in the
+Python user site (`pip uninstall`, only when `site.getusersitepackages()`
+holds a copy and `pip show` resolves `hearthwire` to exactly that directory),
+the folder `$XDG_DATA_HOME/plasma/plasmoids/io.github.flybytechprog.hearthwire`
+(a link there is unlinked, never followed), the four
+`icons/hicolor/scalable/apps/hearthwire*.svg` icons and
+`knotifications6/hearthwire.notifyrc`. It never touches Hearthwire's data
+or settings (`~/.local/share/hearthwire`, `~/.config/hearthwire`,
+`~/.config/hearthwire.notifyrc`, the widget settings), never touches a file
+outside the home folder, never runs `sudo` or `kpackagetool6`, and refuses to
+run as root. Without both system copies (by `--install-info`) it first warns
+that Hearthwire is gone until a package is installed. It prints each removed
+item, says so when there was nothing to remove (a second run is harmless),
+and asks for a Plasma restart unless `--restart-plasma` did one.
 
 ## Upgrading from Hearthside
 

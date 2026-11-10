@@ -967,3 +967,386 @@ def test_a_rollback_not_locked_names_the_new_helper(tmp_path):
     assert f'PYTHONPATH="{flow.project}/src" python3 -P -m hearthwire --vault lock' in completed.stderr
     assert "-m hearthside --vault lock" not in completed.stderr
 # <<< legacy-migration
+
+
+# --- --remove-script-install ----------------------------------------------------------------------
+# A fake HOME with a script install in it. python3 answers the checkout helper's
+# --install-info from state/install-info, the user-site query from $RSI_USER_SITE,
+# and pip show/uninstall from state/pip-location (where pip resolves hearthwire);
+# every call is logged. kpackagetool6, sudo, pacman and Plasma's tools only log
+# and fail, so a test sees any use of them.
+
+RSI_PYTHON = r"""#!/bin/sh
+printf 'python3 %s PYTHONPATH=%s\n' "$*" "${PYTHONPATH:-}" >> "$RSI_LOG"
+case "$*" in
+    "-P -m hearthwire --install-info")
+        [ -e "$RSI_STATE/install-info" ] || exit 1
+        cat "$RSI_STATE/install-info" ;;
+    "-P -c import site; print(site.getusersitepackages())") printf '%s\n' "$RSI_USER_SITE" ;;
+    "-P -m pip show hearthwire")
+        [ -e "$RSI_STATE/pip-location" ] || exit 1
+        printf 'Name: hearthwire\nVersion: 0.9\nLocation: %s\nRequires: \n' "$(cat "$RSI_STATE/pip-location")" ;;
+    "-P -m pip uninstall -y --break-system-packages hearthwire")
+        [ -e "$RSI_STATE/pip-uninstall-fails" ] && exit 1
+        location=$(cat "$RSI_STATE/pip-location")
+        rm -rf "$location/hearthwire" "$location"/hearthwire-*.dist-info
+        rm -f "$RSI_STATE/pip-location" ;;
+    *) exit 97 ;;
+esac
+"""
+RSI_LOGGER = "#!/bin/sh\nprintf '%s %s\\n' \"${0##*/}\" \"$*\" >> \"$RSI_LOG\"\nexit 98\n"
+RSI_SYSTEMCTL = r"""#!/bin/sh
+printf 'systemctl %s\n' "$*" >> "$RSI_LOG"
+case "$2" in
+    is-active) exit 0 ;;
+    restart) exit 0 ;;
+    *) exit 98 ;;
+esac
+"""
+WITH_PACKAGE = ('{"ok":true,"install_info_version":1,"helper":"other","system_helper":true,"user_helper":true,'
+                '"user_plasmoid":true,"system_plasmoid":true,"distro":"arch"}')
+WITHOUT_PACKAGE = ('{"ok":true,"install_info_version":1,"helper":"other","system_helper":false,"user_helper":true,'
+                   '"user_plasmoid":true,"system_plasmoid":false,"distro":"arch"}')
+NO_PACKAGE_WARNING = "Warning: no Hearthwire package was found."
+NOTHING_REMOVED = "No script install of Hearthwire found in your home folder; nothing was removed."
+KEPT = ("Kept: your Hearthwire data and settings (usage history, settings backup, encrypted chat folder and "
+        "sign-ins, widget settings).")
+RESTART_HINT = ("Restart Plasma so the widget from the package is used: log out and in, or run "
+                "systemctl --user restart plasma-plasmashell.service")
+# What a user keeps: Hearthwire's data and settings, Plasma's widget settings.
+USER_DATA = (".local/share/hearthwire/usage-history/applet-1.json", ".local/share/hearthwire/vault/gocryptfs.conf",
+             ".local/share/hearthwire/vault-keys/wallet.conf", ".config/hearthwire/settings-backup.json",
+             ".config/hearthwire.notifyrc", ".config/plasma-org.kde.plasma.desktop-appletsrc",
+             ".local/share/plasma/plasmoids/org.example.other/metadata.json",
+             ".local/share/icons/hicolor/scalable/apps/other.svg",
+             ".local/lib/python3.14/site-packages/other/__init__.py")
+
+
+class RemoveFlow:
+    def __init__(self, tmp_path):
+        self.project = _copied_project(tmp_path)
+        self.home = tmp_path / "home"
+        self.home.mkdir(exist_ok=True)
+        self.data = self.home / ".local" / "share"
+        self.user_site = self.home / ".local" / "lib" / "python3.14" / "site-packages"
+        self.system_site = tmp_path / "usr" / "lib" / "python3.14" / "site-packages"
+        self.state = tmp_path / "state"
+        self.state.mkdir()
+        self.log = tmp_path / "remove.log"
+        self.log.write_text("")
+        stubs = tmp_path / "stub-bin"
+        stubs.mkdir(exist_ok=True)
+        _stub(stubs, "python3", RSI_PYTHON)
+        _stub(stubs, "systemctl", RSI_SYSTEMCTL)
+        for name in ("kpackagetool6", "sudo", "pacman", "kquitapp6", "kstart", "pip", "pip3"):
+            _stub(stubs, name, RSI_LOGGER)
+        self.stubs = stubs
+        self.env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(self.home), "RSI_LOG": str(self.log),
+                    "RSI_STATE": str(self.state), "RSI_USER_SITE": str(self.user_site)}
+        self.info(WITH_PACKAGE)
+        for name in USER_DATA:
+            path = self.home / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("keep")
+        package = self.system_site / "hearthwire"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("system")
+
+    def info(self, text):
+        (self.state / "install-info").write_text(text + "\n")
+
+    def script_install(self, data=None):
+        """What ./scripts/install.sh leaves in the home folder (``data``: its XDG_DATA_HOME)."""
+        data = self.data if data is None else data
+        package = self.user_site / "hearthwire"
+        (package / "core").mkdir(parents=True, exist_ok=True)
+        (package / "__init__.py").write_text("")
+        (package / "core" / "model.py").write_text("")
+        (self.user_site / "hearthwire-0.9.dist-info").mkdir(exist_ok=True)
+        (self.user_site / "hearthwire-0.9.dist-info" / "RECORD").write_text("")
+        (self.state / "pip-location").write_text(str(self.user_site))
+        plasmoid = data / "plasma" / "plasmoids" / NEW_ID
+        (plasmoid / "contents" / "ui").mkdir(parents=True, exist_ok=True)
+        (plasmoid / "metadata.json").write_text("{}")
+        (plasmoid / "contents" / "ui" / "main.qml").write_text("")
+        icons = data / "icons" / "hicolor" / "scalable" / "apps"
+        icons.mkdir(parents=True, exist_ok=True)
+        for name in ICON_NAMES:
+            (icons / name).write_text("<svg/>")
+        (data / "knotifications6").mkdir(parents=True, exist_ok=True)
+        (data / "knotifications6" / "hearthwire.notifyrc").write_text("[Global]\n")
+
+    def installed_paths(self, data=None):
+        data = self.data if data is None else data
+        return [self.user_site / "hearthwire", self.user_site / "hearthwire-0.9.dist-info",
+                data / "plasma" / "plasmoids" / NEW_ID, data / "knotifications6" / "hearthwire.notifyrc",
+                *(data / "icons" / "hicolor" / "scalable" / "apps" / name for name in ICON_NAMES)]
+
+    def run(self, *arguments, **extra):
+        return subprocess.run(
+            ["sh", str(self.project / "scripts" / "install.sh"), "--remove-script-install", *arguments],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, env={**self.env, **extra},
+            timeout=60, check=False,
+        )
+
+    def calls(self):
+        return [line.split(" PYTHONPATH=")[0] for line in self.log.read_text().splitlines()]
+
+    def assert_data_kept(self):
+        assert all((self.home / name).read_text() == "keep" for name in USER_DATA)
+        assert (self.system_site / "hearthwire" / "__init__.py").read_text() == "system"
+
+
+def test_remove_script_install_removes_exactly_the_script_copy(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert [path for path in flow.installed_paths() if os.path.lexists(path)] == []
+    flow.assert_data_kept()
+    assert flow.calls() == [
+        "python3 -P -m hearthwire --install-info",
+        "python3 -P -c import site; print(site.getusersitepackages())",
+        "python3 -P -m pip show hearthwire",
+        "python3 -P -m pip uninstall -y --break-system-packages hearthwire",
+    ]
+    icons = flow.data / "icons" / "hicolor" / "scalable" / "apps"
+    assert completed.stdout.splitlines() == [
+        f"Removed: the Hearthwire helper in your Python user site ({flow.user_site}).",
+        f"Removed: the Hearthwire widget ({flow.data}/plasma/plasmoids/{NEW_ID}).",
+        *(f"Removed: {icons / name}" for name in ICON_NAMES),
+        f"Removed: {flow.data}/knotifications6/hearthwire.notifyrc",
+        KEPT,
+        RESTART_HINT,
+    ]
+    assert completed.stderr == ""
+
+
+def test_the_helper_runs_from_the_checkout(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.run()
+    helper = [line for line in flow.log.read_text().splitlines() if "--install-info" in line]
+    assert helper == [f"python3 -P -m hearthwire --install-info PYTHONPATH={flow.project}/src"]
+
+
+def test_remove_script_install_is_idempotent(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    assert flow.run().returncode == 0
+    flow.log.write_text("")
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [NOTHING_REMOVED, KEPT]
+    assert [call for call in flow.calls() if "pip" in call] == []
+    flow.assert_data_kept()
+
+
+def test_without_a_package_it_warns_before_removing(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    flow.info(WITHOUT_PACKAGE)
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    lines = completed.stdout.splitlines()
+    assert lines[0].startswith(NO_PACKAGE_WARNING) and "install the package for your system" in lines[0]
+    assert lines[1].startswith("Removed: ")
+    assert [path for path in flow.installed_paths() if os.path.lexists(path)] == []
+
+
+@pytest.mark.parametrize("info", [
+    WITH_PACKAGE.replace('"system_plasmoid":true', '"system_plasmoid":false'),
+    WITH_PACKAGE.replace('"system_helper":true', '"system_helper":false'),
+    WITH_PACKAGE.replace('"install_info_version":1', '"install_info_version":2'),
+    '{"ok":false,"error":"os-error"}', "garbage", "",
+])
+def test_anything_but_both_system_copies_warns(tmp_path, info):
+    flow = RemoveFlow(tmp_path)
+    flow.info(info)
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.startswith(NO_PACKAGE_WARNING)
+
+
+def test_a_helper_that_fails_to_run_warns(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    (flow.state / "install-info").unlink()
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.startswith(NO_PACKAGE_WARNING)
+
+
+def test_with_both_system_copies_there_is_no_warning(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    assert NO_PACKAGE_WARNING not in flow.run().stdout
+
+
+def test_the_package_check_matches_the_real_helper_reply(tmp_path, monkeypatch, capsys):
+    """The shell pattern accepts the helper's own serialization of a package install."""
+    from hearthwire import cli
+    from hearthwire.core import installinfo
+
+    for name, value in (("has_package", lambda directory: True), ("has_plasmoid", lambda directory: True),
+                        ("distro", lambda: "fedora"),
+                        ("data_directories", lambda: ("/home/u/.local/share", ["/usr/share"])),
+                        ("site_directories", lambda: ("/home/u/site", ["/usr/lib/site"]))):
+        monkeypatch.setattr(installinfo, name, value)
+    assert cli.main(["--install-info"]) == 0
+    flow = RemoveFlow(tmp_path)
+    flow.info(capsys.readouterr().out.strip())
+    assert NO_PACKAGE_WARNING not in flow.run().stdout
+
+
+def test_pip_is_never_asked_to_remove_a_copy_outside_the_user_site(tmp_path):
+    """With the user site disabled pip would resolve the name to the system copy."""
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    (flow.state / "pip-location").write_text(str(flow.system_site))
+    completed = flow.run()
+    assert completed.returncode == 1
+    assert "Could not remove the Hearthwire helper in your Python user site with pip" in completed.stderr
+    assert [call for call in flow.calls() if "uninstall" in call] == []
+    assert (flow.user_site / "hearthwire").exists()
+    flow.assert_data_kept()
+
+
+def test_a_failed_pip_uninstall_says_so_and_stops(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    (flow.state / "pip-uninstall-fails").write_text("")
+    completed = flow.run()
+    assert completed.returncode == 1
+    assert f"Remove {flow.user_site}/hearthwire" in completed.stderr
+    assert (flow.user_site / "hearthwire").exists()
+
+
+def test_without_a_user_helper_pip_is_not_called(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    shutil.rmtree(flow.user_site / "hearthwire")
+    shutil.rmtree(flow.user_site / "hearthwire-0.9.dist-info")
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert [call for call in flow.calls() if "pip" in call] == []
+    assert not (flow.data / "plasma" / "plasmoids" / NEW_ID).exists()
+
+
+def test_a_lone_dist_info_is_removed_too(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    shutil.rmtree(flow.user_site / "hearthwire")
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert not (flow.user_site / "hearthwire-0.9.dist-info").exists()
+
+
+def test_xdg_data_home_is_where_the_widget_and_files_are_removed(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    data = tmp_path / "data"
+    flow.script_install(data=data)
+    decoy = flow.data / "plasma" / "plasmoids" / NEW_ID / "metadata.json"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("{}")
+    completed = flow.run(XDG_DATA_HOME=str(data))
+    assert completed.returncode == 0, completed.stderr
+    assert [path for path in flow.installed_paths(data) if os.path.lexists(path)] == []
+    assert decoy.read_text() == "{}"
+
+
+def test_a_relative_xdg_data_home_means_the_default(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    completed = flow.run(XDG_DATA_HOME="relative")
+    assert completed.returncode == 0, completed.stderr
+    assert [path for path in flow.installed_paths() if os.path.lexists(path)] == []
+
+
+def test_links_are_removed_never_their_targets(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    checkout_plasmoid = tmp_path / "checkout" / "plasmoid"
+    checkout_plasmoid.mkdir(parents=True)
+    (checkout_plasmoid / "metadata.json").write_text("{}")
+    plasmoid = flow.data / "plasma" / "plasmoids" / NEW_ID
+    shutil.rmtree(plasmoid)
+    plasmoid.symlink_to(checkout_plasmoid)
+    icon_target = tmp_path / "checkout" / "hearthwire.svg"
+    icon_target.write_text("<svg/>")
+    icon = flow.data / "icons" / "hicolor" / "scalable" / "apps" / "hearthwire.svg"
+    icon.unlink()
+    icon.symlink_to(icon_target)
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert not os.path.lexists(plasmoid) and not os.path.lexists(icon)
+    assert (checkout_plasmoid / "metadata.json").exists() and icon_target.exists()
+    assert f"Removed: the link to the Hearthwire widget ({plasmoid})." in completed.stdout
+
+
+def test_links_inside_the_widget_folder_are_not_followed(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    precious = tmp_path / "precious"
+    precious.mkdir()
+    (precious / "file").write_text("keep")
+    (flow.data / "plasma" / "plasmoids" / NEW_ID / "contents" / "link").symlink_to(precious)
+    assert flow.run().returncode == 0
+    assert (precious / "file").read_text() == "keep"
+
+
+def test_a_widget_path_that_is_not_a_folder_is_left_alone(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    plasmoid = flow.data / "plasma" / "plasmoids" / NEW_ID
+    plasmoid.write_text("odd")
+    completed = flow.run()
+    assert completed.returncode == 1
+    assert "is not a folder; it was left in place." in completed.stderr
+    assert plasmoid.read_text() == "odd"
+
+
+def test_with_restart_plasma_it_restarts_after_removing(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 0, completed.stderr
+    assert flow.calls()[-2:] == ["systemctl --user is-active plasma-plasmashell.service",
+                                 "systemctl --user restart plasma-plasmashell.service"]
+    assert RESTART_HINT not in completed.stdout
+
+
+def test_with_restart_plasma_and_nothing_removed_plasma_keeps_running(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    completed = flow.run("--restart-plasma")
+    assert completed.returncode == 0, completed.stderr
+    assert [call for call in flow.calls() if call.startswith("systemctl")] == []
+
+
+def test_remove_script_install_never_uses_sudo_kpackagetool6_or_a_bare_pip(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    flow.info(WITHOUT_PACKAGE)
+    assert flow.run("--restart-plasma").returncode == 0
+    assert [call for call in flow.calls() if call.split()[0] in
+            ("sudo", "pacman", "kpackagetool6", "kquitapp6", "kstart", "pip", "pip3")] == []
+
+
+def test_remove_script_install_refuses_root(tmp_path):
+    flow = RemoveFlow(tmp_path)
+    flow.script_install()
+    _stub(flow.stubs, "id", "#!/bin/sh\n[ \"$1\" = -u ] && echo 0\n")
+    completed = flow.run()
+    assert completed.returncode == 1 and "not as root" in completed.stderr
+    assert flow.calls() == []
+    assert all(os.path.lexists(path) for path in flow.installed_paths())
+
+
+@pytest.mark.parametrize("argv", [["--remove-script-install", "--uninstall-web-data"],
+                                  ["--restart-plasma", "--remove-script-install"],
+                                  ["--remove-script-install", "--rollback-hearthwire"],
+                                  ["--remove-script-install", "--restart-plasma", "x"]])
+def test_remove_script_install_usage(tmp_path, argv):
+    flow = RemoveFlow(tmp_path)
+    completed = subprocess.run(["sh", str(flow.project / "scripts" / "install.sh"), *argv],
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, env=flow.env,
+                               timeout=60, check=False)
+    assert completed.returncode == 2
+    assert "--remove-script-install [--restart-plasma]" in completed.stderr
+    assert flow.calls() == []
