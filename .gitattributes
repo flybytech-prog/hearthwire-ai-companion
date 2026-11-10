@@ -7,6 +7,9 @@
 /.gitignore export-ignore
 /.github export-ignore
 /tests export-ignore
+# The upstream author's planning notes (one holds his home path), not part
+# of Hearthwire's source.
+/docs/superpowers export-ignore
 
 # Never tracked, but kept out should one be added by mistake: one line per
 # .gitignore pattern (same anchoring; a trailing / is dropped, since

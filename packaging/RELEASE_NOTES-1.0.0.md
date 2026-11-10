@@ -20,9 +20,15 @@ Pick the package for your system:
   ```
 
 Check the download first with `sha256sum --check --ignore-missing SHA256SUMS`.
-Each package also has a build provenance record: `gh attestation verify
-./FILE --repo flybytech-prog/hearthwire-ai-companion` shows which workflow
-run built it from which commit.
+Each package also has a build provenance record. With the GitHub CLI, this
+shows which workflow run built it from which commit, and fails for a changed
+file:
+
+```bash
+gh attestation verify ./FILE --repo flybytech-prog/hearthwire-ai-companion \
+  --signer-workflow flybytech-prog/hearthwire-ai-companion/.github/workflows/release.yml \
+  --source-ref refs/tags/v1.0.0
+```
 
 Then right-click the panel, choose **Add Widgets…**, search for
 **Hearthwire** and add it. Restart Plasma or log out and in once if it isn't

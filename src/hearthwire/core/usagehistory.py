@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from typing import Callable, Optional
 
 from .catalog import PROVIDER_CATALOG
+from .jsondepth import check_depth
 from .webdata import APP_DIR, HelperError, _close, _descriptors, data_base, open_base, open_child_dir, remove_entry
 
 OPERATIONS = ("read", "record", "clear")
@@ -42,6 +43,9 @@ KEEP_BUCKETS = 7 * 24
 MAX_POINTS = KEEP_BUCKETS + 1
 MAX_FILE_BYTES = 256 * 1024
 MAX_PAIRS = 64
+# The file nests 5 deep (document > series > entry > points > point); 6 leaves
+# room. Checked before json.loads, whatever the interpreter's recursion handling.
+MAX_JSON_DEPTH = 6
 LOCK_WAIT_SECONDS = 2.0
 HISTORY_DIR = "usage-history"
 # The one shared file of earlier builds; only ever deleted now.
@@ -161,8 +165,9 @@ def decode(data: bytes) -> History:
     if len(data) > MAX_FILE_BYTES:
         return {}
     try:
-        document = json.loads(data.decode("utf-8"), object_pairs_hook=_no_duplicates,
-                              parse_constant=_no_constant)
+        text = data.decode("utf-8")
+        check_depth(text, MAX_JSON_DEPTH)
+        document = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constant)
     except (UnicodeDecodeError, ValueError, RecursionError):
         return {}
     if not isinstance(document, dict) or set(document) != {"history_version", "series"}:

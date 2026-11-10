@@ -873,7 +873,11 @@ credentials, no provider data other than percentages.
 - `applet-<N>.json` is `{"history_version":1,"series":[{"provider_id","metric_id","points":[[t,used],...]}]}`.
   `t` is the start of a UTC hour bucket (a multiple of 3600), `used` an
   integer percent used from 0 to 100. A corrupt, oversized (over 256 KiB),
-  duplicate-key or wrong-version file counts as empty; series of pairs the
+  duplicate-key or wrong-version file counts as empty, and so does one whose
+  arrays and objects nest deeper than 6 (the format nests 5: document >
+  series > entry > points > point). The depth is counted before the JSON is
+  parsed, by a linear scan that skips string contents, so the limit doesn't
+  depend on the Python build's recursion handling. Series of pairs the
   catalog no longer has, and odd points, are skipped.
 - Writes hold an `flock` on `history.lock` (2 s wait, else `busy`), write an
   `O_EXCL|O_NOFOLLOW` temporary, fsync it, `os.replace` it with directory
@@ -1016,7 +1020,10 @@ create nothing and check the whole file the same way.
 
 One check (`validate_settings`) runs on the applied settings export reads
 (every `BACKUP_KEYS` key, defaults included) and on the import file. JSON with NaN, Infinity, overflowing numbers or duplicate keys is
-refused. Only `BACKUP_KEYS` are kept, in that order; unknown keys,
+refused, and so is JSON whose arrays and objects nest deeper than 4, both the
+file and the JSON a setting holds (both nest at most 2). The depth is counted
+before parsing, by a linear scan that skips string contents, so the limit
+doesn't depend on the Python build's recursion handling. Only `BACKUP_KEYS` are kept, in that order; unknown keys,
 `EXCLUDED_KEYS` (`chatSignInStorage`, `chatProfileGeneration`,
 `chatAutoLockMinutes`, `chatVaultUnlock`, `chatSiteZoom`,
 `configSchemaVersion`, `initialSetupComplete`, `usageHistoryEnabled`,

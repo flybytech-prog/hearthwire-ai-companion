@@ -9,9 +9,15 @@ on:
 permissions:
   contents: read
 
+# bash -eo pipefail for every run step.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # A fixed image: ubuntu-latest moves to a new release without notice.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version:

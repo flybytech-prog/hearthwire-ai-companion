@@ -263,8 +263,7 @@ def test_proof_a_version_mismatch_is_caught():
 def test_the_download_names_in_the_readme_and_notes_match_the_packages():
     version = _pyproject_version()
     release = recipe_versions(*_texts())["PKGBUILD"][1]
-    fedora = re.findall(r"(?m)^\s*container: fedora:(\d+)$", WORKFLOW.read_text(encoding="utf-8"))
-    assert len(set(fedora)) == 1
+    fedora = [_image_tag(_workflow_jobs()["fedora-build"]).split(":")[1]]
     names = (f"hearthwire-{version}-{release}-any.pkg.tar.zst",
              f"hearthwire-{version}-{release}.fc{fedora[0]}.noarch.rpm",
              f"hearthwire_{version}-{release}_all.deb")
@@ -292,7 +291,7 @@ def test_ubuntu_target_is_26_04_lts_everywhere():
     # 26.04 LTS (resolute) is the first Ubuntu LTS with Plasma 6.
     assert re.match(r"hearthwire \([^)]+\) resolute;", (DEBIAN / "changelog").read_text(encoding="utf-8"))
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert set(re.findall(r"(?m)^\s*container: ubuntu:(\S+)$", workflow)) == {"26.04"}
+    assert set(re.findall(r"(?m)^\s*container: ubuntu@sha256:[0-9a-f]{64} # ubuntu:(\S+)$", workflow)) == {"26.04"}
 
 
 # --- emails, maintainers ---------------------------------------------------------------------------
@@ -456,6 +455,7 @@ def test_proof_an_unpinned_action_is_caught():
 
 # The CLI's name and subcommand, split so this file's text never holds the command itself.
 RELEASE_CLI = "gh" + " release"
+API_CLI = "gh" + " api"
 
 
 def release_problems(body):
@@ -467,8 +467,11 @@ def release_problems(body):
         problems.append(f"{len(creates)} release create commands")
     problems += ["a release that is not a draft" for command in creates
                  if not re.search(r"(?<![\w-])--draft(?![\w=-])", command)]
-    if re.search(re.escape(RELEASE_CLI) + r" edit|gh api|draft=false", body):
+    if re.search(re.escape(RELEASE_CLI) + r" edit|draft=false", joined):
         problems.append("a step that publishes the release")
+    for call in re.findall(re.escape(API_CLI) + r"[^\n]*", joined):
+        if "--method GET" not in call or re.search(r"\s(-f|-F|--field|--raw-field|--input|-X)(\s|=)", call):
+            problems.append("an API call that can write")
     return problems
 
 
@@ -481,41 +484,87 @@ def test_proof_a_published_release_is_caught():
     assert release_problems(body + f'      {RELEASE_CLI} edit "$TAG" --draft=false\n') == [
         "a step that publishes the release"]
     assert release_problems("    run: echo\n") == ["0 release create commands"]
+    assert release_problems(body + f'      {API_CLI} --method GET "repos/x/releases"\n') == []
+    assert release_problems(body + f'      {API_CLI} -X POST "repos/x/releases" -f tag_name=v1\n') == [
+        "an API call that can write"]
+    assert release_problems(body + f'      {API_CLI} "repos/x/releases" -f draft=true\n') == [
+        "an API call that can write"]
 
 
-def test_only_the_release_job_may_write_and_only_for_a_tag():
-    text = WORKFLOW.read_text(encoding="utf-8")
-    jobs = _jobs(text)
-    assert {"source", "arch-build", "arch-test", "fedora-build", "fedora-test", "ubuntu-build", "ubuntu-test",
-            "checksums", "release"} <= set(jobs)
-    for job, lines in jobs.items():
-        body = "\n".join(lines)
-        if job == "release":
-            assert "    permissions:\n      contents: write" in body
-            assert "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')" in body
-            assert release_problems(body) == []
+TAG_PUSH = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+WRITING_STEP = re.compile(r"GH_TOKEN|attest-build-provenance|" + re.escape(RELEASE_CLI))
+
+
+def publish_problems(jobs):
+    """Only "publish" writes, only on a tag push, and every step that can write checks that too."""
+    problems = []
+    for job, body in jobs.items():
+        writes = re.findall(r"(?m)^      ([a-z-]+): write$", body) + re.findall(r"write-all", body)
+        if job == "publish":
+            if sorted(writes) != ["attestations", "contents", "id-token"]:
+                problems.append("publish lacks its write permissions")
+            if not re.search(rf"(?m)^    if: {re.escape(TAG_PUSH)}$", body):
+                problems.append("publish runs without a tag push")
+            for step in _steps(body):
+                if WRITING_STEP.search(step) and f"        if: {TAG_PUSH}" not in step:
+                    problems.append("a publish step that can write has no tag-push condition")
+            problems += release_problems(body)
         else:
-            assert "contents: write" not in body and "write-all" not in body, job
-            assert re.search(r"(?m)^    permissions: \{\}$|^    permissions:\n      contents: read$", body), job
+            if writes:
+                problems.append(f"{job}: grants write")
+            if not re.search(r"(?m)^    permissions: \{\}$|^    permissions:\n      contents: read$", body):
+                problems.append(f"{job}: permissions are not read-only")
+            if WRITING_STEP.search(body):
+                problems.append(f"{job}: can create or attest a release")
+    return problems
+
+
+def test_only_the_publish_job_may_write_and_only_for_a_tag():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    jobs = _workflow_jobs()
+    assert {"source", "tests", "arch-build", "arch-test", "fedora-build", "fedora-test", "fedora-43-test",
+            "ubuntu-build", "ubuntu-test", "verify", "publish"} == set(jobs)
+    assert publish_problems(jobs) == []
     assert "secrets." not in text
-    assert text.count("${{ github.token }}") == 1
+    assert text.count("${{ github.token }}") == jobs["publish"].count("${{ github.token }}") == 2
     assert "${{ github.ref_name }}" not in "\n".join(line for line in text.splitlines() if "run:" in line)
 
 
+def test_proof_writing_outside_the_tag_push_path_is_caught():
+    jobs = _workflow_jobs()
+    always = dict(jobs, publish=jobs["publish"].replace(f"    if: {TAG_PUSH}\n", "", 1))
+    assert publish_problems(always) == ["publish runs without a tag push"]
+    create = jobs["publish"].rsplit(f"        if: {TAG_PUSH}\n", 1)
+    unguarded = dict(jobs, publish="".join(create))
+    assert publish_problems(unguarded) == ["a publish step that can write has no tag-push condition"]
+    writable = dict(jobs, verify=jobs["verify"].replace("      contents: read\n", "      contents: write\n", 1))
+    assert publish_problems(writable) == ["verify: grants write", "verify: permissions are not read-only"]
+    attesting = dict(jobs, verify=jobs["verify"] + "\n      - name: x\n        uses: actions/attest-build-provenance@x\n")
+    assert publish_problems(attesting) == ["verify: can create or attest a release"]
+
+
+def _image_tag(body):
+    """The tag named in a job's ``container: image@sha256:... # name:tag`` comment."""
+    match = re.search(r"(?m)^    container: [a-z0-9./-]+@sha256:[0-9a-f]{64} # (\S+)$", body)
+    return match.group(1) if match else None
+
+
 def test_each_distro_builds_lints_and_install_tests_in_its_own_container():
-    jobs = {job: "\n".join(lines) for job, lines in _jobs(WORKFLOW.read_text(encoding="utf-8")).items()}
+    jobs = _workflow_jobs()
     expected = {"arch": ("archlinux:", "namcap"), "fedora": ("fedora:44", "rpmlint"),
                 "ubuntu": ("ubuntu:26.04", "lintian")}
     for distro, (image, lint) in expected.items():
-        assert f"container: {image}" in jobs[f"{distro}-build"]
-        assert f"container: {image}" in jobs[f"{distro}-test"]
+        assert _image_tag(jobs[f"{distro}-build"]).startswith(image)
+        assert _image_tag(jobs[f"{distro}-test"]).startswith(image)
         assert lint in jobs[f"{distro}-build"] + jobs[f"{distro}-test"]
         assert "packaging/check-install.sh" in jobs[f"{distro}-test"]
         assert f"needs: [source, {distro}-build]" in jobs[f"{distro}-test"]
-    assert "needs: [source, arch-build, fedora-build, ubuntu-build, arch-test, fedora-test, ubuntu-test]" in jobs["checksums"]
+    assert ("needs: [source, arch-build, fedora-build, ubuntu-build, arch-test, fedora-test, fedora-43-test, "
+            "ubuntu-test]") in jobs["verify"]
+    assert "needs: [source, arch-build, fedora-build, ubuntu-build, verify]" in jobs["publish"]
     assert "packaging/source-archive.sh" in jobs["source"]
-    assert "sha256sum -- " in jobs["checksums"] and "SHA256SUMS" in jobs["release"]
-    assert "RELEASE_NOTES-$VERSION.md" in jobs["release"]
+    assert "sha256sum -- " in jobs["verify"] and "SHA256SUMS" in jobs["publish"]
+    assert "RELEASE_NOTES-$VERSION.md" in jobs["publish"]
 
 
 # --- the audit's supply-chain rules (M1, L1, L2, L3, I1) -------------------------------------------
@@ -602,7 +651,7 @@ def test_proof_a_tests_job_that_uploads_is_caught():
     jobs = _workflow_jobs()
     uploading = dict(jobs, tests=jobs["tests"] + "\n      - name: x\n        uses: actions/upload-artifact@x\n")
     assert leaks_from_the_tests_job(uploading) == ["the tests job can publish something"]
-    reading = dict(jobs, release=jobs["release"] + "\n      X: ${{ needs.tests.outputs.sha256 }}\n")
+    reading = dict(jobs, publish=jobs["publish"] + "\n      X: ${{ needs.tests.outputs.sha256 }}\n")
     assert leaks_from_the_tests_job(reading) == ["a job reads the tests job's outputs"]
 
 
@@ -676,7 +725,7 @@ def test_proof_a_pattern_download_is_caught():
                            "          pattern: package-*\n          merge-multiple: true\n"
                            "          path: ${{ runner.temp }}/arch\n", 1)
     assert mutated != text
-    assert {problem.split(":")[0] for problem in download_problems(mutated)} == {"checksums"}
+    assert {problem.split(":")[0] for problem in download_problems(mutated)} == {"verify"}
 
 
 # Which job made each artifact, and the env names that carry its sha256.
@@ -714,8 +763,8 @@ def sha256_problems(jobs):
 def test_every_download_is_checked_against_the_makers_sha256_output():
     jobs = _workflow_jobs()
     assert sha256_problems(jobs) == []
-    # The checksums and release jobs take all three packages by their outputs.
-    for job in ("checksums", "release"):
+    # The verify and publish jobs take all three packages by their outputs.
+    for job in ("verify", "publish"):
         assert len(re.findall(r"(?m)^          take \w+ ", jobs[job])) == 3
         for distro in ("ARCH", "FEDORA", "UBUNTU"):
             assert f'"${distro}_FILE" "${distro}_SHA256"' in jobs[job]
@@ -770,7 +819,7 @@ def test_proof_the_old_glob_let_a_newline_through():
 def test_every_version_and_tag_check_uses_the_strict_checker():
     jobs = _workflow_jobs()
     assert 'python3 -I packaging/check-version.py --tag "$REF_NAME" < pyproject.toml' in jobs["source"]
-    assert 'python3 -I packaging/check-version.py --tag "$TAG" < pyproject.toml' in jobs["release"]
+    assert 'python3 -I packaging/check-version.py --tag "$TAG" < pyproject.toml' in jobs["verify"]
     assert '[ "$REF_TYPE" = tag ]' in jobs["source"]
     script = (PACKAGING / "source-archive.sh").read_text(encoding="utf-8")
     assert 'git -C "$repository" show "$commit:packaging/check-version.py"' in script
@@ -781,7 +830,8 @@ def test_every_version_and_tag_check_uses_the_strict_checker():
     assert source.index("check-version.py") < source.index('echo "version=$version" >> "$GITHUB_OUTPUT"')
 
 
-ANCESTOR = 'git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main'
+ANCESTOR = 'git merge-base --is-ancestor "$commit" refs/remotes/origin/main'
+PEEL = 'commit=$(git rev-parse --verify "$GITHUB_SHA^{commit}")'
 
 
 def ancestor_problems(body):
@@ -791,6 +841,8 @@ def ancestor_problems(body):
     step = next((step for step in _steps(body) if ANCESTOR in step), None)
     if step is None:
         problems.append("no ancestor check")
+    elif PEEL not in step or step.index(PEEL) > step.index(ANCESTOR):
+        problems.append("the ancestor check does not use the peeled commit")
     elif not re.search(r'if \[ "\$EVENT_NAME" = push \]; then\n(?:.*\n)*?\s*' + re.escape(ANCESTOR) + r" \\\n"
                        r"\s*\|\| \{ [^\n]*exit 1; \}", step):
         problems.append("the ancestor check does not stop a tag push")
@@ -815,14 +867,14 @@ def provenance_problems(jobs):
     problems = []
     for job, body in jobs.items():
         grants = re.findall(r"(?m)^      (id-token|attestations): write$", body)
-        if job == "release":
+        if job == "publish":
             if sorted(grants) != ["attestations", "id-token"]:
                 problems.append("the release job lacks id-token or attestations write")
         elif grants:
             problems.append(f"{job}: grants {', '.join(sorted(grants))} write")
-        if job != "release" and "attest-build-provenance" in body:
+        if job != "publish" and "attest-build-provenance" in body:
             problems.append(f"{job}: attests")
-    release = _steps(jobs["release"])
+    release = _steps(jobs["publish"])
     attest = [index for index, step in enumerate(release) if "uses: actions/attest-build-provenance@" in step]
     create = [index for index, step in enumerate(release) if RELEASE_CLI + " create" in step]
     if len(attest) != 1:
@@ -851,35 +903,42 @@ def test_proof_provenance_permissions_elsewhere_are_caught():
     leaky = dict(jobs, tests=jobs["tests"].replace("      contents: read\n",
                                                    "      contents: read\n      id-token: write\n", 1))
     assert provenance_problems(leaky) == ["tests: grants id-token write"]
-    missing = dict(jobs, release=jobs["release"].replace("      attestations: write\n", ""))
+    missing = dict(jobs, publish=jobs["publish"].replace("      attestations: write\n", ""))
     assert provenance_problems(missing) == ["the release job lacks id-token or attestations write"]
-    unattested = dict(jobs, release=jobs["release"].replace("uses: actions/attest-build-provenance@", "uses: x/y@"))
+    unattested = dict(jobs, publish=jobs["publish"].replace("uses: actions/attest-build-provenance@", "uses: x/y@"))
     assert provenance_problems(unattested) == ["the release files are not attested exactly once"]
 
 
-def rebuild_problems(body):
+def rebuild_problems(jobs):
+    """The verify job checks out again, rebuilds and compares, on every run; publish waits for it."""
     problems = []
+    body = jobs["verify"]
     steps = _steps(body)
     rebuild = [index for index, step in enumerate(steps)
                if "packaging/source-archive.sh" in step and "cmp -- " in step and SHA256_CHECK in step]
-    create = [index for index, step in enumerate(steps) if RELEASE_CLI + " create" in step]
     if not re.search(r"uses: actions/checkout@", steps[0]):
-        problems.append("the release job does not check out the tag first")
+        problems.append("the verify job does not check out the commit first")
     if len(rebuild) != 1:
         problems.append("the tarball is not rebuilt and compared")
-    elif not create or rebuild[0] > create[0]:
-        problems.append("the release is created before the rebuild is compared")
+    if re.search(r"(?m)^    if:", body) or any(re.search(r"(?m)^        if:", step) for step in steps):
+        problems.append("the verify job does not run on a dry run")
+    if not re.search(r"(?m)^    needs: \[[^]]*\bverify\b", jobs["publish"]):
+        problems.append("publish does not wait for verify")
     return problems
 
 
-def test_the_release_job_rebuilds_the_tarball_and_compares_the_bytes():
-    assert rebuild_problems(_workflow_jobs()["release"]) == []
+def test_the_verify_job_rebuilds_the_tarball_on_every_run():
+    assert rebuild_problems(_workflow_jobs()) == []
 
 
-def test_proof_a_release_without_the_rebuild_is_caught():
-    body = _workflow_jobs()["release"]
-    assert rebuild_problems(body.replace('cmp -- "$rebuilt"', 'true "$rebuilt"')) == [
+def test_proof_a_verify_job_without_the_rebuild_or_the_dry_run_is_caught():
+    jobs = _workflow_jobs()
+    assert rebuild_problems(dict(jobs, verify=jobs["verify"].replace('cmp -- "$rebuilt"', 'true "$rebuilt"'))) == [
         "the tarball is not rebuilt and compared"]
+    tag_only = jobs["verify"].replace("    runs-on: ubuntu-24.04\n", f"    if: {TAG_PUSH}\n    runs-on: ubuntu-24.04\n", 1)
+    assert rebuild_problems(dict(jobs, verify=tag_only)) == ["the verify job does not run on a dry run"]
+    unordered = jobs["publish"].replace(", verify]", "]", 1)
+    assert rebuild_problems(dict(jobs, publish=unordered)) == ["publish does not wait for verify"]
 
 
 def test_the_tarball_is_reproducible_for_the_same_commit(tmp_path):
@@ -926,3 +985,359 @@ def test_proof_a_colon_in_a_plain_run_value_is_caught():
     line = "        run: python -m pip install --only-binary=:all: -r x.txt"
     assert plain_scalar_problems(line) == ["line 1: run: python -m pip install --only-binary=:all: -r x.txt"]
     assert plain_scalar_problems("        run: |\n          pip install --only-binary=:all: -r x\n") == []
+
+
+# --- second audit and the dry-run failure ------------------------------------------------------------
+
+
+def runner_problems(text):
+    problems = []
+    labels = re.findall(r"(?m)^\s*runs-on:\s*(.+?)\s*$", text)
+    if not labels:
+        problems.append("no runs-on")
+    for label in labels:
+        if "latest" in label:
+            problems.append(f"a moving image: {label}")
+        elif label != "ubuntu-24.04":
+            problems.append(f"not the fixed image: {label}")
+    return problems
+
+
+def test_every_job_runs_on_the_fixed_ubuntu_24_04_image():
+    for path in WORKFLOWS:
+        assert runner_problems(path.read_text(encoding="utf-8")) == [], path.name
+
+
+def test_proof_a_latest_runner_is_caught():
+    assert runner_problems("    runs-on: ubuntu-latest\n") == ["a moving image: ubuntu-latest"]
+    assert runner_problems("    runs-on: ubuntu-22.04\n") == ["not the fixed image: ubuntu-22.04"]
+
+
+def python_problems(body):
+    problems = []
+    setup = [step for step in _steps(body) if "uses: actions/setup-python@" in step]
+    if len(setup) != 1:
+        return ["the tests job does not set up a pinned Python"]
+    step = setup[0]
+    if 'python-version: "3.14"' not in step:
+        problems.append("not Python 3.14")
+    if "update-environment: false" not in step or re.search(r"(?m)^\s+cache:", step):
+        problems.append("the Python setup persists or caches something")
+    run = "\n".join(s for s in _steps(body) if "pytest" in s)
+    if "PYTHON: ${{ steps.python.outputs.python-path }}" not in run or '"$PYTHON" -m venv' not in run:
+        problems.append("the tests do not run with that interpreter")
+    if "sys.version_info[:2] != (3, 14)" not in run:
+        problems.append("the interpreter's version is not checked")
+    return problems
+
+
+def test_the_release_tests_run_on_a_pinned_python_3_14():
+    assert python_problems(_workflow_jobs()["tests"]) == []
+
+
+def test_proof_an_unpinned_python_is_caught():
+    body = _workflow_jobs()["tests"]
+    assert python_problems(body.replace('python-version: "3.14"', 'python-version: "3.x"')) == ["not Python 3.14"]
+    assert python_problems(body.replace('"$PYTHON" -m venv', 'python3 -m venv')) == [
+        "the tests do not run with that interpreter"]
+    assert python_problems(body.replace("update-environment: false", "cache: pip")) == [
+        "the Python setup persists or caches something"]
+
+
+def peel_problems(text):
+    """Every commit comparison with $GITHUB_SHA or HEAD uses the peeled ``^{commit}``."""
+    problems = []
+    for call in re.findall(r"git rev-parse[^)\n]*", text):
+        if ("GITHUB_SHA" in call or "HEAD" in call) and "^{commit}" not in call:
+            problems.append(f"not peeled: {call.strip()}")
+    if re.search(r'= "\$GITHUB_SHA" \]', text):
+        problems.append("compares with the unpeeled $GITHUB_SHA")
+    return problems
+
+
+def test_commit_comparisons_use_the_peeled_commit():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert peel_problems(text) == []
+    assert '''"$(git rev-parse --verify 'HEAD^{commit}')" = "$(git rev-parse --verify "$GITHUB_SHA^{commit}")"''' in text
+    assert peel_problems((PACKAGING / "source-archive.sh").read_text(encoding="utf-8")) == []
+
+
+def test_proof_an_unpeeled_comparison_is_caught():
+    assert peel_problems('[ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ]') == [
+        "not peeled: git rev-parse HEAD", "compares with the unpeeled $GITHUB_SHA"]
+
+
+# Left sides of a pipe that were checked under pipefail: each either succeeds
+# or should fail the step (namcap failing is a real failure).
+PIPE_SOURCES = {"printf", "sha256sum", "namcap", "echo", "cat"}
+
+
+def run_scripts(text):
+    """The shell lines of every ``run:`` value (block or one line), continuations joined."""
+    lines = text.splitlines()
+    scripts = []
+    index = 0
+    while index < len(lines):
+        match = re.fullmatch(r"(\s*)(?:- )?run: (.*)", lines[index])
+        index += 1
+        if not match:
+            continue
+        indent, value = len(match.group(1)), match.group(2)
+        if value.strip() not in ("|", "|-", ">", ">-"):
+            scripts.append(value)
+            continue
+        block = []
+        while index < len(lines) and (not lines[index].strip() or len(lines[index]) - len(lines[index].lstrip()) > indent):
+            block.append(lines[index].strip())
+            index += 1
+        scripts.append("\n".join(block))
+    return [line for script in scripts for line in re.sub(r"\\\n\s*", " ", script).splitlines()]
+
+
+def _without_case_patterns(line):
+    """Drop case patterns (``a | b)``), whose bars are not pipes, and quoted text."""
+    line = re.sub(r"\bcase\b.*?\bin\b[^)]*\)", "", line)
+    line = re.sub(r"^\s*[^$()'\"]*(?:\"[^\"]*\")?[^$()'\"]*\)", "", line)
+    return re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", '""', line)
+
+
+def pipefail_problems(text):
+    problems = []
+    head, _, body = text.partition("\njobs:")
+    if not re.search(r"(?m)^defaults:\n  run:\n    shell: bash$", head):
+        problems.append("no workflow-wide shell: bash (pipefail)")
+    if re.search(r"(?m)^\s+shell:", body):
+        problems.append("a step overrides the shell")
+    for line in run_scripts(text):
+        if line.lstrip().startswith("#"):
+            continue
+        plain = _without_case_patterns(line)
+        segments = re.split(r"(?<!\|)\|(?!\|)", plain)
+        for segment in segments[:-1]:
+            piece = re.split(r"\$\(|;|&&|\|\||\bthen\b|\bdo\b", segment)[-1].strip()
+            word = piece.split()[0] if piece else ""
+            if word not in PIPE_SOURCES:
+                problems.append(f"an unreviewed pipe from {word}: {line.strip()}")
+        if re.search(r"\bgrep\b", plain) and not re.search(r"\bif\s+(!\s+)?grep\b|\bgrep\b[^\n]*\|\|", plain):
+            problems.append(f"a grep whose no-match status would fail the step: {line.strip()}")
+    return problems
+
+
+def test_every_pipe_is_safe_under_pipefail():
+    for path in WORKFLOWS:
+        assert pipefail_problems(path.read_text(encoding="utf-8")) == [], path.name
+
+
+def test_proof_pipefail_hazards_are_caught():
+    head = "defaults:\n  run:\n    shell: bash\n\njobs:\n"
+    assert pipefail_problems(head + "        run: |\n          grep -v x file | wc -l\n") == [
+        "an unreviewed pipe from grep: grep -v x file | wc -l",
+        "a grep whose no-match status would fail the step: grep -v x file | wc -l"]
+    assert pipefail_problems("jobs:\n        run: echo ok\n") == ["no workflow-wide shell: bash (pipefail)"]
+    assert pipefail_problems(head + "        shell: sh\n") == ["a step overrides the shell"]
+    assert pipefail_problems(head + "          if grep -q ' E: ' /tmp/x; then exit 1; fi\n") == []
+
+
+DIGEST = re.compile(r"[a-z0-9./-]+@sha256:[0-9a-f]{64} # [a-z0-9./-]+:[\w.-]+")
+
+
+def image_problems(text):
+    problems = []
+    for value in re.findall(r"(?m)^\s*(?:container|image):\s*(.+?)\s*$", text):
+        if not DIGEST.fullmatch(value):
+            problems.append(f"not pinned by digest: {value}")
+    return problems
+
+
+def test_every_container_image_is_pinned_by_digest():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert image_problems(text) == []
+    tags = set(re.findall(r"(?m)^\s*container: \S+ # (\S+)$", text))
+    assert tags == {"archlinux:base-devel", "archlinux:latest", "fedora:44", "fedora:43", "ubuntu:26.04"}
+    for path in WORKFLOWS:
+        assert image_problems(path.read_text(encoding="utf-8")) == [], path.name
+
+
+def test_proof_a_tag_only_image_is_caught():
+    assert image_problems("    container: fedora:44\n") == ["not pinned by digest: fedora:44"]
+    assert image_problems("    container: fedora@sha256:" + "a" * 64 + "\n") != []  # no tag comment
+    assert image_problems("      image: ubuntu@sha256:abc # ubuntu:26.04\n") != []
+
+
+GUARD = re.compile(r"^\s*\[ [^\n]*\] && \[ [^\n]*\]\s*$")
+
+
+def guard_problems(text):
+    """A ``[ a ] && [ b ]`` line on its own doesn't stop a -e script when ``[ a ]`` fails."""
+    return [f"line {number}: {line.strip()}" for number, line in enumerate(text.splitlines(), 1)
+            if GUARD.match(line)]
+
+
+def test_no_and_chained_test_is_used_as_a_guard():
+    for path in [*WORKFLOWS, *sorted(PACKAGING.glob("*.sh"))]:
+        assert guard_problems(path.read_text(encoding="utf-8")) == [], path.name
+
+
+def test_proof_an_and_chained_guard_is_caught():
+    assert guard_problems('          [ "$#" -eq 1 ] && [ -f "$1" ]\n') == ['line 1: [ "$#" -eq 1 ] && [ -f "$1" ]']
+    assert guard_problems('          if [ "$#" -eq 1 ] && [ -f "$1" ]; then\n') == []
+    assert guard_problems('          [ "$#" -eq 1 ] || exit 1\n') == []
+
+
+def order_problems(jobs):
+    problems = []
+    source = jobs["source"]
+    if '[ -f "packaging/RELEASE_NOTES-$version.md" ] || {' not in source:
+        problems.append("the source job does not check the release notes")
+    elif source.index("RELEASE_NOTES-$version.md") > source.index('echo "version=$version" >> "$GITHUB_OUTPUT"'):
+        problems.append("the release notes are checked after the version is published")
+    steps = _steps(jobs["publish"])
+
+    def index(pattern):
+        found = [number for number, step in enumerate(steps) if re.search(pattern, step)]
+        return found[0] if found else None
+
+    checks = index(re.escape(SHA256_CHECK))
+    existing = index(re.escape(API_CLI) + r" --method GET[^\n]*\n?[^\n]*releases|select\(\.tag_name == env\.TAG\)")
+    attest = index(r"uses: actions/attest-build-provenance@")
+    create = index(re.escape(RELEASE_CLI) + " create")
+    if existing is None:
+        problems.append("no check for an existing release or draft")
+    elif None in (checks, attest, create) or not checks < existing < attest < create:
+        problems.append("publish does not check, then refuse duplicates, then attest, then create")
+    return problems
+
+
+def test_attest_only_after_the_last_check_that_can_fail():
+    assert order_problems(_workflow_jobs()) == []
+    step = next(step for step in _steps(_workflow_jobs()["publish"]) if "select(.tag_name == env.TAG)" in step)
+    assert 'if [ -n "$existing" ]; then' in step and "exit 1" in step
+
+
+def test_proof_a_wrong_publish_order_is_caught():
+    jobs = _workflow_jobs()
+    steps = _steps(jobs["publish"])
+    head, body = jobs["publish"].split("\n    steps:\n", 1)
+    existing = next(step for step in steps if "select(.tag_name == env.TAG)" in step)
+    attest = next(step for step in steps if "attest-build-provenance@" in step)
+    swapped = body.replace(existing, "@@E@@").replace(attest, existing).replace("@@E@@", attest)
+    assert order_problems(dict(jobs, publish=head + "\n    steps:\n" + swapped)) == [
+        "publish does not check, then refuse duplicates, then attest, then create"]
+    assert order_problems(dict(jobs, publish=jobs["publish"].replace(existing, ""))) == [
+        "no check for an existing release or draft"]
+    late = jobs["source"].replace('[ -f "packaging/RELEASE_NOTES-$version.md" ] || {', "{ true; } || {")
+    assert order_problems(dict(jobs, source=late)) == ["the source job does not check the release notes"]
+
+
+def fedora_43_problems(jobs, notes):
+    claims = "Fedora**: 43 and 44" in re.sub(r"\s+", " ", notes) or "(Fedora 43 and 44)" in notes
+    job = jobs.get("fedora-43-test")
+    if job is None:
+        return ["the release notes claim Fedora 43 without a Fedora 43 install test"] if claims else []
+    problems = []
+    if _image_tag(job) != "fedora:43":
+        problems.append("the Fedora 43 job does not run Fedora 43")
+    for needed in ("name: package-fedora", "${{ needs.fedora-build.outputs.sha256 }}", SHA256_CHECK,
+                   "packaging/check-install.sh", "needs: [source, fedora-build]"):
+        if needed not in job:
+            problems.append(f"the Fedora 43 job lacks {needed}")
+    if not re.search(r"(?m)^    needs: \[[^]]*\bfedora-43-test\b", jobs["verify"]):
+        problems.append("verify does not wait for the Fedora 43 test")
+    return problems
+
+
+def test_fedora_43_is_install_tested_with_the_same_rpm():
+    notes = (PACKAGING / f"RELEASE_NOTES-{_pyproject_version()}.md").read_text(encoding="utf-8")
+    assert fedora_43_problems(_workflow_jobs(), notes) == []
+
+
+def test_proof_an_untested_fedora_43_claim_is_caught():
+    notes = (PACKAGING / f"RELEASE_NOTES-{_pyproject_version()}.md").read_text(encoding="utf-8")
+    jobs = dict(_workflow_jobs())
+    del jobs["fedora-43-test"]
+    assert fedora_43_problems(jobs, notes) == ["the release notes claim Fedora 43 without a Fedora 43 install test"]
+    jobs = _workflow_jobs()
+    other = dict(jobs, **{"fedora-43-test": jobs["fedora-43-test"].replace("# fedora:43", "# fedora:44")})
+    assert fedora_43_problems(other, notes) == ["the Fedora 43 job does not run Fedora 43"]
+
+
+HOME_PATH = re.compile(r"/home/[A-Za-z0-9._-]+/")
+
+
+def content_problems(name, text):
+    problems = [f"{name}: a home folder path" for _ in HOME_PATH.findall(text)][:1]
+    problems += [f"{name}: email {found}" for found in sorted(set(EMAIL.findall(text))) if found != ALLOWED_EMAIL]
+    return problems
+
+
+def _archived_texts():
+    """(name, text) of every text file a commit of this tree would put in the archive."""
+    candidates = _would_be_committed()
+    kept = sorted(candidates - _export_ignored(candidates))
+    for name in kept:
+        try:
+            yield name, (ROOT / name).read_text(encoding="utf-8")
+        except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
+            continue  # Images and other binary files.
+
+
+def test_no_archived_file_has_a_home_path_or_a_personal_email():
+    problems = [problem for name, text in _archived_texts() for problem in content_problems(name, text)]
+    assert problems == []
+    names = {name for name, _ in _archived_texts()}
+    assert "README.md" in names and "src/hearthwire/cli.py" in names
+    assert not {name for name in names if name.startswith("docs/superpowers/")}
+
+
+def test_the_archive_of_head_has_no_home_path_or_personal_email():
+    data = _git("archive", "--worktree-attributes", "--format=tar", "HEAD")
+    problems = []
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        for member in archive.getmembers():
+            if member.isfile():
+                try:
+                    text = archive.extractfile(member).read().decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                problems += content_problems(member.name, text)
+    assert problems == []
+
+
+def test_proof_the_upstream_plans_would_fail_the_content_check():
+    # The planning files hold the upstream author's home path: only
+    # export-ignore keeps them out.
+    plans = [name for name in _would_be_committed() if name.startswith("docs/superpowers/")]
+    if not plans:
+        pytest.skip("no upstream planning files in this checkout")
+    found = [problem for name in plans for problem in content_problems(name, (ROOT / name).read_text(encoding="utf-8"))]
+    assert any("home folder path" in problem for problem in found)
+    assert _export_ignored(plans) == set(plans)
+    assert content_problems("x", "see /home/someone/src and me@example.org") == [
+        "x: a home folder path", "x: email me@example.org"]
+
+
+VERIFY_FLAGS = ("--repo flybytech-prog/hearthwire-ai-companion",
+                "--signer-workflow flybytech-prog/hearthwire-ai-companion/.github/workflows/release.yml",
+                "--source-ref refs/tags/v{version}")
+
+
+def verify_doc_problems(text, version):
+    joined = re.sub(r"\\\n\s*", " ", text)
+    commands = re.findall(r"gh attestation verify [^\n`]*", joined)
+    if not commands:
+        return ["no verify command"]
+    return [f"missing {flag.format(version=version)}" for command in commands for flag in VERIFY_FLAGS
+            if flag.format(version=version) not in command]
+
+
+def test_the_verify_command_pins_the_signer_workflow_and_tag():
+    version = _pyproject_version()
+    for path in (README, PACKAGING / f"RELEASE_NOTES-{version}.md"):
+        assert verify_doc_problems(path.read_text(encoding="utf-8"), version) == [], path.name
+
+
+def test_proof_a_loose_verify_command_is_caught():
+    old = "gh attestation verify ./FILE --repo flybytech-prog/hearthwire-ai-companion\n"
+    assert verify_doc_problems(old, "1.0.0") == [
+        "missing --signer-workflow flybytech-prog/hearthwire-ai-companion/.github/workflows/release.yml",
+        "missing --source-ref refs/tags/v1.0.0"]

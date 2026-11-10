@@ -387,11 +387,14 @@ workflow run built it from which commit. With the
 
 ```bash
 gh attestation verify ./hearthwire-1.0.0-1-any.pkg.tar.zst \
-  --repo flybytech-prog/hearthwire-ai-companion
+  --repo flybytech-prog/hearthwire-ai-companion \
+  --signer-workflow flybytech-prog/hearthwire-ai-companion/.github/workflows/release.yml \
+  --source-ref refs/tags/v1.0.0
 ```
 
 Use the file name of the package you downloaded. The command prints the
-workflow and commit it was built from, and fails if the file was changed.
+workflow and commit it was built from, and fails if the file was changed,
+was not signed by the release workflow, or was built from another tag.
 
 A package installs the same files as the script below, but for all users:
 the widget in `/usr/share/plasma/plasmoids/io.github.flybytechprog.hearthwire`,
@@ -450,6 +453,29 @@ matches `pyproject.toml` and whose commit is on `main`. Even so, anyone who
 can push a `v*` tag can start it, so a tag ruleset that limits who may create
 `v*` tags is recommended (**Settings → Rules → Rulesets → New tag ruleset**,
 target `v*`, restrict creations, updates and deletions to the maintainers).
+
+The release workflow runs on `ubuntu-24.04` (never `ubuntu-latest`, so the
+job that makes the source tarball and the job that rebuilds it use the same
+git and gzip), and its containers are pinned by digest. To move to newer
+images, look up each tag's current digest, for example without logging in:
+
+```bash
+for ref in archlinux:base-devel archlinux:latest fedora:44 fedora:43 ubuntu:26.04; do
+  repo=${ref%%:*} tag=${ref##*:}
+  token=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/$repo:pull" \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+  curl -sI -H "Authorization: Bearer $token" \
+    -H "Accept: application/vnd.oci.image.index.v1+json" \
+    -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+    "https://registry-1.docker.io/v2/library/$repo/manifests/$tag" \
+    | grep -i '^docker-content-digest'
+done
+```
+
+(or `skopeo inspect docker://docker.io/library/fedora:44`). Then replace the
+`image@sha256:…` values in `.github/workflows/release.yml`, keeping the
+`# tag` comment next to each, and run a dry run (**Actions → Release
+packages → Run workflow**) before the next tag.
 
 ## Install
 

@@ -35,6 +35,7 @@ from typing import Callable, Optional
 
 from .appletconfig import applied_settings
 from .catalog import CATALOG_BY_ID, PROVIDER_CATALOG, PROVIDER_IDS
+from .jsondepth import check_depth
 from .webdata import APP_DIR, PRIVATE_MODE, HelperError, _close, _descriptors, open_base, open_child_dir
 
 OPERATIONS = ("status", "export", "import")
@@ -45,6 +46,10 @@ BACKUP_FILE = "settings-backup.json"
 FILE_MODE = 0o600
 MAX_FILE_BYTES = 64 * 1024
 MAX_STRING_CHARS = 4096
+# Arrays and objects nest at most 2 deep, both in the document (document >
+# settings) and in the JSON a setting holds (metric map > list); 4 leaves room.
+# Checked before json.loads, whatever the interpreter's recursion handling.
+MAX_JSON_DEPTH = 4
 # chatCustomUrls holds up to seven addresses of 2048 characters each.
 MAX_CUSTOM_URLS_CHARS = 32768
 
@@ -142,8 +147,11 @@ def _finite_float(text: str) -> float:
 def strict_loads(text: str) -> object:
     """``json.loads`` that refuses NaN, Infinity, overflowing floats and duplicate keys.
 
-    Raises ValueError for any of those and for malformed or too deeply nested JSON.
+    Raises ValueError for any of those and for malformed JSON or JSON nested
+    deeper than ``MAX_JSON_DEPTH`` (checked first, so deep text never reaches
+    json.loads; RecursionError stays caught as a second line).
     """
+    check_depth(text, MAX_JSON_DEPTH)
     try:
         return json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constant,
                           parse_float=_finite_float)
