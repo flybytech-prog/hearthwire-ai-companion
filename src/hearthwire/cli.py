@@ -82,7 +82,12 @@ def parser() -> argparse.ArgumentParser:
         choices=webdata.STORES,
         help="Profile store for --web-data prepare/remove (only 'encrypted').",
     )
-    result.add_argument("--applet", type=_bounded_int, metavar="N", help="Applet id for --web-data.")
+    result.add_argument(
+        "--applet",
+        type=_bounded_int,
+        metavar="N",
+        help="Applet id for --web-data, --usage-history and --settings-backup (1 or more for the last two).",
+    )
     result.add_argument("--generation", type=_bounded_int, metavar="G", help="Generation for --web-data prepare.")
     result.add_argument("--keep", type=_bounded_int, metavar="G", help="Generation --web-data remove keeps.")
     result.add_argument(
@@ -120,8 +125,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--usage-history",
         choices=usagehistory.OPERATIONS,
-        help="Opt-in usage history: read the last 7 days, record one sample, or clear it "
-        "(no network, no credentials).",
+        help="Opt-in usage history of one widget (--applet N): read the last 7 days, record one "
+        "sample, or clear it; clear --all deletes every widget's (no network, no credentials).",
+    )
+    result.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_applets",
+        help="Every widget's history, for --usage-history clear (instead of --applet).",
     )
     result.add_argument(
         "--sample",
@@ -131,13 +142,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--settings-backup",
         choices=settingsbackup.OPERATIONS,
-        help="Settings backup file: status, export or import (no network, no credentials).",
+        help="Settings backup file: status, export (the applied settings of widget --applet N, read "
+        "from Plasma's own config) or import (no network, no credentials).",
     )
-    result.add_argument(
-        "--data",
-        metavar="HEX",
-        help="Settings as lowercase hex of a UTF-8 JSON object, for --settings-backup export.",
-    )
+    # Settings once came in argv, readable by every local user (audit M1). The
+    # option stays only to be refused by name, without echoing its value.
+    result.add_argument("--data", help=argparse.SUPPRESS)
     result.add_argument(
         "--migrate",
         choices=legacy.OPERATIONS,
@@ -173,13 +183,25 @@ def _check_prompt_arguments(args: argparse.Namespace, argument_parser: argparse.
 
 
 def _check_history_and_backup_arguments(args: argparse.Namespace, argument_parser: argparse.ArgumentParser) -> None:
-    """--sample only and always with --usage-history record; --data likewise with --settings-backup export."""
+    """--sample only and always with --usage-history record. --usage-history needs --applet N (N >= 1),
+    except clear --all, which takes none. --settings-backup export needs --applet N; status and import
+    accept it and ignore it. --data is refused everywhere."""
+    if args.data is not None:
+        argument_parser.error("--data is not accepted: --settings-backup export --applet N reads the settings itself")
     if (args.sample is not None) != (args.usage_history == "record"):
         argument_parser.error("--usage-history record needs --sample" if args.usage_history == "record"
                               else "--sample is only for --usage-history record")
-    if (args.data is not None) != (args.settings_backup == "export"):
-        argument_parser.error("--settings-backup export needs --data" if args.settings_backup == "export"
-                              else "--data is only for --settings-backup export")
+    if args.all_applets and args.usage_history != "clear":
+        argument_parser.error("--all is only for --usage-history clear")
+    if args.usage_history is None and args.settings_backup is None:
+        return
+    if args.applet is not None and args.applet < 1:
+        argument_parser.error("--applet must be from 1 to 2147483648")
+    if args.usage_history is not None and args.all_applets == (args.applet is not None):
+        argument_parser.error("--usage-history clear needs exactly one of --applet and --all"
+                              if args.usage_history == "clear" else f"--usage-history {args.usage_history} needs --applet")
+    if args.settings_backup == "export" and args.applet is None:
+        argument_parser.error("--settings-backup export needs --applet")
 
 
 def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.ArgumentParser) -> None:
@@ -224,8 +246,13 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
             ("--keep", args.keep is not None),
         ) if used
     ]
+    if args.usage_history is not None or args.settings_backup is not None:
+        # --applet is theirs too (checked above).
+        others = snapshot_options + [name for name in web_options if name != "--applet"]
+        if others:
+            argument_parser.error(f"{others[0]} cannot be combined with {modes[0]}")
+        return
     if (args.port_owner is not None or args.prompts is not None or args.read_dropped is not None
-            or args.usage_history is not None or args.settings_backup is not None
             or args.migrate is not None):
         others = snapshot_options + web_options
         if others:
@@ -289,9 +316,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.read_dropped is not None:
         payload = _dropped_reply(args.read_dropped)
     elif args.usage_history is not None:
-        payload = _helper_reply(lambda: usagehistory.run(args.usage_history, sample=args.sample))
+        payload = _helper_reply(lambda: usagehistory.run(
+            args.usage_history, applet=args.applet, every_applet=args.all_applets, sample=args.sample,
+        ))
     elif args.settings_backup is not None:
-        payload = _helper_reply(lambda: settingsbackup.run(args.settings_backup, data=args.data))
+        payload = _helper_reply(lambda: settingsbackup.run(args.settings_backup, applet=args.applet))
     elif args.migrate is not None:
         payload = _helper_reply(lambda: legacy.run_operation(args.migrate))
     elif args.catalog:

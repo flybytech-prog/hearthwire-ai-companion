@@ -3,7 +3,8 @@
 // Settings → General → Backup: pure rules, no QML state. The helper keeps one
 // fixed file and checks every value; the widget checks the import again before
 // the page applies it, so a reply can only ever set what the widget would
-// store itself. Excluded keys are never exported and never applied.
+// store itself. Excluded keys are never exported and never applied. An export
+// is the widget's applied settings, read by the helper from Plasma's own file.
 
 var BACKUP_KEYS = [
     "trackedProviders", "providerMetrics", "providerOrder", "usageMode", "refreshInterval",
@@ -23,15 +24,18 @@ var EXCLUDED_KEYS = [
 ]
 var OPERATIONS = ["status", "export", "import"]
 var ERRORS = ["absent", "invalid", "unsupported", "too-large", "bad-data", "symlink", "not-owned",
-              "unsafe-mode", "legacy-data", "os-error"]
+              "unsafe-mode", "legacy-data", "os-error", "applet-not-found",
+              "settings-unreadable"]
 // A malformed reply; the helper's own "invalid" is about the file.
 var BAD_REPLY = "bad-reply"
 
 var MAX_STRING_CHARS = 4096
 var MAX_CUSTOM_URLS_CHARS = 32768
 var MAX_CUSTOM_URL_LENGTH = 2048
-// One argv string is limited to 128 KiB; the helper's own limit is that size.
-var MAX_DATA_HEX = 130000
+// The same bound as ChatStorage.MAX_INT and the helper's --applet.
+var MAX_APPLET = 2147483648
+// The address changes an import confirmation lists one by one.
+var MAX_SHOWN_CHANGES = 8
 // The helper's file limit (64 KiB) and room for the reply's other fields.
 var MAX_REPLY_CHARS = 65536 + 1024
 
@@ -45,7 +49,6 @@ var POPUP_SIZES = ["compact", "normal", "large"]
 var SHORTCUT_TARGETS = ["popup", "chat", "ollama", "usage"]
 var OLLAMA_ID = "ollama"
 
-var HEX_PATTERN = /^(?:[0-9a-f]{2})+$/
 var STAMP_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/
 var CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/
 var LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?:[^\ud800-\udbff]|^)[\udc00-\udfff]/
@@ -68,56 +71,19 @@ function has(object, key) {
     return Object.prototype.hasOwnProperty.call(object, key)
 }
 
-// Lowercase hex of the UTF-8 bytes of text; "" for text that isn't valid.
-function hexUtf8(text) {
-    var encoded = ""
-    try {
-        encoded = encodeURIComponent(text)
-    } catch (error) {
-        return ""
-    }
-    var result = ""
-    for (var index = 0; index < encoded.length; index++) {
-        if (encoded[index] === "%") {
-            result += encoded.substr(index + 1, 2).toLowerCase()
-            index += 2
-        } else {
-            var code = encoded.charCodeAt(index).toString(16)
-            result += code.length < 2 ? "0" + code : code
-        }
-    }
-    return result
-}
-
-// The --data text for an export: the backup keys of settings as hex of UTF-8
-// JSON, or "" when there is nothing to send or it is too long for one argument.
-function exportPayload(settings) {
-    if (!isObject(settings))
-        return ""
-    var picked = {}
-    var count = 0
-    BACKUP_KEYS.forEach(function (key) {
-        if (has(settings, key) && settings[key] !== undefined) {
-            picked[key] = settings[key]
-            count += 1
-        }
-    })
-    if (count === 0)
-        return ""
-    var hex = hexUtf8(JSON.stringify(picked))
-    return hex.length <= MAX_DATA_HEX ? hex : ""
+// A widget id the helper accepts: a whole number from 1 to ChatStorage.MAX_INT.
+function validApplet(value) {
+    return isCount(value) && value >= 1 && value <= MAX_APPLET
 }
 
 // The helper command, or "" for anything odd. Built only from the fixed
-// helper name, a known operation, a whole run number and checked hex.
-function backupCommand(op, run, data) {
-    if (OPERATIONS.indexOf(op) < 0 || !isCount(run))
+// helper name, a known operation, a whole run number and the widget's id;
+// the helper reads an export's settings from the widget's saved ones itself,
+// so no setting ever goes on the command line.
+function backupCommand(op, run, applet) {
+    if (OPERATIONS.indexOf(op) < 0 || !isCount(run) || !validApplet(applet))
         return ""
-    var command = "env HEARTHWIRE_RUN=" + run + " python3 -P -m hearthwire --settings-backup " + op
-    if (op !== "export")
-        return command
-    return typeof data === "string" && data.length <= MAX_DATA_HEX && HEX_PATTERN.test(data)
-        ? command + " --data " + data : ""
+    return "env HEARTHWIRE_RUN=" + run + " python3 -P -m hearthwire --settings-backup " + op + " --applet " + applet
 }
 
 function validStamp(value) {
@@ -350,4 +316,30 @@ function dropPair(plan, first, second, allowed) {
     delete plan.settings[second]
     plan.applied -= 2
     plan.dropped += 2
+}
+
+// What Replace would change in the chat addresses: [{id, from, to}] in site
+// order, Ollama last, each value capped by tools.shownText; [] when the plan
+// leaves them alone. A custom address map replaces the whole map, so a site
+// the backup has no address for goes back to its built-in one; both sides
+// are the address the site would really open. current holds the page's
+// chatCustomUrls and chatOllamaUrl. tools: {webSiteIds, parseCustomUrls,
+// effectiveUrl, shownText}.
+function addressChanges(current, plan, tools) {
+    var now = isObject(current) ? current : {}
+    var next = isObject(plan) && isObject(plan.settings) ? plan.settings : {}
+    var result = []
+    if (has(next, "chatCustomUrls")) {
+        var before = tools.parseCustomUrls(now.chatCustomUrls)
+        var after = tools.parseCustomUrls(next.chatCustomUrls)
+        tools.webSiteIds.forEach(function (id) {
+            var from = tools.effectiveUrl(id, before)
+            var to = tools.effectiveUrl(id, after)
+            if (from !== to)
+                result.push({id: id, from: tools.shownText(from), to: tools.shownText(to)})
+        })
+    }
+    if (has(next, "chatOllamaUrl") && next.chatOllamaUrl !== now.chatOllamaUrl)
+        result.push({id: OLLAMA_ID, from: tools.shownText(now.chatOllamaUrl), to: tools.shownText(next.chatOllamaUrl)})
+    return result
 }

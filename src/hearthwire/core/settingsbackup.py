@@ -9,9 +9,10 @@ One fixed file, no file dialog::
     {"format":"hearthwire-settings","version":1,"config_schema":3,
      "exported_at":"YYYY-MM-DDTHH:MM:SSZ","settings":{...}}
 
-``export`` gets the widget's settings as lowercase hex of a UTF-8 JSON object
-(so no quoting reaches argv) and ``import`` hands the checked settings back.
-Both run the same ``validate_settings``: only BACKUP_KEYS, each checked
+``export --applet N`` reads widget N's applied settings itself from Plasma's
+rc file (core/appletconfig.py), so nothing the user typed ever reaches argv
+(audit M1), and ``import`` hands the checked settings back. Both run the
+same ``validate_settings``: only BACKUP_KEYS, each checked
 strictly against what the widget itself would store; anything unknown or odd
 is dropped and counted. Sign-in, vault, zoom and history settings are never
 in a backup (EXCLUDED_KEYS). Replies hold codes, counts, the timestamp and,
@@ -32,6 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from .appletconfig import applied_settings
 from .catalog import CATALOG_BY_ID, PROVIDER_CATALOG, PROVIDER_IDS
 from .webdata import APP_DIR, PRIVATE_MODE, HelperError, _close, _descriptors, open_base, open_child_dir
 
@@ -42,15 +44,16 @@ CONFIG_SCHEMA = 3
 BACKUP_FILE = "settings-backup.json"
 FILE_MODE = 0o600
 MAX_FILE_BYTES = 64 * 1024
-MAX_DATA_HEX = 131072
 MAX_STRING_CHARS = 4096
 # chatCustomUrls holds up to seven addresses of 2048 characters each.
 MAX_CUSTOM_URLS_CHARS = 32768
 
 # Codes the plasmoid knows for --settings-backup; anything else is os-error.
+# applet-not-found and settings-unreadable are export's: the widget's rc entry
+# (core/appletconfig.py) is missing or ambiguous, or its rc file is unsafe to read.
 ERRORS = frozenset({
     "absent", "invalid", "unsupported", "too-large", "bad-data", "symlink", "not-owned", "unsafe-mode", "legacy-data",
-    "os-error",
+    "applet-not-found", "settings-unreadable", "os-error",
 })
 
 # Saved and restored. main.xml keys plus the round-4 panelRing and middleClickOpens.
@@ -102,7 +105,8 @@ _COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 _OLLAMA_ADDRESS = re.compile(r"http://(127\.0\.0\.1|localhost|\[::1\]):([1-9][0-9]{0,4})")
 _STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-_HEX = re.compile(r"(?:[0-9a-f]{2})+")
+# _write_file's temporary names: what a crashed export left behind.
+_TEMPORARY_NAME = re.compile(r"settings-backup\.json\.[0-9a-f]{16}\.tmp")
 
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -454,7 +458,7 @@ RULES: dict[str, Callable[[object], object]] = {
 def validate_settings(value: Mapping[str, object]) -> tuple[dict[str, object], int]:
     """(kept settings in BACKUP_KEYS order, number dropped).
 
-    The one check for export input and the import file. Unknown and excluded
+    The one check for the applied settings export read and for the import file. Unknown and excluded
     keys are dropped, and so is a known key with a value the widget would not
     store; both count in the number dropped.
     """
@@ -576,6 +580,17 @@ def _unlink(directory: int, name: str) -> None:
         pass
 
 
+def _clear_stale_temporaries(directory: int) -> None:
+    """Delete temporaries a crashed export left (audit I1); never follows a link."""
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if _TEMPORARY_NAME.fullmatch(name):
+            _unlink(directory, name)
+
+
 def _write_file(directory: int, data: bytes) -> None:
     """Replace the backup atomically: O_EXCL temporary (0600), fsync, rename, fsync dir."""
     temporary = f"{BACKUP_FILE}.{os.urandom(8).hex()}.tmp"
@@ -630,19 +645,6 @@ def parse_document(data: bytes) -> tuple[str, dict[str, object], int]:
     return document["exported_at"], settings, dropped
 
 
-def decode_data(value: object) -> dict[str, object]:
-    """The settings object export got as lowercase hex of UTF-8 JSON; else bad-data."""
-    if not isinstance(value, str) or len(value) > MAX_DATA_HEX or not _HEX.fullmatch(value):
-        raise HelperError("bad-data")
-    try:
-        parsed = strict_loads(bytes.fromhex(value).decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise HelperError("bad-data") from None
-    if not isinstance(parsed, dict):
-        raise HelperError("bad-data")
-    return parsed
-
-
 def encode_document(settings: dict[str, object], exported_at: str) -> bytes:
     document = {
         "format": FORMAT,
@@ -678,13 +680,19 @@ def status(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
 
 
 def export(
-    data: object,
+    applet: int,
     environ: Optional[Mapping[str, str]] = None,
     *,
     clock: Callable[[], float] = time.time,
 ) -> dict[str, object]:
-    """Check the widget's settings and replace the backup with them."""
-    settings, dropped = validate_settings(decode_data(data))
+    """Replace the backup with widget ``applet``'s applied settings, checked.
+
+    Only what Plasma has saved counts (press Apply first); a key the rc file
+    lacks has its main.xml default. Read only on the rc file.
+    """
+    if type(applet) is not int or applet < 1:
+        raise HelperError("applet-not-found")
+    settings, dropped = validate_settings(applied_settings(applet, BACKUP_KEYS, config_base(environ)))
     if not settings:
         raise HelperError("bad-data")  # Never replace a backup with nothing.
     encoded = encode_document(settings, time.strftime(_STAMP_FORMAT, time.gmtime(int(clock()))))
@@ -695,6 +703,7 @@ def export(
         if directory is None:
             raise HelperError("os-error")
         _check_target(directory)
+        _clear_stale_temporaries(directory)
         _write_file(directory, encoded)
     return {"ok": True, "saved": len(settings), "dropped": dropped}
 
@@ -708,15 +717,17 @@ def import_settings(environ: Optional[Mapping[str, str]] = None) -> dict[str, ob
 def run(
     operation: str,
     *,
-    data: Optional[str] = None,
+    applet: Optional[int] = None,
     environ: Optional[Mapping[str, str]] = None,
 ) -> dict[str, object]:
-    """CLI entry: a reply that never carries a path."""
+    """CLI entry: a reply that never carries a path. ``applet`` is export's (others ignore it)."""
     try:
         if operation == "status":
             return status(environ)
         if operation == "export":
-            return export(data, environ)
+            if applet is None:
+                raise ValueError("export needs an applet id.")
+            return export(applet, environ)
         if operation == "import":
             return import_settings(environ)
         raise ValueError("Unsupported settings backup operation.")

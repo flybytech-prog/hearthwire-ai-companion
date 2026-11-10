@@ -599,6 +599,14 @@ Argument rules (argparse exits 2 with a usage message on stderr otherwise):
   `--applet` and refuses `--generation`; `purge` takes none of them.
 - `N` and `G` are plain decimal integers from 0 to 2147483648 (at most 10
   digits; no sign, spaces, or underscores).
+- `--usage-history read|record|clear` need `--applet N` with N from 1 to
+  2147483648 (the widget's Plasma applet id); only `clear --all` takes no
+  `--applet`, and `--all` is refused anywhere else. `--settings-backup export`
+  needs `--applet N` (1 or more); `status` and `import` accept it and ignore
+  it. `--store`, `--generation` and `--keep` stay `--web-data` only.
+- `--data` is refused with every command (audit M1: settings must never be
+  in argv, which every local user can read through `/proc`). The refusal
+  names the option but never echoes its value.
 
 ### Replies and errors
 
@@ -854,10 +862,12 @@ to delete the history (`src/hearthwire/core/usagehistory.py`). No network, no
 credentials, no provider data other than percentages.
 
 - `$XDG_DATA_HOME` (when absolute, else `~/.local/share`)`/hearthwire/usage-history/`
-  (`0700`) holds `history.json` and `history.lock` (both `0600`). Every folder
-  is opened through `webdata.open_base` / `open_child_dir` (no symlinks,
-  owner checked).
-- `history.json` is `{"history_version":1,"series":[{"provider_id","metric_id","points":[[t,used],...]}]}`.
+  (`0700`) holds one `applet-<N>.json` per widget (`N` its Plasma applet id;
+  the on/off choice is per widget, audit L1) and one shared `history.lock`
+  (all `0600`). Every folder is opened through `webdata.open_base` /
+  `open_child_dir` (no symlinks, owner checked). The single shared
+  `history.json` of earlier builds is never read; every `clear` deletes it.
+- `applet-<N>.json` is `{"history_version":1,"series":[{"provider_id","metric_id","points":[[t,used],...]}]}`.
   `t` is the start of a UTC hour bucket (a multiple of 3600), `used` an
   integer percent used from 0 to 100. A corrupt, oversized (over 256 KiB),
   duplicate-key or wrong-version file counts as empty; series of pairs the
@@ -868,13 +878,20 @@ credentials, no provider data other than percentages.
   (the current bucket and the 168 before it, so at most 169 points per
   series), drops future points, keeps one value per bucket (the last wins)
   and writes nothing when the bytes would not change. Temporaries a crashed
-  writer left are deleted under the lock.
+  writer left (of any widget) are deleted under the lock.
+- `read` prunes too (audit L2): when the file holds points older than 7
+  days, future points or anything it cannot use, it takes the lock, reads
+  again, and rewrites the file exactly as `record` does, or deletes it when
+  nothing within 7 days is left. With nothing to prune it takes no lock and
+  creates nothing. When the lock stays held for 2 s the prune waits for a
+  later `read`; the reply is the same pruned series.
 
 | Command | Does | Success reply |
 | --- | --- | --- |
-| `--usage-history read` | The last 7 days; creates nothing (no folder, no lock file) | `{"ok":true,"history_version":1,"bucket_seconds":3600,"now":<int>,"series":[...]}` |
-| `--usage-history record --sample a.b=N,...` | Stores the sample in the current bucket, then replies as `read` | the same |
-| `--usage-history clear` | Deletes `usage-history/` and everything in it (nothing there is success) | `{"ok":true}` |
+| `--usage-history read --applet N` | Widget N's last 7 days (pruning the file as above) | `{"ok":true,"history_version":1,"bucket_seconds":3600,"now":<int>,"series":[...]}` |
+| `--usage-history record --applet N --sample a.b=N,...` | Stores the sample in widget N's current bucket, then replies as `read` | the same |
+| `--usage-history clear --applet N` | Deletes `applet-N.json`, the old shared `history.json` and stray temporaries; the folder too once only the lock is left in it (nothing there is success) | `{"ok":true}` |
+| `--usage-history clear --all` | Deletes `usage-history/` and everything in it (nothing there is success) | `{"ok":true}` |
 
 `series` entries are `{"provider_id","metric_id","points":[[t,used],...]}` in
 catalog order, points ascending, empty series left out. The sample is
@@ -882,21 +899,22 @@ comma-joined pairs, each a fullmatch of
 `[a-z_]{1,32}\.[a-z_]{1,32}=(100|[1-9]?[0-9])`, at most 64, none twice, each
 a catalog (provider, supported metric) pair other than `extra_usage`;
 anything else is `bad-sample` and writes nothing. `--sample` is required with
-`record` and refused otherwise, and `--usage-history` stands alone; otherwise
+`record` and refused otherwise, `--applet N` (1 to 2147483648) is required
+except with `clear --all`, and `--usage-history` stands alone; otherwise
 argparse exits 2.
 
 Errors (`{"ok":false,"error":"<code>"}`, exit 0): `bad-sample`, `symlink` (a
-folder or file of ours is a symlink), `not-directory`, `not-owned`, `busy`,
-`legacy-data` (`record` only: the previous version's data still waits for the
-installer), `os-error` (anything else). Replies never carry a path or text.
-`scripts/install.sh --uninstall-web-data` also runs `--usage-history clear`
-once the chat sign-in data is gone.
+folder or file of ours is a symlink), `not-directory`, `not-owned`, `busy`
+(`record`, `clear`; never `read`), `legacy-data` (`record` only: the previous
+version's data still waits for the installer), `os-error` (anything else).
+Replies never carry a path or text. `scripts/install.sh --uninstall-web-data`
+also runs `--usage-history clear --all` once the chat sign-in data is gone.
 
 ### How the plasmoid uses it
 
 `UsageHistory.historyCommand` builds
-`env HEARTHWIRE_RUN=<run> python3 -P -m hearthwire --usage-history <op>`, plus
-`--sample <checked sample>` for `record`; anything odd gives no command. Steps
+`env HEARTHWIRE_RUN=<run> python3 -P -m hearthwire --usage-history <op> --applet <Plasmoid.id>`,
+plus `--sample <checked sample>` for `record`; anything odd gives no command. Steps
 run one at a time from a queue, so a `clear` never overtakes a running
 `record`.
 
@@ -933,27 +951,61 @@ Saves the widget's settings to one fixed file and reads them back (plan D71;
 no file dialog; `src/hearthwire/core/settingsbackup.py`). The widget runs it
 from **Settings → General → Backup**. No network, no credentials.
 
+Export saves the **applied** settings: the helper reads them itself, read
+only, from Plasma's own config (`src/hearthwire/core/appletconfig.py`), so
+nothing the user typed is ever in argv (audit M1). Changes not yet applied
+are not in the backup.
+
+- `$XDG_CONFIG_HOME` (when absolute, else `~/.config`)`/plasma-org.kde.plasma.desktop-appletsrc`,
+  else (when that file is missing or has no such widget) `plasmawindowedrc`
+  next to it. Group `[Containments][C][Applets][N][Configuration][General]`
+  for any containment C; the widget's group `[Containments][C][Applets][N]`
+  must say `plugin=io.github.flybytechprog.hearthwire`. N names exactly one
+  widget in the file (Plasma reads the group name as a number, so `021` and
+  `21` are the same widget); two are `applet-not-found`, never a guess, and
+  the other file is not tried then.
+- The rc file is opened `O_RDONLY|O_NOFOLLOW|O_NONBLOCK` and never written; a
+  symlink, a non-regular file, another user's file or one over 4 MiB is
+  `settings-unreadable` (no fallback to the other file).
+- Lines are trimmed as KConfig trims them; `#` comments and lines without
+  `=` are skipped; the last line of a key wins. Values are decoded exactly as
+  `KConfigIniBackend::printableToString` does (`\s \t \n \r \\ \xHH`; `\;` and
+  `\,` stay as written; a bad `\x` gives `x`; any other escape keeps its
+  backslash). Keys with a suffix (`key[de]`, `key[$e]`, `key[$i]`) are
+  ignored, never trusted, and a malformed group header starts a group that
+  is not read.
+- A key that is not there takes its `main.xml` default from
+  `appletconfig.CONFIG_ENTRIES` (kept equal to `main.xml` by
+  `tests/test_applet_config_sync.py`). A value that is not UTF-8, or a Bool
+  or Int in a spelling KConfig never writes (Bool: `true on yes 1` /
+  `false off no 0`, any case; Int: an optional sign and up to 10 digits), is
+  dropped and counted like any other bad value.
+
 - `$XDG_CONFIG_HOME` (when absolute, else `~/.config`)`/hearthwire/settings-backup.json`.
   The folder is `0700` and made only by `export` (which also tightens a safe
   existing one to `0700`); the file is `0600`, written as an
   `O_EXCL|O_NOFOLLOW` temporary, fsynced and `os.replace`d with directory
-  descriptors. Export refuses to replace a symlink or someone else's file.
+  descriptors. Export refuses to replace a symlink or someone else's file,
+  and first deletes `settings-backup.json.<16 hex>.tmp` files a crashed
+  export left (audit I1; a symlink there is unlinked, never followed).
+  `scripts/install.sh --uninstall-web-data` keeps the backup (it holds no
+  sign-ins) and says so, with its path, when it exists (audit I2).
 - Format: `{"format":"hearthwire-settings","version":1,"config_schema":3,"exported_at":"YYYY-MM-DDTHH:MM:SSZ","settings":{...}}`,
   exactly these keys. Another `version` or `config_schema` is `unsupported`.
 
 | Command | Success reply |
 | --- | --- |
-| `--settings-backup status` | `{"ok":true,"exists":false}` or `{"ok":true,"exists":true,"exported_at":"..."}` |
-| `--settings-backup export --data <hex>` | `{"ok":true,"saved":N,"dropped":M}` |
-| `--settings-backup import` | `{"ok":true,"exported_at":"...","settings":{...},"dropped":M}` |
+| `--settings-backup status [--applet N]` | `{"ok":true,"exists":false}` or `{"ok":true,"exists":true,"exported_at":"..."}` |
+| `--settings-backup export --applet N` | `{"ok":true,"saved":N,"dropped":M}` |
+| `--settings-backup import [--applet N]` | `{"ok":true,"exported_at":"...","settings":{...},"dropped":M}` |
 
-`<hex>` is lowercase hex of a UTF-8 JSON object of settings (even length, at
-most 131072 characters). `--data` is required with `export` and refused
-otherwise; `--settings-backup` stands alone. `status` and `import` create
-nothing and check the whole file the same way.
+`--applet N` (1 to 2147483648, the widget's Plasma applet id) is required
+with `export`; `status` and `import` accept it and ignore it. `--data` is
+refused everywhere; `--settings-backup` stands alone. `status` and `import`
+create nothing and check the whole file the same way.
 
-One check (`validate_settings`) runs on the export input and on the import
-file. JSON with NaN, Infinity, overflowing numbers or duplicate keys is
+One check (`validate_settings`) runs on the applied settings export reads
+(every `BACKUP_KEYS` key, defaults included) and on the import file. JSON with NaN, Infinity, overflowing numbers or duplicate keys is
 refused. Only `BACKUP_KEYS` are kept, in that order; unknown keys,
 `EXCLUDED_KEYS` (`chatSignInStorage`, `chatProfileGeneration`,
 `chatAutoLockMinutes`, `chatVaultUnlock`, `chatSiteZoom`,
@@ -995,31 +1047,33 @@ U+007F. An address the widget accepted with U+0085 or another C1 character
 therefore drops the whole `chatCustomUrls` key on export.
 
 JSON settings are stored re-serialized as `JSON.stringify` writes them, in
-catalog order. An export that keeps nothing is `bad-data` (an existing
-backup is never replaced with an empty one).
+catalog order. `dropped` on export counts the backup keys whose applied
+value failed; excluded keys are never read. An export that keeps nothing is
+`bad-data` (an existing backup is never replaced with an empty one).
 
 Errors (`{"ok":false,"error":"<code>"}`, exit 0): `absent` (no backup;
 `import` only), `invalid` (not a backup file), `unsupported` (another
 version or schema), `too-large` (file over 64 KiB, or an export that would
-be), `bad-data` (export input), `symlink`, `not-owned`, `unsafe-mode` (the
-folder or file is group- or other-writable), `legacy-data` (`export` only: the
-previous version's data still waits for the installer), `os-error`. Replies
-never carry a path.
+be), `bad-data` (export: no applied setting passed), `symlink`, `not-owned`,
+`unsafe-mode` (the backup folder or file is group- or other-writable),
+`legacy-data` (`export` only: the previous version's data still waits for the
+installer), `applet-not-found` (`export` only: no rc file has exactly one
+widget of ours with that id), `settings-unreadable` (`export` only: an rc file
+is a symlink, not a regular file, not yours, or over 4 MiB), `os-error`.
+Replies never carry a path.
 
 ### How the plasmoid uses it
 
 `SettingsBackup.backupCommand` builds
-`env HEARTHWIRE_RUN=<run> python3 -P -m hearthwire --settings-backup <op>`,
-plus `--data <hex>` for `export`; anything odd gives no command. One step
-runs at a time.
+`env HEARTHWIRE_RUN=<run> python3 -P -m hearthwire --settings-backup <op> --applet <Plasmoid.id>`;
+anything odd gives no command. One step runs at a time.
 
 - `status` when the General page opens and after each export, for the
   "Last backup" line.
 - `export` on **Export**, and after an inline **Replace** confirmation when
   a backup exists (or its status isn't known to be `absent`).
-  `SettingsBackup.exportPayload` sends only `BACKUP_KEYS`, from the General
-  page's current `cfg_` values (so unapplied changes there count). Hex
-  longer than 130000 characters is not sent and shows `too-large`.
+  The helper saves the applied settings it reads itself; changes not yet
+  applied do not count, so the page asks for Apply first.
 - `import` on **Import**. `SettingsBackup.importPlan` checks every value
   again with the widget's own rules (the catalog, `ChatSites.siteIds`,
   `ChatSites.validateCustomUrl`, `OllamaChat.checkedAddress` and the ring

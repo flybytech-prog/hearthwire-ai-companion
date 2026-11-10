@@ -20,7 +20,8 @@
 class PlasmoidStub : public QObject
 {
     Q_OBJECT
-    Q_PROPERTY(int id READ id CONSTANT)
+    // 7 unless a test sets another; tst_main_wiring.qml puts it back in init().
+    Q_PROPERTY(int id MEMBER m_id NOTIFY idChanged)
     Q_PROPERTY(QObject *configuration READ configuration CONSTANT)
     Q_PROPERTY(QVariant icon MEMBER m_icon NOTIFY changed)
     Q_PROPERTY(bool busy MEMBER m_busy NOTIFY changed)
@@ -42,7 +43,6 @@ public:
         return shared;
     }
 
-    int id() const { return 7; }
     QObject *configuration() const { return m_configuration; }
     QQmlListProperty<QObject> contextualActions() { return QQmlListProperty<QObject>(this, &m_actions); }
 
@@ -84,6 +84,7 @@ public:
 
 Q_SIGNALS:
     void changed();
+    void idChanged();
     void activated();
 
 private:
@@ -104,6 +105,7 @@ private:
     }
 
     QQmlPropertyMap *m_configuration;
+    int m_id = 7;
     QVariant m_icon;
     bool m_busy = false;
     int m_formFactor = 0;

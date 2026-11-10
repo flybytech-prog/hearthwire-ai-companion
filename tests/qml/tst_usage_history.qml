@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest
+import "../../plasmoid/contents/ui/ChatStorage.js" as ChatStorage
 import "../../plasmoid/contents/ui/ProviderCatalog.js" as Catalog
 import "../../plasmoid/contents/ui/UsageHistory.js" as UsageHistory
 
@@ -88,30 +89,51 @@ TestCase {
         compare(UsageHistory.sampleArg(results, Catalog.providers), "claude.weekly=1")
     }
 
+    readonly property string helper: "env HEARTHWIRE_RUN=7 python3 -P -m hearthwire --usage-history "
+
+    // Every step names the widget: its history is its own.
     function test_commands() {
-        compare(UsageHistory.historyCommand("read", 7), "env HEARTHWIRE_RUN=7 python3 -P -m hearthwire --usage-history read")
-        compare(UsageHistory.historyCommand("clear", 0), "env HEARTHWIRE_RUN=0 python3 -P -m hearthwire --usage-history clear")
-        compare(UsageHistory.historyCommand("record", 7, "claude.weekly=4,codex.session=100"),
-                "env HEARTHWIRE_RUN=7 python3 -P -m hearthwire --usage-history record --sample claude.weekly=4,codex.session=100")
+        compare(UsageHistory.historyCommand("read", 7, 3), helper + "read --applet 3")
+        compare(UsageHistory.historyCommand("clear", 0, 3), "env HEARTHWIRE_RUN=0 python3 -P -m hearthwire --usage-history clear --applet 3")
+        compare(UsageHistory.historyCommand("record", 7, 3, "claude.weekly=4,codex.session=100"),
+                helper + "record --applet 3 --sample claude.weekly=4,codex.session=100")
+        compare(UsageHistory.historyCommand("read", 7, 2147483648), helper + "read --applet 2147483648")
+        compare(UsageHistory.historyCommand("read", 7, 3, "claude.weekly=4"), helper + "read --applet 3", "a sample only on record")
+    }
+
+    function test_appletBoundMatchesChatStorage() {
+        compare(UsageHistory.MAX_APPLET, ChatStorage.MAX_INT)
     }
 
     function test_commandsRefuseAnythingOdd() {
-        compare(UsageHistory.historyCommand("purge", 7), "")
-        compare(UsageHistory.historyCommand("read; rm", 7), "")
-        compare(UsageHistory.historyCommand("read", -1), "")
-        compare(UsageHistory.historyCommand("read", 1.5), "")
-        compare(UsageHistory.historyCommand("read", "7"), "")
-        compare(UsageHistory.historyCommand("read", undefined), "")
+        compare(UsageHistory.historyCommand("purge", 7, 3), "")
+        compare(UsageHistory.historyCommand("read; rm", 7, 3), "")
+        compare(UsageHistory.historyCommand("read", -1, 3), "")
+        compare(UsageHistory.historyCommand("read", 1.5, 3), "")
+        compare(UsageHistory.historyCommand("read", "7", 3), "")
+        compare(UsageHistory.historyCommand("read", undefined, 3), "")
         var odd = ["", undefined, 3, "claude.weekly=", "claude.weekly=101", "claude.weekly=04", "claude.weekly=-1",
                    "claude.weekly=4 --sample x", "claude.weekly=4;rm", "Claude.weekly=4", "claude.weekly=4,", ",claude.weekly=4",
-                   "$(id).weekly=4", "claude.weekly=4\ncodex.weekly=5"]
+                   "$(id).weekly=4", "claude.weekly=4\ncodex.weekly=5", "claude.weekly=4 --applet 9"]
         odd.forEach(function (sample) {
-            compare(UsageHistory.historyCommand("record", 7, sample), "", String(sample))
+            compare(UsageHistory.historyCommand("record", 7, 3, sample), "", String(sample))
         })
         var many = []
         for (var index = 0; index < 65; index++)
             many.push("claude.weekly=1")
-        compare(UsageHistory.historyCommand("record", 7, many.join(",")), "", "at most 64 pairs")
+        compare(UsageHistory.historyCommand("record", 7, 3, many.join(",")), "", "at most 64 pairs")
+    }
+
+    // A widget id like chatAppletId's, and never 0: no step runs without one.
+    function test_commandsRefuseAnOddApplet() {
+        var odd = [undefined, null, 0, -1, 1.5, "3", "3 --all", NaN, Infinity, 2147483649, [3], true]
+        UsageHistory.OPERATIONS.forEach(function (op) {
+            odd.forEach(function (applet) {
+                compare(UsageHistory.historyCommand(op, 7, applet, "claude.weekly=4"), "", op + " " + String(applet))
+            })
+        })
+        compare(UsageHistory.validApplet(1), true)
+        compare(UsageHistory.validApplet(0), false)
     }
 
     function test_recordDue() {

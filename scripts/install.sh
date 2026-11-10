@@ -169,10 +169,11 @@ if [ "$uninstall_web_data" = true ]; then
         echo "Could not run the Hearthwire helper. Nothing was deleted." >&2
         exit 1
     fi
-    # The opt-in usage history goes too, once the sign-in data is gone. The
-    # helper refuses symlinks and replies {"ok":true} also when there is none.
+    # The opt-in usage history of every widget goes too, once the sign-in data
+    # is gone. The helper refuses symlinks and replies {"ok":true} also when
+    # there is none.
     clear_usage_history() {
-        if ! history_reply=$(PYTHONPATH="$project_directory/src" PYTHONDONTWRITEBYTECODE=1 python3 -P -m hearthwire --usage-history clear </dev/null) \
+        if ! history_reply=$(PYTHONPATH="$project_directory/src" PYTHONDONTWRITEBYTECODE=1 python3 -P -m hearthwire --usage-history clear --all </dev/null) \
             || [ "$history_reply" != '{"ok":true}' ]; then
             echo "Deleted the Hearthwire chat sign-in data, but could not delete the usage history (the folder hearthwire/usage-history in ${XDG_DATA_HOME:-$HOME/.local/share}). Delete it by hand." >&2
             exit 1
@@ -187,11 +188,19 @@ if [ "$uninstall_web_data" = true ]; then
             "$icon_directory/hearthwire-settings-ai.svg" \
             "$icon_directory/hearthwire-settings-chat.svg"
     }
+    # The settings backup holds no sign-ins and is kept on purpose; say where.
+    report_kept_backup() {
+        backup_file="$config_home/hearthwire/settings-backup.json"
+        if [ -e "$backup_file" ] || [ -L "$backup_file" ]; then
+            echo "Kept: your settings backup ($backup_file). Delete it by hand if you don't want it."
+        fi
+    }
     case "$reply" in
         '{"ok":true,"removed":[]}')
             clear_usage_history
             remove_installed_files
             echo "No Hearthwire chat sign-in data found."
+            report_kept_backup
             ;;
         '{"ok":true,"removed":["'*'"]}')
             # Categories, in this order: vault, vault-keys, wallet-entry.
@@ -200,6 +209,7 @@ if [ "$uninstall_web_data" = true ]; then
             case "$reply" in *'"vault"'*) echo "Deleted: encrypted chat folder (saved chat sign-ins)." ;; esac
             case "$reply" in *'"vault-keys"'*) echo "Deleted: KDE Wallet unlock slot of the encrypted chat folder." ;; esac
             case "$reply" in *'"wallet-entry"'*) echo "Deleted: the encrypted chat folder's key in KDE Wallet." ;; esac
+            report_kept_backup
             ;;
         '{"ok":false,"error":"wallet-failed"}')
             echo "Deleted the Hearthwire chat files, but could not remove the encrypted chat folder's key from KDE Wallet (folder Hearthwire, entry encrypted-chat-folder). Remove it in KWalletManager." >&2
@@ -368,6 +378,7 @@ missing_required_packages() {
     missing=""
     for entry in \
         "QtQuick/Layouts:qt6-declarative" \
+        "QtQuick/Shapes:qt6-declarative" \
         "QtQuick/Dialogs:qt6-declarative" \
         "QtCore:qt6-declarative" \
         "org/kde/kirigami:kirigami" \

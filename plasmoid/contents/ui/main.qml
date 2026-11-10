@@ -273,7 +273,12 @@ PlasmoidItem {
     // History was turned off but the helper couldn't delete it.
     property bool historyClearFailed: false
     property int historyClearTries: 0
-    readonly property string historyNotice: root.historyClearFailed
+    // The history is this widget's own: without a usable id nothing runs.
+    readonly property bool historyAppletOk: UsageHistory.validApplet(Plasmoid.id)
+    readonly property string historyNotice: !root.historyAppletOk
+            && (root.usageHistoryEnabled || Plasmoid.configuration.usageHistoryClearOwed === true)
+        ? i18n("This widget couldn't be identified, so its usage history can't be used.")
+        : root.historyClearFailed
         ? i18n("The usage history couldn't be deleted. Use Delete usage history in Settings → General → Privacy.")
         : root.historyError === "legacy-data"
         ? i18n("Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.") : ""
@@ -400,6 +405,8 @@ PlasmoidItem {
     }
 
     function historyRequest(op, sample) {
+        if (!root.historyAppletOk)
+            return
         root.historyQueue = root.historyQueue.concat([{ op: op, sample: sample || "" }])
         Qt.callLater(root.historyNext)
     }
@@ -416,7 +423,7 @@ PlasmoidItem {
         root.historyOp = ""
         root.historySourceName = ""
         root.historyRun = ChatStorage.nextRun(root.historyRun)
-        var command = UsageHistory.historyCommand(job.op, root.historyRun, job.sample)
+        var command = UsageHistory.historyCommand(job.op, root.historyRun, Plasmoid.id, job.sample)
         if (command === "") {
             Qt.callLater(root.historyNext)
             return
@@ -482,6 +489,17 @@ PlasmoidItem {
             root.historyReadDone = true
             root.historyRequest("read")
         }
+    }
+
+    // The popup opens: read again, so lines deleted meanwhile (Settings →
+    // Delete usage history) go. Not before the first read, and never a
+    // second read while one is waiting or running.
+    function historyReread() {
+        if (!root.usageHistoryEnabled || !root.usageShown || !root.historyReadDone
+                || root.historyOp === "read"
+                || root.historyQueue.some(function (job) { return job.op === "read" }))
+            return
+        root.historyRequest("read")
     }
 
     // After a good snapshot: this run's ok readings, at most once per gap.
@@ -1491,6 +1509,7 @@ PlasmoidItem {
         if (root.expanded) {
             root.refresh()
             root.historyPayOwed()
+            root.historyReread()
             if (root.chatShown && root.chatStorageMode === "encrypted" && root.chatVaultState !== "")
                 root.chatEnqueue(["status"])
         }

@@ -1,7 +1,7 @@
 .pragma library
 
-// The opt-in usage history (Settings → General → Privacy): pure rules, no QML
-// state. main.qml and configGeneral.qml pass the catalog, the replies and the
+// The opt-in usage history (Settings → General → Privacy), one per widget:
+// pure rules, no QML state. main.qml and configGeneral.qml pass the catalog, the replies and the
 // clock in. The helper's reply is checked in full before any of it is used:
 // one odd field and the whole reply counts as no history.
 
@@ -11,6 +11,8 @@ var BUCKET_SECONDS = 3600
 // Seven days of hour buckets behind the current one.
 var KEEP_BUCKETS = 168
 var MAX_PAIRS = 64
+// The same bound as ChatStorage.MAX_INT and the helper's --applet.
+var MAX_APPLET = 2147483648
 // The helper's file limit (256 KiB) and room for the reply's other fields.
 var MAX_REPLY_CHARS = 262144 + 1024
 var OPERATIONS = ["read", "record", "clear"]
@@ -91,13 +93,19 @@ function validSample(sample) {
     return items.length <= MAX_PAIRS && items.every(function (item) { return SAMPLE_PATTERN.test(item) })
 }
 
+// A widget id the helper accepts: a whole number from 1 to ChatStorage.MAX_INT.
+function validApplet(value) {
+    return isInt(value) && value >= 1 && value <= MAX_APPLET
+}
+
 // The helper command, or "" for anything odd. Built only from the fixed
-// helper name, a known operation, a whole run number and a checked sample;
-// the run only makes the source name unique.
-function historyCommand(op, run, sample) {
-    if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0)
+// helper name, a known operation, a whole run number, a checked sample and
+// the widget's id, which picks this widget's own history; the run only makes
+// the source name unique.
+function historyCommand(op, run, applet, sample) {
+    if (OPERATIONS.indexOf(op) < 0 || !isInt(run) || run < 0 || !validApplet(applet))
         return ""
-    var command = "env HEARTHWIRE_RUN=" + run + " python3 -P -m hearthwire --usage-history " + op
+    var command = "env HEARTHWIRE_RUN=" + run + " python3 -P -m hearthwire --usage-history " + op + " --applet " + applet
     if (op !== "record")
         return command
     return validSample(sample) ? command + " --sample " + sample : ""

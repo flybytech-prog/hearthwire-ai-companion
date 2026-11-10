@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
 NOTIFYRC = ROOT / "assets" / "hearthwire.notifyrc"
 REQUIRED_QML = (
-    "QtQuick/Layouts", "QtQuick/Dialogs", "QtCore", "org/kde/kirigami", "org/kde/kcmutils",
+    "QtQuick/Layouts", "QtQuick/Shapes", "QtQuick/Dialogs", "QtCore", "org/kde/kirigami", "org/kde/kcmutils",
     "org/kde/plasma/plasma5support", "org/kde/plasma/components", "org/kde/plasma/extras",
     "org/kde/plasma/plasmoid",
 )
@@ -72,13 +72,14 @@ def _copied_project(tmp_path):
     return project
 
 
-def run_install(tmp_path, *, xdg_data_home=None, python_stub=PYTHON_STUB, cwd=None):
+def run_install(tmp_path, *, xdg_data_home=None, python_stub=PYTHON_STUB, cwd=None, skip_qml=()):
     project = _copied_project(tmp_path)
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     qml = tmp_path / "qml"
     for module in REQUIRED_QML + ("QtWebEngine",):
-        (qml / module).mkdir(parents=True, exist_ok=True)
+        if module not in skip_qml:
+            (qml / module).mkdir(parents=True, exist_ok=True)
     stubs = tmp_path / "stub-bin"
     stubs.mkdir(exist_ok=True)
     _stub(stubs, "python3", python_stub)
@@ -106,6 +107,15 @@ def test_notifyrc_declares_the_component_and_both_alert_events():
         "Event/usageLow": {"Name": "Plan running low", "Action": "Popup"},
         "Event/usageReset": {"Name": "Plan reset", "Action": "Popup"},
     }
+
+
+def test_a_missing_qtquick_shapes_module_stops_the_install(tmp_path):
+    """The panel usage ring needs QtQuick.Shapes (qml6-module-qtquick-shapes on Debian/Ubuntu)."""
+    completed, home = run_install(tmp_path, skip_qml=("QtQuick/Shapes",))
+    assert completed.returncode == 1
+    assert "Hearthwire needs these packages: qt6-declarative" in completed.stderr
+    assert "Required QML modules are missing" in completed.stderr
+    assert not (home / ".local").exists()
 
 
 def test_install_script_passes_sh_n():
@@ -259,7 +269,7 @@ HISTORY_CLEARED = '{"ok":true}'
 
 def run_uninstall(tmp_path, reply_text, history_reply=HISTORY_CLEARED, *, extra_env=None):
     """--uninstall-web-data with a python3 stub: ``reply_text`` answers --web-data purge,
-    ``history_reply`` answers --usage-history clear; every call is logged to tmp_path/helper-calls."""
+    ``history_reply`` answers --usage-history clear --all; every call is logged to tmp_path/helper-calls."""
     project = _copied_project(tmp_path)
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
@@ -271,7 +281,7 @@ def run_uninstall(tmp_path, reply_text, history_reply=HISTORY_CLEARED, *, extra_
         f"printf '%s\\n' \"$*\" >> '{log}'\n"
         'case "$*" in\n'
         f"    '-P -m hearthwire --web-data purge') printf '%s\\n' '{reply_text}' ;;\n"
-        f"    '-P -m hearthwire --usage-history clear') printf '%s\\n' '{history_reply}' ;;\n"
+        f"    '-P -m hearthwire --usage-history clear --all') printf '%s\\n' '{history_reply}' ;;\n"
         "    *) exit 97 ;;\n"
         "esac\n"
     ))
@@ -338,7 +348,8 @@ def test_uninstall_web_data_keeps_the_icons_when_nothing_was_deleted(tmp_path):
 def test_uninstall_web_data_clears_the_usage_history_after_the_purge(tmp_path, reply_text):
     completed = run_uninstall(tmp_path, reply_text)
     assert (completed.returncode, completed.stderr) == (0, "")
-    assert helper_calls(tmp_path) == ["-P -m hearthwire --web-data purge", "-P -m hearthwire --usage-history clear"]
+    assert helper_calls(tmp_path) == ["-P -m hearthwire --web-data purge",
+                                      "-P -m hearthwire --usage-history clear --all"]
 
 
 @pytest.mark.parametrize("reply_text", ['{"ok":false,"error":"not-locked"}', '{"ok":false,"error":"busy"}',
@@ -369,7 +380,8 @@ def test_uninstall_web_data_really_deletes_the_history_folder(tmp_path):
     data = tmp_path / "data"
     history = data / "hearthwire" / "usage-history"
     history.mkdir(parents=True)
-    (history / "history.json").write_text('{"history_version":1,"series":[]}')
+    for name in ("history.json", "applet-7.json", "applet-12.json"):
+        (history / name).write_text('{"history_version":1,"series":[]}')
     (history / "history.lock").write_text("")
     home.mkdir()
     stubs = tmp_path / "stub-bin"
@@ -387,6 +399,43 @@ def test_uninstall_web_data_really_deletes_the_history_folder(tmp_path):
     assert (completed.returncode, completed.stderr) == (0, "")
     assert not history.exists()
     assert (data / "hearthwire").is_dir()
+
+
+@pytest.mark.parametrize("reply_text", ['{"ok":true,"removed":[]}', '{"ok":true,"removed":["vault"]}'])
+def test_uninstall_web_data_says_the_settings_backup_is_kept_and_where(tmp_path, reply_text):
+    backup = tmp_path / "home" / ".config" / "hearthwire" / "settings-backup.json"
+    backup.parent.mkdir(parents=True)
+    backup.write_text("{}")
+    completed = run_uninstall(tmp_path, reply_text)
+    assert (completed.returncode, completed.stderr) == (0, "")
+    assert completed.stdout.splitlines()[-1] == \
+        f"Kept: your settings backup ({backup}). Delete it by hand if you don't want it."
+    assert backup.read_text() == "{}"
+
+
+def test_uninstall_web_data_names_the_backup_under_xdg_config_home(tmp_path):
+    config = tmp_path / "xdg-config"
+    backup = config / "hearthwire" / "settings-backup.json"
+    backup.parent.mkdir(parents=True)
+    backup.write_text("{}")
+    completed = run_uninstall(tmp_path, '{"ok":true,"removed":[]}', extra_env={"XDG_CONFIG_HOME": str(config)})
+    assert completed.returncode == 0
+    assert f"Kept: your settings backup ({backup})." in completed.stdout
+
+
+def test_uninstall_web_data_says_nothing_about_a_backup_that_is_not_there(tmp_path):
+    completed = run_uninstall(tmp_path, '{"ok":true,"removed":[]}')
+    assert completed.returncode == 0
+    assert "backup" not in completed.stdout
+
+
+def test_uninstall_web_data_says_nothing_about_the_backup_when_it_failed(tmp_path):
+    backup = tmp_path / "home" / ".config" / "hearthwire" / "settings-backup.json"
+    backup.parent.mkdir(parents=True)
+    backup.write_text("{}")
+    completed = run_uninstall(tmp_path, '{"ok":false,"error":"not-locked"}')
+    assert completed.returncode == 1
+    assert "Kept" not in completed.stdout + completed.stderr
 
 
 # >>> legacy-migration: the one-time move from Hearthside (plan R2) ---------------------------------

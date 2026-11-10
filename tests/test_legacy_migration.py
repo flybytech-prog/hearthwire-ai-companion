@@ -24,7 +24,7 @@ import pytest
 
 from hearthwire import cli
 from hearthwire.core import legacy, settingsbackup, usagehistory, vault, walletkey, webdata
-from test_settingsbackup import GOOD, hexed
+from test_settingsbackup import GOOD, write_rc
 from test_vault import Stubs
 
 SOURCE = Path(legacy.__file__)
@@ -1212,24 +1212,26 @@ def waiting(home):
 
 
 def test_recording_usage_refuses_while_old_data_waits(waiting):
-    assert usagehistory.run("record", sample="claude.session=5") == {"ok": False, "error": "legacy-data"}
+    assert usagehistory.run("record", applet=7, sample="claude.session=5") == {"ok": False, "error": "legacy-data"}
     assert not (waiting.data / NEW).exists()
 
 
 def test_exporting_settings_refuses_while_old_data_waits(waiting):
-    assert settingsbackup.run("export", data=hexed(GOOD)) == {"ok": False, "error": "legacy-data"}
+    write_rc(GOOD)
+    assert settingsbackup.run("export", applet=7) == {"ok": False, "error": "legacy-data"}
     assert not (waiting.config / NEW).exists()
 
 
 def test_reading_history_and_backup_status_still_work_while_old_data_waits(waiting):
-    assert usagehistory.run("read")["ok"] is True
+    assert usagehistory.run("read", applet=7)["ok"] is True
     assert settingsbackup.run("status")["ok"] is True
     assert not (waiting.data / NEW).exists() and not (waiting.config / NEW).exists()
 
 
 def test_both_writers_work_once_the_old_data_has_moved(home):
-    assert usagehistory.run("record", sample="claude.session=5")["ok"] is True
-    assert settingsbackup.run("export", data=hexed(GOOD))["ok"] is True
+    assert usagehistory.run("record", applet=7, sample="claude.session=5")["ok"] is True
+    write_rc(GOOD)
+    assert settingsbackup.run("export", applet=7)["ok"] is True
 
 
 # L5: only the wallet entry left never needs Plasma stopped.

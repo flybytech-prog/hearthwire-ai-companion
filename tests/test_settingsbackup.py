@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from hearthwire import cli
+from hearthwire.core import appletconfig
 from hearthwire.core import settingsbackup as backup
 from hearthwire.core.catalog import PROVIDER_CATALOG
 
@@ -69,18 +70,50 @@ def config(tmp_path, monkeypatch):
     return tmp_path / "config" / "hearthwire"
 
 
-def hexed(value):
-    text = value if isinstance(value, str) else json.dumps(value)
-    return text.encode("utf-8").hex()
+APPLET = 7
+DEFAULTS = {key: appletconfig.CONFIG_ENTRIES[key][1] for key in backup.BACKUP_KEYS}
 
 
-def run(operation, data=None, now=NOW):
+def kconfig_text(value):
+    """A value as KConfig writes it (KConfigIniBackend::stringToPrintable)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    text = (value.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r"))
+    if text.startswith(" "):
+        text = "\\s" + text[1:]
+    if text.endswith(" "):
+        text = text[:-1] + "\\s"
+    return text
+
+
+def write_rc(settings, *, applet=APPLET, name=appletconfig.APPLETSRC, raw_lines=()):
+    """Widget ``applet``'s applied ``settings`` in a fixture rc file under $XDG_CONFIG_HOME."""
+    base = Path(os.environ["XDG_CONFIG_HOME"])
+    base.mkdir(parents=True, exist_ok=True)
+    lines = [f"[Containments][1][Applets][{applet}]", f"plugin={appletconfig.PLUGIN}", "",
+             f"[Containments][1][Applets][{applet}][Configuration][General]"]
+    lines += [f"{key}={kconfig_text(value)}" for key, value in settings.items()]
+    lines += list(raw_lines)
+    path = base / name
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def run(operation, applet=APPLET, now=NOW):
     try:
         if operation == "export":
-            return backup.export(data, clock=lambda: now)
+            return backup.export(applet, clock=lambda: now)
         return backup.run(operation)
     except backup.HelperError as error:
         return {"ok": False, "error": error.code}
+
+
+def exported(settings, **kwargs):
+    write_rc(settings)
+    return run("export", **kwargs)
 
 
 def cli_reply(capsys, *argv):
@@ -375,8 +408,8 @@ def test_strict_loads_refuses(text):
 
 
 def test_export_writes_a_private_file_atomically(config):
-    assert run("export", hexed(dict(GOOD, chatSignInStorage="encrypted"))) == \
-        {"ok": True, "saved": len(GOOD), "dropped": 1}
+    assert exported(dict(GOOD, chatSignInStorage="encrypted", usageHistoryEnabled=True)) == \
+        {"ok": True, "saved": len(GOOD), "dropped": 0}
     assert stat.S_IMODE(config.stat().st_mode) == 0o700
     path = config / "settings-backup.json"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -387,67 +420,50 @@ def test_export_writes_a_private_file_atomically(config):
 
 
 def test_export_status_import_round_trip(config):
-    run("export", hexed(GOOD))
+    exported(GOOD)
     assert run("status") == {"ok": True, "exists": True, "exported_at": STAMP}
     assert run("import") == {"ok": True, "exported_at": STAMP, "settings": GOOD_KEPT, "dropped": 0}
     # Exporting what import gave keeps it unchanged.
     before = (config / "settings-backup.json").read_bytes()
-    run("export", hexed(GOOD_KEPT))
+    exported(GOOD_KEPT)
     assert (config / "settings-backup.json").read_bytes() == before
 
 
 def test_export_replaces_the_old_backup(config):
-    run("export", hexed(GOOD))
+    exported(GOOD)
     old = os.stat(config / "settings-backup.json").st_ino
-    assert run("export", hexed({"usageMode": "remaining"}), now=NOW + 60)["saved"] == 1
+    assert exported({"usageMode": "remaining"}, now=NOW + 60)["saved"] == len(backup.BACKUP_KEYS)
     assert os.stat(config / "settings-backup.json").st_ino != old
-    assert run("import")["settings"] == {"usageMode": "remaining"}
+    assert run("import")["settings"] == dict(DEFAULTS, usageMode="remaining")
     assert run("import")["exported_at"] == "2026-11-06T00:11:29Z"
 
 
 def test_export_tightens_a_safe_folder_to_0700(config):
     config.mkdir(parents=True)
     config.chmod(0o755)
-    assert run("export", hexed(GOOD))["ok"] is True
+    assert exported(GOOD)["ok"] is True
     assert stat.S_IMODE(config.stat().st_mode) == 0o700
-
-
-@pytest.mark.parametrize("data", [
-    "", "0", "zz", "7B7D", "7b7d0", " 7b7d", hexed("{}"), hexed("[]"), hexed('"x"'), hexed("null"),
-    hexed('{"usageMode":NaN}'), hexed('{"usageMode":"used","usageMode":"used"}'), "ff" * 4, hexed("{"),
-    hexed({"bogus": 1}), hexed({"usageMode": "nope"}), "7b" + "20" * 65535 + "7d",
-])
-def test_export_refuses_bad_data_and_writes_nothing(config, tmp_path, data):
-    assert run("export", data) == {"ok": False, "error": "bad-data"}
-    assert not (tmp_path / "config").exists()
-
-
-def test_export_data_may_be_exactly_131072_hex_characters(config):
-    text = json.dumps({"usageMode": "used"})
-    padded = text[:-1] + " " * (65536 - len(text)) + "}"
-    assert len(hexed(padded)) == 131072
-    assert run("export", hexed(padded))["ok"] is True
 
 
 def test_export_never_writes_a_file_import_would_refuse(config, monkeypatch):
     monkeypatch.setattr(backup, "MAX_FILE_BYTES", 200)
-    assert run("export", hexed(GOOD)) == {"ok": False, "error": "too-large"}
+    assert exported(GOOD) == {"ok": False, "error": "too-large"}
     assert not config.exists()
 
 
 def test_export_refuses_a_symlinked_folder_or_file(config, tmp_path):
+    write_rc(GOOD)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    (tmp_path / "config").mkdir()
     config.symlink_to(elsewhere)
-    assert run("export", hexed(GOOD)) == {"ok": False, "error": "symlink"}
+    assert run("export") == {"ok": False, "error": "symlink"}
     assert os.listdir(elsewhere) == []
     config.unlink()
     config.mkdir(mode=0o700)
     target = tmp_path / "precious"
     target.write_text("keep")
     (config / "settings-backup.json").symlink_to(target)
-    assert run("export", hexed(GOOD)) == {"ok": False, "error": "symlink"}
+    assert run("export") == {"ok": False, "error": "symlink"}
     assert target.read_text() == "keep"
 
 
@@ -456,21 +472,166 @@ def test_an_unsafe_folder_is_refused(config, mode):
     write_backup(config, document(), folder_mode=mode)
     for operation in ("status", "import"):
         assert run(operation) == {"ok": False, "error": "unsafe-mode"}
-    assert run("export", hexed(GOOD)) == {"ok": False, "error": "unsafe-mode"}
+    assert exported(GOOD) == {"ok": False, "error": "unsafe-mode"}
     assert stat.S_IMODE(config.stat().st_mode) == mode
 
 
 def test_a_failed_export_leaves_the_old_backup_and_no_temporary(config, monkeypatch):
-    run("export", hexed(GOOD))
+    exported(GOOD)
     before = (config / "settings-backup.json").read_bytes()
 
     def failing_fsync(descriptor):
         raise OSError(5, "I/O")
 
     monkeypatch.setattr(os, "fsync", failing_fsync)
-    assert run("export", hexed({"usageMode": "remaining"})) == {"ok": False, "error": "os-error"}
+    assert exported({"usageMode": "remaining"}) == {"ok": False, "error": "os-error"}
     assert (config / "settings-backup.json").read_bytes() == before
     assert os.listdir(config) == ["settings-backup.json"]
+
+
+# --- export reads the applied settings (audit M1) -------------------------------------------------
+
+
+def test_export_of_an_untouched_widget_saves_every_default(config):
+    assert exported({}) == {"ok": True, "saved": len(backup.BACKUP_KEYS), "dropped": 0}
+    assert run("import")["settings"] == DEFAULTS
+
+
+def test_export_reads_the_sanitized_fixture(config, tmp_path):
+    rc = tmp_path / "config" / appletconfig.APPLETSRC
+    rc.parent.mkdir()
+    rc.write_bytes((Path(__file__).parent / "fixtures" / "plasma-appletsrc").read_bytes())
+    assert run("export", applet=21) == {"ok": True, "saved": len(backup.BACKUP_KEYS), "dropped": 0}
+    assert run("import")["settings"] == dict(
+        DEFAULTS,
+        chatCustomUrls='{"claude":"https://claude.example.org/new?q=1;x","local":"http://localhost:8080/"}',
+        chatDefaultSite="local", chatSites='["claude","local","ollama"]', panelRing="codex.weekly",
+        refreshInterval=900, tooltipShowsUsage=False, usageWarnColor="#aa0000",
+    )
+    text = (config / "settings-backup.json").read_text()
+    for excluded in ("chatSignInStorage", "usageHistoryEnabled", "initialSetupComplete", "configSchemaVersion"):
+        assert excluded not in text
+
+
+def test_export_decodes_kconfig_escapes_before_checking(config):
+    write_rc({}, raw_lines=['chatCustomUrls={"claude":"https://claude.example.org\\x2fnew"}',
+                            "chatOllamaUrl=http://localhost:\\x311434"])
+    assert run("export")["dropped"] == 0
+    settings = run("import")["settings"]
+    assert settings["chatCustomUrls"] == '{"claude":"https://claude.example.org/new"}'
+    assert settings["chatOllamaUrl"] == "http://localhost:11434"  # The x31 escape is "1".
+
+
+def test_export_drops_and_counts_what_the_widget_would_not_store(config):
+    write_rc({"usageMode": "nope", "refreshInterval": 301, "panelRing": "claude.extra_usage"},
+             raw_lines=["usageCompact=maybe", "chatDefaultSite=\\xff", "alertLowPercent=0x10"])
+    reply = run("export")
+    assert reply == {"ok": True, "saved": len(backup.BACKUP_KEYS) - 6, "dropped": 6}
+    settings = run("import")["settings"]
+    for key in ("usageMode", "refreshInterval", "panelRing", "usageCompact", "chatDefaultSite", "alertLowPercent"):
+        assert key not in settings
+
+
+def test_export_with_nothing_valid_is_bad_data_and_writes_nothing(config, tmp_path):
+    write_rc({key: "nope" for key in backup.BACKUP_KEYS})
+    assert run("export") == {"ok": False, "error": "bad-data"}
+    assert not config.exists()
+
+
+def test_export_ignores_suffixed_keys(config):
+    write_rc({}, raw_lines=["usageMode[$e]=used", "usageMode[de]=used", "chatCustomUrls[$e]={}"])
+    assert run("export")["ok"] is True
+    settings = run("import")["settings"]
+    assert (settings["usageMode"], settings["chatCustomUrls"]) == ("remaining", "{}")
+
+
+def test_export_reads_only_its_own_widget(config):
+    write_rc({"usageMode": "used"}, applet=8)
+    assert run("export") == {"ok": False, "error": "applet-not-found"}
+    assert run("export", applet=8)["ok"] is True
+    assert run("import")["settings"]["usageMode"] == "used"
+
+
+@pytest.mark.parametrize("applet", [0, -1, True, "7", None])
+def test_export_refuses_an_odd_applet_id(config, applet):
+    write_rc(GOOD)
+    assert run("export", applet=applet) == {"ok": False, "error": "applet-not-found"}
+    assert not config.exists()
+
+
+def test_export_refuses_two_widgets_with_the_id(config):
+    path = write_rc(GOOD)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(f"[Containments][9][Applets][{APPLET}]\nplugin={appletconfig.PLUGIN}\n")
+    assert run("export") == {"ok": False, "error": "applet-not-found"}
+    assert not config.exists()
+
+
+def test_export_without_any_rc_file_is_applet_not_found(config, tmp_path):
+    assert run("export") == {"ok": False, "error": "applet-not-found"}
+    assert not (tmp_path / "config").exists()
+
+
+def test_export_falls_back_to_plasmawindowed(config):
+    write_rc({"usageMode": "used"}, name=appletconfig.WINDOWED_RC)
+    assert run("export")["ok"] is True
+    assert run("import")["settings"]["usageMode"] == "used"
+
+
+def test_export_refuses_a_symlinked_rc_file_and_writes_nothing(config, tmp_path):
+    real = write_rc(GOOD)
+    moved = tmp_path / "elsewhere-appletsrc"
+    real.rename(moved)
+    real.symlink_to(moved)
+    assert run("export") == {"ok": False, "error": "settings-unreadable"}
+    assert not config.exists()
+
+
+def test_export_never_changes_the_rc_file(config):
+    path = write_rc(GOOD)
+    before = (path.read_bytes(), os.stat(path).st_mtime_ns, os.stat(path).st_ino, stat.S_IMODE(os.stat(path).st_mode))
+    assert run("export")["ok"] is True
+    assert (path.read_bytes(), os.stat(path).st_mtime_ns, os.stat(path).st_ino,
+            stat.S_IMODE(os.stat(path).st_mode)) == before
+
+
+def test_export_removes_stale_temporaries_first(config, monkeypatch):
+    exported(GOOD)
+    stale = ["settings-backup.json.0123456789abcdef.tmp", "settings-backup.json.fedcba9876543210.tmp"]
+    for name in stale:
+        (config / name).write_text("half a backup")
+    keep = ["settings-backup.json.short.tmp", "other.json.0123456789abcdef.tmp", "notes"]
+    for name in keep:
+        (config / name).write_text("not ours")
+    removed_before_write = []
+    real_open = os.open
+
+    def watching_open(name, flags, *args, **kwargs):
+        if str(name).startswith("settings-backup.json.") and flags & os.O_CREAT:
+            removed_before_write.append(all(not (config / item).exists() for item in stale))
+        return real_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", watching_open)
+    assert exported(GOOD)["ok"] is True
+    assert removed_before_write == [True]
+    assert sorted(os.listdir(config)) == sorted(keep + ["settings-backup.json"])
+
+
+def test_a_stale_temporary_that_is_a_symlink_is_unlinked_not_followed(config, tmp_path):
+    exported(GOOD)
+    target = tmp_path / "precious"
+    target.write_text("keep")
+    (config / "settings-backup.json.0123456789abcdef.tmp").symlink_to(target)
+    assert exported(GOOD)["ok"] is True
+    assert target.read_text() == "keep"
+    assert os.listdir(config) == ["settings-backup.json"]
+
+
+def test_status_and_import_leave_stale_temporaries_alone(config):
+    exported(GOOD)
+    (config / "settings-backup.json.0123456789abcdef.tmp").write_text("x")
+    assert run("status")["ok"] is True and run("import")["ok"] is True
+    assert (config / "settings-backup.json.0123456789abcdef.tmp").exists()
 
 
 # --- status and import ----------------------------------------------------------------------------
@@ -595,18 +756,24 @@ def test_xdg_config_home_must_be_absolute(tmp_path, monkeypatch):
 
 def test_cli_round_trip(config, capsys):
     assert cli_reply(capsys, "--settings-backup", "status") == {"ok": True, "exists": False}
-    reply = cli_reply(capsys, "--settings-backup", "export", "--data", hexed(GOOD))
+    write_rc(GOOD)
+    reply = cli_reply(capsys, "--settings-backup", "export", "--applet", "7")
     assert reply == {"ok": True, "saved": len(GOOD), "dropped": 0}
     status = cli_reply(capsys, "--settings-backup", "status")
     assert status["exists"] is True and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", status["exported_at"])
     imported = cli_reply(capsys, "--settings-backup", "import")
     assert imported["settings"] == GOOD_KEPT and imported["dropped"] == 0
+    # The widget passes its id to every backup command; status and import ignore it.
+    assert cli_reply(capsys, "--settings-backup", "status", "--applet", "7") == status
+    assert cli_reply(capsys, "--settings-backup", "import", "--applet", "99") == imported
+    assert cli_reply(capsys, "--settings-backup", "export", "--applet", "99") == \
+        {"ok": False, "error": "applet-not-found"}
 
 
 def test_cli_replies_never_hold_a_path(config, capsys, tmp_path):
-    config.parent.mkdir(parents=True)
+    write_rc(GOOD)
     config.write_text("x")
-    for argv in (["status"], ["import"], ["export", "--data", hexed(GOOD)], ["export", "--data", "zz"]):
+    for argv in (["status"], ["import"], ["export", "--applet", "7"], ["export", "--applet", "8"]):
         assert cli.main(["--settings-backup", *argv]) == 0
         captured = capsys.readouterr()
         assert str(tmp_path) not in captured.out and captured.err == "" and "Traceback" not in captured.out
@@ -632,13 +799,37 @@ def test_cli_turns_any_surprise_into_os_error(config, capsys, monkeypatch):
     ["--settings-backup", "status", "--store", "encrypted"],
     ["--settings-backup", "status", "--prompts", "list"],
     ["--settings-backup", "status", "--read-dropped", "2f61"],
-    ["--settings-backup", "export", "--data", "7b7d", "--sample", "claude.session=1"],
+    ["--settings-backup", "export", "--applet", "7", "--sample", "claude.session=1"],
+    ["--settings-backup", "export", "--applet", "7", "--generation", "1"],
+    ["--settings-backup", "export", "--applet", "7", "--usage-history", "read"],
+    ["--settings-backup", "export", "--applet", "7", "--all"],
+    # Audit M1: --data is refused in every form, with or without --applet.
+    ["--settings-backup", "export", "--data", "7b7d"],
+    ["--settings-backup", "export", "--applet", "7", "--data", "7b7d"],
+    ["--settings-backup", "export", "--applet", "7", "--data="],
+    ["--settings-backup", "export", "--applet", "7", "--dat", "7b7d"],
+    ["--settings-backup", "export", "--applet", "0"],
+    ["--settings-backup", "export", "--applet", "-1"],
+    ["--settings-backup", "export", "--applet", "2147483649"],
+    ["--settings-backup", "export", "--applet", "x"],
+    ["--settings-backup", "status", "--applet", "0"],
 ])
 def test_cli_argument_rules_exit_2(config, capsys, argv):
     with pytest.raises(SystemExit) as raised:
         cli.main(argv)
     assert raised.value.code == 2
     assert capsys.readouterr().out == ""
+
+
+def test_a_refused_data_argument_is_never_echoed(config, capsys):
+    secret = '{"chatCustomUrls":"{\\"claude\\":\\"https://private.example.org/\\"}"}'.encode().hex()
+    for argv in (["--settings-backup", "export", "--applet", "7", "--data", secret], ["--data", secret]):
+        with pytest.raises(SystemExit) as raised:
+            cli.main(argv)
+        assert raised.value.code == 2
+        captured = capsys.readouterr()
+        assert captured.out == "" and secret not in captured.err and "--data" in captured.err
+    assert not config.exists()
 
 
 # --- the module -----------------------------------------------------------------------------------
@@ -653,7 +844,8 @@ def test_the_module_imports_only_the_standard_library_and_no_network():
         elif isinstance(node, ast.ImportFrom) and not node.level:
             imported.add((node.module or "").split(".")[0])
         elif isinstance(node, ast.ImportFrom):
-            assert node.module in ("catalog", "webdata", "legacy"), node.module  # legacy: only legacy-data
+            # legacy: only legacy-data; appletconfig: the applied settings.
+            assert node.module in ("appletconfig", "catalog", "webdata", "legacy"), node.module
     assert imported <= {"__future__", "collections", "datetime", "errno", "json", "math", "os", "pathlib", "re",
                         "stat", "time", "typing"}, imported
     for banned in ("socket", "http", "urllib", "ssl", "subprocess"):

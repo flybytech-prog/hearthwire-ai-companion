@@ -5,6 +5,7 @@ import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasmoid
 import org.kde.plasma.plasma5support as Plasma5Support
 import org.kde.notification
+import "../../plasmoid/contents/ui/ChatSites.js" as ChatSites
 import "../../plasmoid/contents/ui/ProviderCatalog.js" as Catalog
 
 // The real main.qml with a stubbed Plasmoid: its colors, levels and tooltip,
@@ -53,6 +54,12 @@ TestCase {
 
     function i18nc(context, text) {
         return i18n.apply(null, Array.prototype.slice.call(arguments, 1))
+    }
+
+    // The stub's applet id is shared by every test; one that changes it
+    // can't leak into the next.
+    function init() {
+        Plasmoid.id = 7
     }
 
     function load(file, settings) {
@@ -717,6 +724,7 @@ TestCase {
     }
 
     // Every command the owner's sources were asked to run; none ever starts.
+    // Each one names this widget and carries no settings.
     function historyCommands(owner) {
         wait(0)
         var found = []
@@ -726,7 +734,18 @@ TestCase {
                     found.push(command)
             })
         })
+        found.forEach(namesTheWidget)
         return found
+    }
+
+    // The fixed helper, the operation, then this widget's id as the only
+    // --applet (a record's sample after it), and no --data.
+    function namesTheWidget(command) {
+        var pattern = new RegExp("^env HEARTHWIRE_RUN=[0-9]+ python3 -P -m hearthwire --(usage-history|settings-backup) "
+                                 + "[a-z]+ --applet " + Plasmoid.id + "( --sample [a-z_.=0-9,]+)?$")
+        verify(pattern.test(command), command)
+        compare(command.split("--applet").length, 2, "one --applet: " + command)
+        verify(command.indexOf("--data") < 0, "no --data: " + command)
     }
 
     function ops(commands) {
@@ -1041,6 +1060,10 @@ TestCase {
         compare(label.textFormat, Text.PlainText)
         verify(label.text.indexOf("usage-history") >= 0, "where")
         verify(label.text.indexOf("percent used") >= 0, "what")
+        verify(label.text.indexOf("Each widget keeps its own history.") >= 0, "per widget")
+        verify(label.text.indexOf("saved at most every 15 minutes, keeping one value per hour") >= 0, "how often")
+        verify(label.text.indexOf("once per hour") < 0, "not the old wording")
+        verify(label.text.indexOf("Turning it off and applying deletes this widget's history") >= 0, "what off deletes")
     }
 
     function pressDelete(page) {
@@ -1077,12 +1100,12 @@ TestCase {
         compare(text, "Couldn't delete the usage history. Try again in a moment.")
     }
 
-    function test_settingsDeleteLegacyData() {
+    // A clear never meets legacy data (only a write does): no own text.
+    function test_settingsDeleteLegacyDataIsAFailure() {
         var page = generalPage()
         pressDelete(page)
         answer(page, JSON.stringify({ok: false, error: "legacy-data"}))
-        compare(generalPart(page, "usageHistoryStatus").text,
-                "Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
+        compare(generalPart(page, "usageHistoryStatus").text, "Couldn't delete the usage history. Try again in a moment.")
     }
 
     // --- History turned off: the clear is owed until the helper confirms it --
@@ -1345,7 +1368,9 @@ TestCase {
 
     function backupCommands(page) {
         wait(0)
-        return everyCommand(page).filter(function (command) { return command.indexOf("--settings-backup") >= 0 })
+        var found = everyCommand(page).filter(function (command) { return command.indexOf("--settings-backup") >= 0 })
+        found.forEach(namesTheWidget)
+        return found
     }
 
     function backupOps(page) {
@@ -1399,11 +1424,13 @@ TestCase {
         answerBackup(page, JSON.stringify({ok: true, exported_at: backupStamp, settings: settings, dropped: dropped || 0}))
     }
 
-    function exportedSettings(page) {
+    // The last export, which must be the fixed command and nothing more.
+    function lastExport(page) {
         var commands = backupCommands(page).filter(function (command) { return command.indexOf(" export ") >= 0 })
         verify(commands.length > 0, "an export ran")
-        var hex = commands[commands.length - 1].split("--data ")[1]
-        return JSON.parse(decodeURIComponent(hex.replace(/../g, "%$&")))
+        var command = commands[commands.length - 1]
+        verify(/^env HEARTHWIRE_RUN=[0-9]+ python3 -P -m hearthwire --settings-backup export --applet 7$/.test(command), command)
+        return command
     }
 
     function test_backupStatusAbsent() {
@@ -1458,17 +1485,30 @@ TestCase {
         compare(backupOps(page), ["status"])
     }
 
-    function test_backupExportSendsOnlyBackupKeys() {
+    // M1: the helper reads the applied settings itself; the page's values,
+    // custom addresses included, never go on the command line.
+    function test_backupExportSendsNoSettings() {
         var page = backupPage()
         page.cfg_usageHistoryEnabled = true
         page.cfg_chatSignInStorage = "encrypted"
+        page.cfg_chatCustomUrls = JSON.stringify({claude: "https://private.example.org/secret-path"})
+        page.cfg_chatOllamaUrl = "http://127.0.0.1:12345"
         generalPart(page, "backupExport").clicked()
-        var sent = exportedSettings(page)
-        compare(Object.keys(sent).length, 28)
-        compare(sent.usageHistoryEnabled, undefined)
-        compare(sent.chatSignInStorage, undefined)
-        compare(sent.panelRing, "auto")
-        compare(sent.middleClickOpens, "refresh")
+        lastExport(page)
+        everyCommand(page).forEach(function (command) {
+            verify(command.indexOf("private.example.org") < 0 && command.indexOf("12345") < 0
+                   && command.indexOf("7072697661746") < 0, command)
+        })
+        compare(page.backupSettings, undefined, "nothing gathers the page's values for an export")
+    }
+
+    function test_backupExportSaysApplied() {
+        var page = backupPage({ok: true, exists: true, exported_at: backupStamp})
+        verify(generalPart(page, "backupExplanation").text.indexOf("Export saves the applied settings: press Apply first") >= 0)
+        verify(generalPart(page, "backupExplanation").text.indexOf("not yet applied on any page are not exported") >= 0)
+        generalPart(page, "backupExport").clicked()
+        compare(generalPart(page, "backupExportConfirm").text,
+                "Replace the existing backup with the applied settings? Changes not yet applied are not exported.")
     }
 
     function test_backupExportResultAndNewStatus() {
@@ -1543,9 +1583,10 @@ TestCase {
         compare(Object.keys(goodBackup).length, 28, "the fixture is complete")
         // The page shows what it took over.
         compare(generalPart(page, "middleClickChoice").currentValue, "mscopilot")
+        // Out again is the helper's part (it reads the applied settings).
         generalPart(page, "backupExport").clicked()
         generalPart(page, "backupExportConfirm").actions[0].trigger()
-        compare(exportedSettings(page), goodBackup, "and out again")
+        lastExport(page)
     }
 
     function test_backupKeysAllHaveAcfgProperty() {
@@ -1611,7 +1652,9 @@ TestCase {
             ["not-owned", "The backup file isn't safe to use, so it was left alone. Check the owner and permissions of its folder."],
             ["unsafe-mode", "The backup file isn't safe to use, so it was left alone. Check the owner and permissions of its folder."],
             ["legacy-data", "Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma."],
-            ["os-error", "Something went wrong with the backup. Nothing was changed."]
+            ["os-error", "Something went wrong with the backup. Nothing was changed."],
+            ["applet-not-found", "This widget's applied settings weren't found. Press Apply, then try again. Nothing was changed."],
+            ["settings-unreadable", "Plasma's settings file for this widget couldn't be read safely, so nothing was exported. Check the owner and type of ~/.config/plasma-org.kde.plasma.desktop-appletsrc."]
         ]
         cases.forEach(function (entry) {
             checkBackupError(JSON.stringify({ok: false, error: entry[0]}), 0, entry[1])
@@ -1623,11 +1666,186 @@ TestCase {
         checkBackupError(JSON.stringify({ok: false, error: "/home/soul secret"}), 0, "Something went wrong with the backup. Nothing was changed.")
     }
 
-    function test_backupTooLongExportRunsNothing() {
-        var page = backupPage()
-        page.cfg_chatOllamaUrl = new Array(70000).join("x")
+    // --- Audit fixes: the widget's id on every step -------------------------
+
+    readonly property string noAppletHistory: "This widget couldn't be identified, so its usage history can't be used."
+    readonly property string noAppletBackup: "This widget couldn't be identified, so the backup can't be used. Nothing was changed."
+    readonly property string emptyRead: JSON.stringify({ok: true, history_version: 1, bucket_seconds: 3600,
+                                                        now: nowSeconds(), series: []})
+
+    // L1: each history step is this widget's, whatever its id is.
+    function test_historyStepsNameTheWidget() {
+        Plasmoid.id = 42
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([]))
+        Plasmoid.configuration.usageHistoryEnabled = false
+        answer(main, clearOk)
+        var commands = historyCommands(main)
+        compare(ops(commands), ["read", "record", "clear"])
+        verify(/^env HEARTHWIRE_RUN=[0-9]+ python3 -P -m hearthwire --usage-history read --applet 42$/.test(commands[0]), commands[0])
+        verify(/^env HEARTHWIRE_RUN=[0-9]+ python3 -P -m hearthwire --usage-history record --applet 42 --sample [a-z_.=0-9,]+$/.test(commands[1]), commands[1])
+        verify(/^env HEARTHWIRE_RUN=[0-9]+ python3 -P -m hearthwire --usage-history clear --applet 42$/.test(commands[2]), commands[2])
+    }
+
+    function test_historyWithoutAWidgetIdRunsNothing() {
+        Plasmoid.id = 0
+        var main = loadMain({usageHistoryEnabled: true})
+        goodSnapshot(main, okClaude())
+        main.expanded = true
+        wait(20)
+        compare(historyCommands(main), [])
+        compare(main.historyQueue, [], "nothing waits for an id either")
+        compare(main.historyNotice, noAppletHistory)
+        Plasmoid.configuration.usageHistoryEnabled = false
+        wait(20)
+        compare(historyCommands(main), [], "not even the clear")
+        compare(Plasmoid.configuration.usageHistoryClearOwed, true, "still owed")
+        compare(main.historyNotice, noAppletHistory, "and said")
+    }
+
+    function test_historyOwedClearWithoutAWidgetIdRunsNothing() {
+        Plasmoid.id = -1
+        var main = loadMain({usageHistoryClearOwed: true})
+        main.expanded = true
+        wait(20)
+        compare(historyCommands(main), [])
+        compare(main.historyNotice, noAppletHistory)
+    }
+
+    function test_historyNoNoticeWithoutAWidgetIdWhileOff() {
+        Plasmoid.id = 0
+        var main = loadMain({})
+        compare(main.historyNotice, "", "history isn't used, nothing to say")
+    }
+
+    // The popup opens: history is read again, one read at a time.
+    function test_historyRereadWhenThePopupOpens() {
+        var main = loadMain({usageHistoryEnabled: true})
+        answer(main, historyReply([]))
+        answer(main, historyReply([]))
+        compare(ops(historyCommands(main)), ["read", "record"])
+        main.expanded = true
+        compare(ops(historyCommands(main)), ["read", "record", "read"])
+        main.expanded = false
+        main.expanded = true
+        compare(ops(historyCommands(main)), ["read", "record", "read"], "one is running")
+        compare(main.historyQueue.length, 0, "and none waits behind it")
+        answer(main, historyReply([]))
+        main.expanded = false
+        main.expanded = true
+        compare(ops(historyCommands(main)), ["read", "record", "read", "read"])
+    }
+
+    function test_historyNoRereadBeforeTheFirstRead() {
+        var main = loadMain({usageHistoryEnabled: true})
+        compare(ops(historyCommands(main)), ["read"])
+        main.expanded = true
+        wait(20)
+        compare(ops(historyCommands(main)), ["read"])
+        compare(main.historyQueue.map(function (job) { return job.op }), ["record"], "no second read waits")
+    }
+
+    function test_historyNoRereadWhileOff() {
+        var main = loadMain({})
+        main.expanded = true
+        wait(20)
+        compare(historyCommands(main), [])
+        var hidden = loadMain({usageHistoryEnabled: true, showUsageTab: false})
+        hidden.expanded = true
+        wait(20)
+        compare(historyCommands(hidden), [], "nor without the Usage tab")
+    }
+
+    // Settings → Delete usage history, then the popup opens: the old lines go.
+    function test_historyDeleteThenOpenDropsStaleLines() {
+        var shown = sparklineMain({})
+        var sparks = []
+        tryVerify(function () {
+            sparks = allNamed(shown.full, "usageSparkline").filter(function (item) { return item.visible })
+            return sparks.length === 1
+        }, 5000, "a line before the delete")
+        var page = generalPage()
+        pressDelete(page)
+        verify(/ --usage-history clear --applet 7$/.test(historyCommands(page)[0]), "this widget's history")
+        answer(page, clearOk)
+        shown.main.expanded = true
+        answer(shown.main, emptyRead)
+        compare(shown.main.historyPoints("claude", "weekly"), [])
+        tryCompare(sparks[0], "visible", false)
+    }
+
+    function test_settingsWithoutAWidgetIdRunsNothing() {
+        Plasmoid.id = 0
+        var page = load(testCase.generalPageFile, {})
+        wait(0)
+        compare(backupCommands(page), [])
+        compare(generalPart(page, "backupStatus").text, noAppletBackup)
         generalPart(page, "backupExport").clicked()
-        compare(backupOps(page), ["status"])
-        compare(generalPart(page, "backupMessage").text, "The settings are too large to back up.")
+        generalPart(page, "backupExportConfirm").actions[0].trigger()
+        compare(generalPart(page, "backupMessage").text, noAppletBackup)
+        generalPart(page, "backupImport").clicked()
+        compare(backupCommands(page), [])
+        compare(page.confirmingImport, false)
+        var button = generalPart(page, "usageHistoryDelete")
+        button.clicked()
+        compare(historyCommands(page), [])
+        compare(generalPart(page, "usageHistoryStatus").text,
+                "This widget couldn't be identified, so its usage history can't be deleted.")
+        compare(button.enabled, true, "not left busy")
+    }
+
+    // I3: Replace lists each chat address it would change, old → new.
+    function test_backupImportListsAddressChanges() {
+        var page = backupPage()
+        page.cfg_chatCustomUrls = JSON.stringify({claude: "https://old.example.org/"})
+        page.cfg_chatOllamaUrl = "http://127.0.0.1:11434"
+        importing(page, {chatCustomUrls: JSON.stringify({chatgpt: "https://new.example.org/"}),
+                         chatOllamaUrl: "http://[::1]:11434", popupSize: "large"})
+        var label = generalPart(page, "backupAddressChanges")
+        compare(label.visible, true)
+        compare(label.textFormat, Text.PlainText)
+        compare(label.text, ["This changes 3 chat addresses:",
+                             "Claude: https://old.example.org/ → " + ChatSites.homeUrl("claude", {}),
+                             "ChatGPT: " + ChatSites.homeUrl("chatgpt", {}) + " → https://new.example.org/",
+                             "Ollama: http://127.0.0.1:11434 → http://[::1]:11434"].join("\n"))
+        generalPart(page, "backupImportConfirm").actions[1].trigger()
+        compare(label.visible, false, "Cancel")
+        compare(page.backupAddressChanges, [])
+        compare(page.cfg_chatCustomUrls, JSON.stringify({claude: "https://old.example.org/"}), "nothing applied")
+    }
+
+    function test_backupImportWithoutAddressChangesListsNone() {
+        var page = backupPage()
+        importing(page, {popupSize: "large", chatOllamaUrl: page.cfg_chatOllamaUrl})
+        compare(page.confirmingImport, true)
+        compare(generalPart(page, "backupAddressChanges").visible, false)
+    }
+
+    function test_backupAddressChangesGoAfterReplace() {
+        var page = backupPage()
+        importing(page, {chatOllamaUrl: "http://[::1]:11434"})
+        compare(generalPart(page, "backupAddressChanges").text,
+                "This changes 1 chat address:\nOllama: " + page.cfg_chatOllamaUrl + " → http://[::1]:11434")
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        compare(page.cfg_chatOllamaUrl, "http://[::1]:11434")
+        compare(generalPart(page, "backupAddressChanges").visible, false)
+    }
+
+    // Each value capped; past the first eight a count. The text never links.
+    function test_backupAddressChangesCappedAndCounted() {
+        var page = backupPage()
+        var long = "https://" + new Array(1500).join("a") + ".example.org/"
+        page.cfg_chatCustomUrls = JSON.stringify({claude: long})
+        importing(page, {chatCustomUrls: "{}"})
+        var line = generalPart(page, "backupAddressChanges").text.split("\n")[1]
+        verify(line.length < 500, "capped: " + line.length)
+        verify(line.indexOf("\u2026 → ") > 0, line)
+        var many = []
+        for (var index = 0; index < 11; index++)
+            many.push({id: "claude", from: "https://a.example.org/", to: "https://b.example.org/<a href=x>"})
+        var lines = page.addressChangeText(many).split("\n")
+        compare(lines.length, 10)
+        compare(lines[0], "This changes 11 chat addresses:")
+        compare(lines[9], "…and 3 more.")
     }
 }

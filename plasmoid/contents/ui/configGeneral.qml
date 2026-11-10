@@ -283,11 +283,16 @@ KCM.SimpleKCM {
     property string historyClearName: ""
     property int historyClearRun: 0
 
+    // This widget's history only; nothing runs without a usable id.
     function clearHistory() {
         if (page.historyClearState === "busy")
             return
         page.historyClearRun = ChatStorage.nextRun(page.historyClearRun)
-        var command = UsageHistory.historyCommand("clear", page.historyClearRun)
+        var command = UsageHistory.historyCommand("clear", page.historyClearRun, Plasmoid.id)
+        if (command === "") {
+            page.historyClearState = "no-applet"
+            return
+        }
         page.historyClearState = "busy"
         page.historyClearName = command
         historyClearSource.connectSource(command)
@@ -300,8 +305,8 @@ KCM.SimpleKCM {
             return ""
         case "ok":
             return i18n("Usage history deleted.")
-        case "legacy-data":
-            return i18n("Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
+        case "no-applet":
+            return i18n("This widget couldn't be identified, so its usage history can't be deleted.")
         default:
             return i18n("Couldn't delete the usage history. Try again in a moment.")
         }
@@ -322,47 +327,20 @@ KCM.SimpleKCM {
     property bool confirmingImport: false
     // What Replace would apply (SettingsBackup.importPlan), until then.
     property var backupPlan: null
+    // The chat addresses it would change (SettingsBackup.addressChanges).
+    property var backupAddressChanges: []
 
-    function backupSettings() {
-        return {
-            trackedProviders: page.cfg_trackedProviders,
-            providerMetrics: page.cfg_providerMetrics,
-            providerOrder: page.cfg_providerOrder,
-            usageMode: page.cfg_usageMode,
-            refreshInterval: page.cfg_refreshInterval,
-            tooltipShowsUsage: page.cfg_tooltipShowsUsage,
-            tooltipMetrics: page.cfg_tooltipMetrics,
-            usageCompact: page.cfg_usageCompact,
-            usageWarnPercent: page.cfg_usageWarnPercent,
-            usageCriticalPercent: page.cfg_usageCriticalPercent,
-            usageNormalColor: page.cfg_usageNormalColor,
-            usageWarnColor: page.cfg_usageWarnColor,
-            usageCriticalColor: page.cfg_usageCriticalColor,
-            alertLowEnabled: page.cfg_alertLowEnabled,
-            alertResetEnabled: page.cfg_alertResetEnabled,
-            alertLowPercent: page.cfg_alertLowPercent,
-            chatSites: page.cfg_chatSites,
-            chatDefaultSite: page.cfg_chatDefaultSite,
-            chatOllamaUrl: page.cfg_chatOllamaUrl,
-            chatKeepOpen: page.cfg_chatKeepOpen,
-            showUsageTab: page.cfg_showUsageTab,
-            showChatTab: page.cfg_showChatTab,
-            popupDefaultTab: page.cfg_popupDefaultTab,
-            popupSize: page.cfg_popupSize,
-            shortcutOpens: page.cfg_shortcutOpens,
-            panelRing: page.cfg_panelRing,
-            middleClickOpens: page.cfg_middleClickOpens,
-            chatCustomUrls: page.cfg_chatCustomUrls
-        }
-    }
-
-    function runBackup(op, data) {
+    // Every step names this widget; nothing runs without a usable id.
+    function runBackup(op) {
         if (page.backupOp !== "")
             return
         page.backupRun = ChatStorage.nextRun(page.backupRun)
-        var command = SettingsBackup.backupCommand(op, page.backupRun, data)
+        var command = SettingsBackup.backupCommand(op, page.backupRun, Plasmoid.id)
         if (command === "") {
-            page.backupMessage = "too-large"
+            if (op === "status")
+                page.backupState = "no-applet"
+            else
+                page.backupMessage = "no-applet"
             return
         }
         page.backupOp = op
@@ -379,16 +357,18 @@ KCM.SimpleKCM {
             page.confirmingExport = true
     }
 
+    // The helper saves this widget's applied settings; nothing of this
+    // page goes with the command.
     function exportBackup() {
         page.confirmingExport = false
-        // Empty when too long for one argument: runBackup reports it.
-        page.runBackup("export", SettingsBackup.exportPayload(page.backupSettings()))
+        page.runBackup("export")
     }
 
     function requestImport() {
         page.backupMessage = ""
         page.confirmingImport = false
         page.backupPlan = null
+        page.backupAddressChanges = []
         page.runBackup("import")
     }
 
@@ -423,8 +403,33 @@ KCM.SimpleKCM {
             return
         }
         page.backupPlan = plan
+        page.backupAddressChanges = SettingsBackup.addressChanges(
+            {chatCustomUrls: page.cfg_chatCustomUrls, chatOllamaUrl: page.cfg_chatOllamaUrl}, plan, {
+                webSiteIds: ChatSites.siteIds(),
+                parseCustomUrls: ChatSites.parseCustomUrls,
+                effectiveUrl: ChatSites.homeUrl,
+                shownText: UsageLogic.shownText
+            })
         page.backupExportedAt = reply.exportedAt
         page.confirmingImport = true
+    }
+
+    // The address changes as plain lines, "name: old → new", the first
+    // SettingsBackup.MAX_SHOWN_CHANGES of them and a count of the rest.
+    function addressChangeText(changes) {
+        var list = Array.isArray(changes) ? changes : []
+        if (list.length === 0)
+            return ""
+        var lines = [i18np("This changes %1 chat address:", "This changes %1 chat addresses:", list.length)]
+        list.slice(0, SettingsBackup.MAX_SHOWN_CHANGES).forEach(function (change) {
+            var site = change.id === SettingsBackup.OLLAMA_ID ? null : ChatSites.byId(change.id)
+            var name = site ? site.name : i18n("Ollama")
+            lines.push(i18nc("a chat address: site, old address, new address", "%1: %2 → %3",
+                             name, change.from, change.to))
+        })
+        if (list.length > SettingsBackup.MAX_SHOWN_CHANGES)
+            lines.push(i18np("…and %1 more.", "…and %1 more.", list.length - SettingsBackup.MAX_SHOWN_CHANGES))
+        return lines.join("\n")
     }
 
     // Replace: sets the settings pages' values; Apply saves them. Only keys
@@ -433,6 +438,7 @@ KCM.SimpleKCM {
         var plan = page.backupPlan
         page.confirmingImport = false
         page.backupPlan = null
+        page.backupAddressChanges = []
         if (!plan)
             return
         var values = plan.settings
@@ -506,6 +512,12 @@ KCM.SimpleKCM {
             return i18n("The backup file isn't safe to use, so it was left alone. Check the owner and permissions of its folder.")
         case "legacy-data":
             return i18n("Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
+        case "applet-not-found":
+            return i18n("This widget's applied settings weren't found. Press Apply, then try again. Nothing was changed.")
+        case "settings-unreadable":
+            return i18n("Plasma's settings file for this widget couldn't be read safely, so nothing was exported. Check the owner and type of ~/.config/plasma-org.kde.plasma.desktop-appletsrc.")
+        case "no-applet":
+            return i18n("This widget couldn't be identified, so the backup can't be used. Nothing was changed.")
         default:
             return i18n("Something went wrong with the backup. Nothing was changed.")
         }
@@ -848,7 +860,7 @@ KCM.SimpleKCM {
             wrapMode: Text.WordWrap
             textFormat: Text.PlainText
             opacity: 0.72
-            text: i18n("Off by default. When on, the percent used of each reading is saved once per hour for 7 days, only on this computer, in the hearthwire/usage-history folder of your data folder (usually ~/.local/share). No names, plans, amounts or accounts are saved. Turning it off and applying deletes it.")
+            text: i18n("Off by default. When on, the percent used of each reading is kept for 7 days, only on this computer, in the hearthwire/usage-history folder of your data folder (usually ~/.local/share). Each widget keeps its own history. It is saved at most every 15 minutes, keeping one value per hour. No names, plans, amounts or accounts are saved. Turning it off and applying deletes this widget's history; Delete usage history deletes it at once.")
         }
         RowLayout {
             spacing: Kirigami.Units.smallSpacing
@@ -1169,7 +1181,7 @@ KCM.SimpleKCM {
             wrapMode: Text.WordWrap
             textFormat: Text.PlainText
             opacity: 0.72
-            text: i18n("One file on this computer, in the hearthwire folder of your configuration folder (usually ~/.config). It holds these settings, including your custom chat addresses. Sign-ins, the encrypted folder, zoom and the usage history setting are not part of it.")
+            text: i18n("One file on this computer, in the hearthwire folder of your configuration folder (usually ~/.config). It holds these settings, including your custom chat addresses. Sign-ins, the encrypted folder, zoom and the usage history setting are not part of it. Export saves the applied settings: press Apply first, because changes not yet applied on any page are not exported.")
         }
         RowLayout {
             spacing: Kirigami.Units.smallSpacing
@@ -1201,7 +1213,7 @@ KCM.SimpleKCM {
             Layout.fillWidth: true
             visible: page.confirmingExport
             type: Kirigami.MessageType.Warning
-            text: i18n("Replace the existing backup with the settings shown now?")
+            text: i18n("Replace the existing backup with the applied settings? Changes not yet applied are not exported.")
             actions: [
                 Kirigami.Action {
                     text: i18n("Replace")
@@ -1234,6 +1246,7 @@ KCM.SimpleKCM {
                     onTriggered: {
                         page.confirmingImport = false
                         page.backupPlan = null
+                        page.backupAddressChanges = []
                     }
                 }
             ]
@@ -1247,6 +1260,16 @@ KCM.SimpleKCM {
             textFormat: Text.PlainText
             text: i18n("Settings to apply: %1. Saved: %2.",
                 page.backupPlan ? page.backupPlan.applied : 0, SettingsBackup.shownStamp(page.backupExportedAt))
+        }
+
+        // Plain text only: an address is shown, never opened.
+        QQC2.Label {
+            objectName: "backupAddressChanges"
+            Layout.fillWidth: true
+            visible: page.confirmingImport && text !== ""
+            wrapMode: Text.Wrap
+            textFormat: Text.PlainText
+            text: page.addressChangeText(page.backupAddressChanges)
         }
 
         QQC2.Label {

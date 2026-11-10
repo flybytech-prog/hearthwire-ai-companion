@@ -1,6 +1,7 @@
 import QtQuick
 import QtTest
 import "../../plasmoid/contents/ui/ChatSites.js" as ChatSites
+import "../../plasmoid/contents/ui/ChatStorage.js" as ChatStorage
 import "../../plasmoid/contents/ui/OllamaChat.js" as OllamaChat
 import "../../plasmoid/contents/ui/ProviderCatalog.js" as Catalog
 import "../../plasmoid/contents/ui/SettingsBackup.js" as SettingsBackup
@@ -56,10 +57,6 @@ TestCase {
         return SettingsBackup.importPlan(settings, dropped === undefined ? 0 : dropped, tools())
     }
 
-    function decodeHex(hex) {
-        return decodeURIComponent(hex.replace(/../g, "%$&"))
-    }
-
     function reply(op, object) {
         return SettingsBackup.parseReply(op, 0, JSON.stringify(object))
     }
@@ -84,44 +81,47 @@ TestCase {
         verify(SettingsBackup.EXCLUDED_KEYS.indexOf("usageHistoryEnabled") >= 0)
     }
 
-    function test_exportPayloadOnlyBackupKeys() {
-        var settings = Object.assign({}, good, {usageHistoryEnabled: true, chatSignInStorage: "encrypted", other: 1})
-        compare(JSON.parse(decodeHex(SettingsBackup.exportPayload(settings))), good)
-    }
+    readonly property string helper: "env HEARTHWIRE_RUN=7 python3 -P -m hearthwire --settings-backup "
 
-    function test_exportPayloadUtf8AndLowercaseHex() {
-        var hex = SettingsBackup.exportPayload({popupSize: "é€😀"})
-        verify(/^[0-9a-f]+$/.test(hex), hex)
-        compare(hex, "7b22706f70757053697a65223a22c3a9e282acf09f9880227d")
-        compare(JSON.parse(decodeHex(hex)), {popupSize: "é€😀"})
-    }
-
-    function test_exportPayloadRefusesOdd() {
-        compare(SettingsBackup.exportPayload(null), "")
-        compare(SettingsBackup.exportPayload([]), "")
-        compare(SettingsBackup.exportPayload({}), "", "nothing to send")
-        compare(SettingsBackup.exportPayload({other: 1}), "", "no backup key")
-        compare(SettingsBackup.exportPayload({popupSize: "\ud800"}), "", "lone surrogate")
-        compare(SettingsBackup.exportPayload({popupSize: new Array(70000).join("x")}), "", "over one argument's limit")
-    }
-
+    // Every step names the widget; export carries no settings at all.
     function test_commands() {
-        compare(SettingsBackup.backupCommand("status", 7), "env HEARTHWIRE_RUN=7 python3 -P -m hearthwire --settings-backup status")
-        compare(SettingsBackup.backupCommand("import", 0), "env HEARTHWIRE_RUN=0 python3 -P -m hearthwire --settings-backup import")
-        compare(SettingsBackup.backupCommand("export", 7, "7b7d"), "env HEARTHWIRE_RUN=7 python3 -P -m hearthwire --settings-backup export --data 7b7d")
+        compare(SettingsBackup.backupCommand("status", 7, 3), helper + "status --applet 3")
+        compare(SettingsBackup.backupCommand("import", 0, 3), "env HEARTHWIRE_RUN=0 python3 -P -m hearthwire --settings-backup import --applet 3")
+        compare(SettingsBackup.backupCommand("export", 7, 3), helper + "export --applet 3")
+        compare(SettingsBackup.backupCommand("export", 7, 2147483648), helper + "export --applet 2147483648")
+        compare(SettingsBackup.backupCommand("export", 7, 3, "7b7d"), helper + "export --applet 3", "a fourth argument is ignored")
+    }
+
+    function test_noDataArgument() {
+        compare(SettingsBackup.exportPayload, undefined, "nothing builds settings for the command line")
+        compare(SettingsBackup.MAX_DATA_HEX, undefined)
+        SettingsBackup.OPERATIONS.forEach(function (op) {
+            verify(SettingsBackup.backupCommand(op, 7, 3).indexOf("--data") < 0, op)
+        })
+    }
+
+    function test_appletBoundMatchesChatStorage() {
+        compare(SettingsBackup.MAX_APPLET, ChatStorage.MAX_INT)
     }
 
     function test_commandsRefuseAnythingOdd() {
-        compare(SettingsBackup.backupCommand("delete", 7), "")
-        compare(SettingsBackup.backupCommand("status; rm", 7), "")
-        compare(SettingsBackup.backupCommand("status", -1), "")
-        compare(SettingsBackup.backupCommand("status", 1.5), "")
-        compare(SettingsBackup.backupCommand("status", "7"), "")
-        var odd = [undefined, "", 3, "7B7D", "7b7", "7b7d; rm", "7b7d --data 7b", "zz"]
-        odd.forEach(function (data) {
-            compare(SettingsBackup.backupCommand("export", 7, data), "", String(data))
+        compare(SettingsBackup.backupCommand("delete", 7, 3), "")
+        compare(SettingsBackup.backupCommand("status; rm", 7, 3), "")
+        compare(SettingsBackup.backupCommand("status", -1, 3), "")
+        compare(SettingsBackup.backupCommand("status", 1.5, 3), "")
+        compare(SettingsBackup.backupCommand("status", "7", 3), "")
+    }
+
+    // A widget id like chatAppletId's, and never 0.
+    function test_commandsRefuseAnOddApplet() {
+        var odd = [undefined, null, 0, -1, 1.5, "3", "3 --data 7b7d", NaN, Infinity, 2147483649, [3], true]
+        SettingsBackup.OPERATIONS.forEach(function (op) {
+            odd.forEach(function (applet) {
+                compare(SettingsBackup.backupCommand(op, 7, applet), "", op + " " + String(applet))
+            })
         })
-        compare(SettingsBackup.backupCommand("export", 7, new Array(65002).join("ab")), "", "too long")
+        compare(SettingsBackup.validApplet(1), true)
+        compare(SettingsBackup.validApplet(0), false)
     }
 
     function test_shownStamp() {
@@ -143,7 +143,8 @@ TestCase {
             compare(reply("import", {ok: false, error: code}), {ok: false, error: code})
         })
         compare(SettingsBackup.ERRORS, ["absent", "invalid", "unsupported", "too-large", "bad-data", "symlink",
-                                        "not-owned", "unsafe-mode", "legacy-data", "os-error"])
+                                        "not-owned", "unsafe-mode", "legacy-data", "os-error", "applet-not-found",
+                                        "settings-unreadable"])
     }
 
     function test_rejectsBadReplies() {
@@ -307,5 +308,71 @@ TestCase {
     function test_planOddInput() {
         compare(SettingsBackup.importPlan(null, 0, tools()), {settings: {}, applied: 0, dropped: 0})
         compare(SettingsBackup.importPlan([], -1, tools()), {settings: {}, applied: 0, dropped: 0})
+    }
+
+    // --- what Replace would change in the chat addresses ------------------
+
+    function addressTools() {
+        return {
+            webSiteIds: ChatSites.siteIds(),
+            parseCustomUrls: ChatSites.parseCustomUrls,
+            effectiveUrl: ChatSites.homeUrl,
+            shownText: UsageLogic.shownText
+        }
+    }
+
+    function changes(current, settings) {
+        return SettingsBackup.addressChanges(current, plan(settings), addressTools())
+    }
+
+    readonly property var applied: ({chatCustomUrls: urls({claude: "https://old.example.org/"}),
+                                     chatOllamaUrl: "http://127.0.0.1:11434"})
+
+    function test_addressChangesListEveryChangedSite() {
+        var result = changes(applied, {
+            chatCustomUrls: urls({chatgpt: "https://new.example.org/", local: "http://localhost:8080/"}),
+            chatOllamaUrl: "http://[::1]:11434"
+        })
+        compare(result, [
+            {id: "claude", from: "https://old.example.org/", to: ChatSites.homeUrl("claude", {})},
+            {id: "chatgpt", from: ChatSites.homeUrl("chatgpt", {}), to: "https://new.example.org/"},
+            {id: "local", from: ChatSites.homeUrl("local", {}), to: "http://localhost:8080/"},
+            {id: "ollama", from: "http://127.0.0.1:11434", to: "http://[::1]:11434"}
+        ])
+    }
+
+    function test_addressChangesLeaveOutWhatStaysTheSame() {
+        compare(changes(applied, {chatCustomUrls: applied.chatCustomUrls, chatOllamaUrl: applied.chatOllamaUrl}), [])
+        compare(changes(applied, {popupSize: "large"}), [], "no address in the backup")
+        compare(changes(applied, {chatCustomUrls: urls({claude: "https://old.example.org/"}), popupSize: "large"}), [])
+    }
+
+    // A value the widget's check dropped is not applied, so not listed.
+    function test_addressChangesOnlyFromThePlan() {
+        compare(changes(applied, {chatOllamaUrl: "http://192.168.1.2:11434",
+                                  chatCustomUrls: urls({claude: "http://plain.example.org/"})}), [])
+    }
+
+    function test_addressChangesAreCapped() {
+        var long = "https://" + new Array(1500).join("a") + ".example.org/"
+        var result = changes({chatCustomUrls: urls({claude: long}), chatOllamaUrl: ""},
+                             {chatCustomUrls: "{}"})
+        compare(result.length, 1)
+        compare(result[0].from, UsageLogic.shownText(long))
+        compare(result[0].from.length, UsageLogic.MAX_SHOWN_CHARS)
+        verify(result[0].from.length < long.length, "capped")
+    }
+
+    function test_addressChangesOddInput() {
+        compare(SettingsBackup.addressChanges(null, null, addressTools()), [])
+        compare(SettingsBackup.addressChanges({}, {settings: []}, addressTools()), [])
+        // The page's own value unreadable: the sites' built-in addresses.
+        compare(changes({chatCustomUrls: "{", chatOllamaUrl: 3}, {chatCustomUrls: "{}"}), [])
+        compare(changes({}, {chatOllamaUrl: "http://[::1]:11434"}),
+                [{id: "ollama", from: "", to: "http://[::1]:11434"}])
+    }
+
+    function test_maxShownChanges() {
+        compare(SettingsBackup.MAX_SHOWN_CHANGES, 8)
     }
 }

@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import vault, walletkey
+from .appletconfig import read_rc
 from .settingsbackup import config_base
 from .usagehistory import HISTORY_DIR
 from .webdata import APP_DIR, PRIVATE_MODE, HelperError, _close, _descriptors, data_base, open_base, open_child_dir
@@ -458,38 +459,8 @@ def rewrite_applets(content: bytes, old: str, new: str) -> tuple[bytes, int, int
 
 
 def _read_applets(config: int) -> Optional[tuple[bytes, os.stat_result]]:
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-    try:
-        descriptor = os.open(APPLETSRC, flags, dir_fd=config)
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        raise HelperError("symlink" if error.errno == errno.ELOOP else "os-error") from None
-    try:
-        info = os.fstat(descriptor)
-        if stat.S_ISDIR(info.st_mode):
-            raise HelperError("not-directory")
-        if not stat.S_ISREG(info.st_mode):
-            raise HelperError("invalid")
-        if info.st_uid != os.getuid():
-            raise HelperError("not-owned")
-        if info.st_size > MAX_APPLETSRC:
-            raise HelperError("invalid")
-        chunks = []
-        size = 0
-        while size <= MAX_APPLETSRC:
-            chunk = os.read(descriptor, 1 << 20)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            size += len(chunk)
-        if size > MAX_APPLETSRC:
-            raise HelperError("invalid")
-        return b"".join(chunks), info
-    except OSError:
-        raise HelperError("os-error") from None
-    finally:
-        _close(descriptor)
+    """appletsrc's bytes and the fstat of the descriptor they were read from."""
+    return read_rc(config, APPLETSRC, MAX_APPLETSRC)
 
 
 def _write_new(parent: int, name: str, content: bytes, mode: int) -> None:
