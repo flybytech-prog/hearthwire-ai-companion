@@ -354,7 +354,7 @@ def test_every_recipe_installs_the_plasmoid_icons_and_events_system_wide():
 
 def test_the_packages_need_qt_quick_shapes_and_python_3_11():
     assert "'qt6-declarative'" in PKGBUILD.read_text(encoding="utf-8")
-    assert re.search(r"(?m)^Requires:\s+qt6-qtdeclarative$", SPEC.read_text(encoding="utf-8"))
+    assert re.search(r"(?m)^Requires:\s+qt6qml\(QtQuick\.Shapes\)$", SPEC.read_text(encoding="utf-8"))
     control = (DEBIAN / "control").read_text(encoding="utf-8")
     assert " qml6-module-qtquick-shapes," in control
     assert " python3 (>= 3.11)," in control
@@ -1341,3 +1341,88 @@ def test_proof_a_loose_verify_command_is_caught():
     assert verify_doc_problems(old, "1.0.0") == [
         "missing --signer-workflow flybytech-prog/hearthwire-ai-companion/.github/workflows/release.yml",
         "missing --source-ref refs/tags/v1.0.0"]
+
+
+
+# --- Fedora: QML dependencies by capability, and no rpmlint filters ---------------------------------
+
+# Optional at runtime: the Chat tab shows an install hint without it.
+OPTIONAL_QML = {"QtWebEngine"}
+
+
+def plasmoid_qml_imports():
+    found = set()
+    for path in (ROOT / "plasmoid" / "contents").rglob("*.qml"):
+        found |= set(re.findall(r"(?m)^\s*import ((?:Qt|org\.kde)[A-Za-z0-9.]*)", path.read_text(encoding="utf-8")))
+    return found
+
+
+def spec_qml_problems(spec, imports):
+    problems = []
+    requires = set(re.findall(r"(?m)^Requires:\s+qt6qml\(([^)]+)\)$", spec))
+    recommends = set(re.findall(r"(?m)^Recommends:\s+qt6qml\(([^)]+)\)$", spec))
+    for module in sorted(imports - OPTIONAL_QML - requires):
+        problems.append(f"QML module {module} is not required")
+    for module in sorted((imports & OPTIONAL_QML) - recommends):
+        problems.append(f"optional QML module {module} is not recommended")
+    for module in sorted((requires | recommends) - imports):
+        problems.append(f"qt6qml({module}) is not imported by the plasmoid")
+    # rpmlint's explicit-lib-dependency: never name a lib* package as a dependency.
+    for name in re.findall(r"(?m)^(?:Requires|Recommends):\s+(lib\S*)", spec):
+        problems.append(f"explicit lib dependency {name}")
+    return problems
+
+
+def test_the_spec_requires_every_imported_qml_module_by_capability():
+    imports = plasmoid_qml_imports()
+    assert {"QtQuick.Shapes", "org.kde.plasma.plasmoid", "QtWebEngine"} <= imports
+    assert spec_qml_problems(SPEC.read_text(encoding="utf-8"), imports) == []
+
+
+def test_proof_the_dry_run_spec_and_a_missing_module_are_caught():
+    imports = plasmoid_qml_imports()
+    spec = SPEC.read_text(encoding="utf-8")
+    old = spec.replace("Requires:       qt6qml(org.kde.plasma.plasmoid)\n", "Requires:       libplasma\n")
+    assert spec_qml_problems(old, imports) == [
+        "QML module org.kde.plasma.plasmoid is not required", "explicit lib dependency libplasma"]
+    assert spec_qml_problems(spec, imports | {"QtQuick.Particles"}) == ["QML module QtQuick.Particles is not required"]
+    no_web = spec.replace("Recommends:     qt6qml(QtWebEngine)\n", "")
+    assert spec_qml_problems(no_web, imports) == ["optional QML module QtWebEngine is not recommended"]
+
+
+# rpmlint findings that may be filtered, each with its reason. None: every
+# rpmlint error fails the Fedora build; warnings (such as the missing man page
+# for /usr/bin/hearthwire, whose documentation is --help) don't fail it.
+ALLOWED_RPMLINT_FILTERS = {}
+
+
+def rpmlint_problems(workflow, filter_files):
+    problems = []
+    for command in re.findall(r"rpmlint\b[^\n]*", workflow):
+        if re.search(r"\s(-r|--rpmlintrc|-i|--ignore-unused-rpmlintrc|-c|--checks|--config)\b", command):
+            problems.append(f"rpmlint runs with a filter or config: {command.strip()}")
+    for name, text in filter_files.items():
+        entries = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+        for entry in entries:
+            if entry not in ALLOWED_RPMLINT_FILTERS:
+                problems.append(f"{name}: filter not allowed: {entry}")
+    return problems
+
+
+def _rpmlint_filter_files():
+    return {str(path.relative_to(ROOT)): path.read_text(encoding="utf-8")
+            for path in PACKAGING.rglob("*") if path.is_file() and "rpmlint" in path.name}
+
+
+def test_rpmlint_runs_unfiltered_so_every_error_fails():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert len(re.findall(r"(?m)^\s+(?:run: )?rpmlint ", workflow)) == 2  # the spec and the built rpm
+    assert rpmlint_problems(workflow, _rpmlint_filter_files()) == []
+
+
+def test_proof_an_rpmlint_filter_is_caught():
+    filters = {"packaging/fedora/hearthwire.rpmlintrc": 'addFilter("explicit-lib-dependency")\n'}
+    assert rpmlint_problems("", filters) == [
+        'packaging/fedora/hearthwire.rpmlintrc: filter not allowed: addFilter("explicit-lib-dependency")']
+    assert rpmlint_problems("        run: rpmlint -r x.rpmlintrc /build/a.rpm\n", {}) == [
+        "rpmlint runs with a filter or config: rpmlint -r x.rpmlintrc /build/a.rpm"]

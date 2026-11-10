@@ -22,14 +22,29 @@ BuildRequires:  python3-setuptools
 
 Requires:       python3 >= 3.11
 Requires:       plasma-workspace >= 6.0
-Requires:       libplasma
-Requires:       plasma5support
-Requires:       kf6-kirigami
-Requires:       kf6-kcmutils
-Requires:       kf6-knotifications
-Requires:       qt6-qtdeclarative
-# The Chat tab (AI chat web sites).
-Recommends:     qt6-qtwebengine
+# The plasmoid is QML, so rpm cannot find what it needs by itself. These are
+# the QML modules it imports, by the qt6qml() names Fedora's packages provide
+# (libplasma, plasma5support, kf6-kirigami, kf6-kcmutils, kf6-knotifications
+# and qt6-qtdeclarative on Fedora 43 and 44). Naming libplasma itself is an
+# rpmlint error (explicit-lib-dependency).
+Requires:       qt6qml(org.kde.plasma.components)
+Requires:       qt6qml(org.kde.plasma.configuration)
+Requires:       qt6qml(org.kde.plasma.core)
+Requires:       qt6qml(org.kde.plasma.extras)
+Requires:       qt6qml(org.kde.plasma.plasmoid)
+Requires:       qt6qml(org.kde.plasma.plasma5support)
+Requires:       qt6qml(org.kde.kirigami)
+Requires:       qt6qml(org.kde.kcmutils)
+Requires:       qt6qml(org.kde.notification)
+Requires:       qt6qml(QtCore)
+Requires:       qt6qml(QtQuick)
+Requires:       qt6qml(QtQuick.Controls)
+Requires:       qt6qml(QtQuick.Dialogs)
+Requires:       qt6qml(QtQuick.Layouts)
+Requires:       qt6qml(QtQuick.Shapes)
+Requires:       qt6qml(QtQuick.Window)
+# The Chat tab (AI chat web sites): qt6-qtwebengine.
+Recommends:     qt6qml(QtWebEngine)
 # Stay signed in (encrypted chat sign-ins).
 Suggests:       gocryptfs
 Suggests:       fuse3
