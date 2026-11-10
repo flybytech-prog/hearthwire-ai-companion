@@ -29,7 +29,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install test dependencies
-        run: python -m pip install ".[test]"
+        # Hash-pinned; the helper itself is found through pytest's pythonpath = src.
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r .github/requirements-test.txt
 
       - name: Run tests
         run: QT_QPA_PLATFORM=offscreen python -m pytest

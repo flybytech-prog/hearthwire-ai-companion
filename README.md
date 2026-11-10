@@ -381,6 +381,18 @@ sudo apt install ./hearthwire_1.0.0-1_all.deb
 Then right-click the panel, choose **Add Widgets…**, search for
 **Hearthwire**, and add it. If it isn't listed yet, log out and in again.
 
+Each package also has a signed build provenance record, which says which
+workflow run built it from which commit. With the
+[GitHub CLI](https://cli.github.com) you can check it:
+
+```bash
+gh attestation verify ./hearthwire-1.0.0-1-any.pkg.tar.zst \
+  --repo flybytech-prog/hearthwire-ai-companion
+```
+
+Use the file name of the package you downloaded. The command prints the
+workflow and commit it was built from, and fails if the file was changed.
+
 A package installs the same files as the script below, but for all users:
 the widget in `/usr/share/plasma/plasmoids/io.github.flybytechprog.hearthwire`,
 the helper as a system Python package (the widget runs it as
@@ -432,6 +444,12 @@ Hearthwire's packages are built from the release tag by
 shows up under **Releases** on the repository page, marked Draft and visible
 only to maintainers, until a maintainer checks it and presses **Publish
 release**. Only then does the download link above lead to it.
+
+For maintainers: the workflow builds a draft only for a tag `vX.Y.Z` that
+matches `pyproject.toml` and whose commit is on `main`. Even so, anyone who
+can push a `v*` tag can start it, so a tag ruleset that limits who may create
+`v*` tags is recommended (**Settings → Rules → Rulesets → New tag ruleset**,
+target `v*`, restrict creations, updates and deletions to the maintainers).
 
 ## Install
 

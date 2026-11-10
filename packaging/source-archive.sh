@@ -20,15 +20,27 @@ commit=$(git -C "$repository" rev-parse --verify --quiet "$ref^{commit}") || {
     echo "Not a commit: $ref" >&2
     exit 1
 }
-# -P: the working folder is never on sys.path (no stray tomllib.py imported).
-version=$(git -C "$repository" show "$commit:pyproject.toml" \
-    | python3 -P -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"]["version"])')
+# The version check and pyproject.toml both come from the commit itself, not
+# from the working tree. -I: only the standard library, nothing from the
+# working folder or the environment.
+checker=$(mktemp)
+trap 'rm -f -- "$checker"' EXIT
+git -C "$repository" show "$commit:packaging/check-version.py" > "$checker"
+version=$(git -C "$repository" show "$commit:pyproject.toml" | python3 -I "$checker") || {
+    echo "pyproject.toml at $ref has no plain X.Y.Z version" >&2
+    exit 1
+}
+# The same rule again in sh: digits and exactly two dots, nothing else.
 case "$version" in
-    [0-9]*.[0-9]*.[0-9]*) ;;
-    *)
-        echo "Unexpected version in pyproject.toml: $version" >&2
+    *[!0-9.]* | .* | *. | *..* | "")
+        echo "pyproject.toml at $ref has no plain X.Y.Z version" >&2
         exit 1
         ;;
+esac
+case "$version" in
+    *.*.*.*) echo "pyproject.toml at $ref has no plain X.Y.Z version" >&2; exit 1 ;;
+    *.*.*) ;;
+    *) echo "pyproject.toml at $ref has no plain X.Y.Z version" >&2; exit 1 ;;
 esac
 
 mkdir -p -- "$output_directory"

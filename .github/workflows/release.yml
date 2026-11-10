@@ -1,15 +1,26 @@
 name: Release packages
 
 # A pushed v* tag builds, lints and install-tests the Arch, Fedora and Ubuntu
-# packages, then attaches them with SHA256SUMS to a draft GitHub Release for
-# the tag. The draft is visible only to people with write access, on the
-# repository's Releases page; the maintainer reviews and publishes it by hand.
-# Run by hand (workflow_dispatch) it is a dry run: the same builds and tests,
-# with the files kept as workflow artifacts and no release.
+# packages, then attaches them with SHA256SUMS and build provenance to a
+# draft GitHub Release for the tag. The draft is visible only to people with
+# write access, on the repository's Releases page; the maintainer reviews and
+# publishes it by hand. Run by hand (workflow_dispatch) it is a dry run: the
+# same builds and tests, with the files kept as workflow artifacts and no
+# release.
 #
-# Every package is built from one source tarball: `git archive` of the
-# commit that was pushed (packaging/source-archive.sh), never a working tree.
-# The packaging recipes are taken from that tarball too.
+# Trust flow:
+# - "source" checks out the commit and makes the source tarball with
+#   `git archive` (packaging/source-archive.sh) before any third-party code
+#   runs, and does nothing else. Its sha256 is a job output, which no other
+#   job can change.
+# - "tests" runs the suite with hash-pinned dependencies. It uploads nothing
+#   and has no outputs, so it cannot feed the tarball or a package.
+# - Every job that downloads an artifact asks for it by its exact name and
+#   checks it against the sha256 output of the job that made it.
+# - "release" checks out the tag again, rebuilds the tarball and compares the
+#   bytes before it creates the draft.
+# - A tag push is refused unless the tag is exactly "v" + pyproject.toml's
+#   X.Y.Z and its commit is on main.
 
 on:
   push:
@@ -25,44 +36,62 @@ concurrency:
 
 jobs:
   source:
-    name: Test and make the source tarball
+    name: Make the source tarball
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      sha256: ${{ steps.tarball.outputs.sha256 }}
     steps:
-      - name: Check out the commit
+      - name: Check out the commit with the history of main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Read the version
+      - name: Check the version and the tag
         id: version
         env:
           EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          version=$(python3 -P -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          case "$version" in
-            [0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::error::Unexpected version: $version"; exit 1 ;;
-          esac
-          if [ "$EVENT_NAME" = push ] && [ "$REF_NAME" != "v$version" ]; then
-            echo "::error::Tag $REF_NAME does not match pyproject.toml version $version (expected v$version)"
-            exit 1
+          # check-version.py prints the version only when it is exactly X.Y.Z
+          # and, for a tag push, the tag is exactly "v" + that version.
+          if [ "$EVENT_NAME" = push ]; then
+            [ "$REF_TYPE" = tag ] || { echo "::error::Only a tag push makes a release"; exit 1; }
+            version=$(python3 -I packaging/check-version.py --tag "$REF_NAME" < pyproject.toml)
+          else
+            version=$(python3 -I packaging/check-version.py < pyproject.toml)
           fi
+          case "$version" in
+            *[!0-9.]* | "") echo "::error::Unexpected version"; exit 1 ;;
+          esac
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Run the test suite
+      - name: Check that the tagged commit is on main
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet ".[test]"
-          QT_QPA_PLATFORM=offscreen "$RUNNER_TEMP/venv/bin/python" -m pytest
+          if [ "$EVENT_NAME" = push ]; then
+            git rev-parse --verify --quiet refs/remotes/origin/main > /dev/null \
+              || { echo "::error::origin/main was not fetched"; exit 1; }
+            git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main \
+              || { echo "::error::The tagged commit is not on main"; exit 1; }
+          fi
 
       - name: Make the source tarball
-        run: packaging/source-archive.sh "$GITHUB_SHA" "$RUNNER_TEMP/source"
+        id: tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          archive=$(packaging/source-archive.sh "$GITHUB_SHA" "$RUNNER_TEMP/source")
+          [ "$archive" = "$RUNNER_TEMP/source/hearthwire-$VERSION.tar.gz" ]
+          sha256=$(sha256sum "$archive" | cut -d ' ' -f 1)
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "$sha256  hearthwire-$VERSION.tar.gz"
 
       - name: Keep the source tarball
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -72,24 +101,55 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  tests:
+    name: Run the test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    # No outputs and no upload: nothing here reaches the tarball or a package.
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --require-hashes --only-binary=:all: \
+            -r .github/requirements-test.txt
+          QT_QPA_PLATFORM=offscreen "$RUNNER_TEMP/venv/bin/python" -m pytest
+
   # --- Arch Linux, CachyOS, Manjaro -------------------------------------------------------------
 
   arch-build:
     name: Build the Arch package
-    needs: source
+    needs: [source, tests]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Artifacts of this run need no token permission.
     permissions: {}
     container: archlinux:base-devel
+    outputs:
+      file: ${{ steps.package.outputs.file }}
+      sha256: ${{ steps.package.outputs.sha256 }}
     env:
       VERSION: ${{ needs.source.outputs.version }}
+      SOURCE_SHA256: ${{ needs.source.outputs.sha256 }}
     steps:
       - name: Get the source tarball
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: source
           path: /tmp/source
+
+      - name: Check the source tarball
+        run: |
+          case "$SOURCE_SHA256" in *[!0-9a-f]* | "") exit 1 ;; esac
+          [ "${#SOURCE_SHA256}" -eq 64 ]
+          [ "$(ls -A /tmp/source)" = "hearthwire-$VERSION.tar.gz" ]
+          printf '%s  %s\n' "$SOURCE_SHA256" "/tmp/source/hearthwire-$VERSION.tar.gz" | sha256sum --check --strict -
 
       - name: Install the build tools
         run: pacman -Syu --noconfirm --needed python python-build python-installer python-setuptools python-wheel namcap
@@ -111,11 +171,19 @@ jobs:
           namcap /build/PKGBUILD | tee /tmp/namcap.txt
           if grep -q ' E: ' /tmp/namcap.txt; then exit 1; fi
 
+      - name: Record the package and its sha256
+        id: package
+        run: |
+          set -- /build/hearthwire-"$VERSION"-*-any.pkg.tar.zst
+          [ "$#" -eq 1 ] && [ -f "$1" ]
+          echo "file=$(basename "$1")" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$1" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
       - name: Keep the package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: package-arch
-          path: /build/hearthwire-${{ needs.source.outputs.version }}-*-any.pkg.tar.zst
+          path: /build/${{ steps.package.outputs.file }}
           if-no-files-found: error
           retention-days: 7
 
@@ -129,6 +197,9 @@ jobs:
     container: archlinux:latest
     env:
       VERSION: ${{ needs.source.outputs.version }}
+      SOURCE_SHA256: ${{ needs.source.outputs.sha256 }}
+      PACKAGE_FILE: ${{ needs.arch-build.outputs.file }}
+      PACKAGE_SHA256: ${{ needs.arch-build.outputs.sha256 }}
     steps:
       - name: Get the source tarball
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -142,10 +213,22 @@ jobs:
           name: package-arch
           path: /tmp/package
 
+      - name: Check the downloads against the build outputs
+        run: |
+          for value in "$SOURCE_SHA256" "$PACKAGE_SHA256"; do
+            case "$value" in *[!0-9a-f]* | "") exit 1 ;; esac
+            [ "${#value}" -eq 64 ]
+          done
+          case "$PACKAGE_FILE" in */* | *[!A-Za-z0-9._+~-]* | "") exit 1 ;; esac
+          [ "$(ls -A /tmp/source)" = "hearthwire-$VERSION.tar.gz" ]
+          [ "$(ls -A /tmp/package)" = "$PACKAGE_FILE" ]
+          printf '%s  %s\n' "$SOURCE_SHA256" "/tmp/source/hearthwire-$VERSION.tar.gz" | sha256sum --check --strict -
+          printf '%s  %s\n' "$PACKAGE_SHA256" "/tmp/package/$PACKAGE_FILE" | sha256sum --check --strict -
+
       - name: Install the package
         run: |
           pacman -Syu --noconfirm
-          pacman -U --noconfirm /tmp/package/hearthwire-*.pkg.tar.zst
+          pacman -U --noconfirm "/tmp/package/$PACKAGE_FILE"
 
       - name: Check what landed
         run: |
@@ -160,27 +243,38 @@ jobs:
       - name: Lint the package (namcap)
         run: |
           pacman -S --noconfirm --needed namcap
-          namcap /tmp/package/hearthwire-*.pkg.tar.zst | tee /tmp/namcap.txt
+          namcap "/tmp/package/$PACKAGE_FILE" | tee /tmp/namcap.txt
           if grep -q ' E: ' /tmp/namcap.txt; then exit 1; fi
 
   # --- Fedora KDE ---------------------------------------------------------------------------------
 
   fedora-build:
     name: Build the Fedora package
-    needs: source
+    needs: [source, tests]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Artifacts of this run need no token permission.
     permissions: {}
     container: fedora:44
+    outputs:
+      file: ${{ steps.package.outputs.file }}
+      sha256: ${{ steps.package.outputs.sha256 }}
     env:
       VERSION: ${{ needs.source.outputs.version }}
+      SOURCE_SHA256: ${{ needs.source.outputs.sha256 }}
     steps:
       - name: Get the source tarball
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: source
           path: /tmp/source
+
+      - name: Check the source tarball
+        run: |
+          case "$SOURCE_SHA256" in *[!0-9a-f]* | "") exit 1 ;; esac
+          [ "${#SOURCE_SHA256}" -eq 64 ]
+          [ "$(ls -A /tmp/source)" = "hearthwire-$VERSION.tar.gz" ]
+          printf '%s  %s\n' "$SOURCE_SHA256" "/tmp/source/hearthwire-$VERSION.tar.gz" | sha256sum --check --strict -
 
       - name: Install the build tools
         run: dnf -y install rpm-build rpmlint python3-devel pyproject-rpm-macros python3-pip python3-setuptools tar findutils
@@ -197,11 +291,19 @@ jobs:
       - name: Lint the package (rpmlint)
         run: rpmlint /build/RPMS/noarch/hearthwire-*.noarch.rpm
 
+      - name: Record the package and its sha256
+        id: package
+        run: |
+          set -- /build/RPMS/noarch/hearthwire-"$VERSION"-*.noarch.rpm
+          [ "$#" -eq 1 ] && [ -f "$1" ]
+          echo "file=$(basename "$1")" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$1" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
       - name: Keep the package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: package-fedora
-          path: /build/RPMS/noarch/hearthwire-${{ needs.source.outputs.version }}-*.noarch.rpm
+          path: /build/RPMS/noarch/${{ steps.package.outputs.file }}
           if-no-files-found: error
           retention-days: 7
 
@@ -215,6 +317,9 @@ jobs:
     container: fedora:44
     env:
       VERSION: ${{ needs.source.outputs.version }}
+      SOURCE_SHA256: ${{ needs.source.outputs.sha256 }}
+      PACKAGE_FILE: ${{ needs.fedora-build.outputs.file }}
+      PACKAGE_SHA256: ${{ needs.fedora-build.outputs.sha256 }}
     steps:
       - name: Get the source tarball
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -228,9 +333,21 @@ jobs:
           name: package-fedora
           path: /tmp/package
 
+      - name: Check the downloads against the build outputs
+        run: |
+          for value in "$SOURCE_SHA256" "$PACKAGE_SHA256"; do
+            case "$value" in *[!0-9a-f]* | "") exit 1 ;; esac
+            [ "${#value}" -eq 64 ]
+          done
+          case "$PACKAGE_FILE" in */* | *[!A-Za-z0-9._+~-]* | "") exit 1 ;; esac
+          [ "$(ls -A /tmp/source)" = "hearthwire-$VERSION.tar.gz" ]
+          [ "$(ls -A /tmp/package)" = "$PACKAGE_FILE" ]
+          printf '%s  %s\n' "$SOURCE_SHA256" "/tmp/source/hearthwire-$VERSION.tar.gz" | sha256sum --check --strict -
+          printf '%s  %s\n' "$PACKAGE_SHA256" "/tmp/package/$PACKAGE_FILE" | sha256sum --check --strict -
+
       - name: Install the package
         run: |
-          dnf -y install /tmp/package/hearthwire-*.noarch.rpm
+          dnf -y install "/tmp/package/$PACKAGE_FILE"
           # For unpacking the check script; the container image may not have them.
           dnf -y install tar findutils
 
@@ -248,14 +365,18 @@ jobs:
 
   ubuntu-build:
     name: Build the Ubuntu package
-    needs: source
+    needs: [source, tests]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Artifacts of this run need no token permission.
     permissions: {}
     container: ubuntu:26.04
+    outputs:
+      file: ${{ steps.package.outputs.file }}
+      sha256: ${{ steps.package.outputs.sha256 }}
     env:
       VERSION: ${{ needs.source.outputs.version }}
+      SOURCE_SHA256: ${{ needs.source.outputs.sha256 }}
       DEBIAN_FRONTEND: noninteractive
     steps:
       - name: Get the source tarball
@@ -263,6 +384,13 @@ jobs:
         with:
           name: source
           path: /tmp/source
+
+      - name: Check the source tarball
+        run: |
+          case "$SOURCE_SHA256" in *[!0-9a-f]* | "") exit 1 ;; esac
+          [ "${#SOURCE_SHA256}" -eq 64 ]
+          [ "$(ls -A /tmp/source)" = "hearthwire-$VERSION.tar.gz" ]
+          printf '%s  %s\n' "$SOURCE_SHA256" "/tmp/source/hearthwire-$VERSION.tar.gz" | sha256sum --check --strict -
 
       - name: Install the build tools
         run: |
@@ -282,11 +410,19 @@ jobs:
       - name: Lint the package (lintian)
         run: lintian --fail-on error --display-info /build/hearthwire_*_all.deb
 
+      - name: Record the package and its sha256
+        id: package
+        run: |
+          set -- /build/hearthwire_"$VERSION"-*_all.deb
+          [ "$#" -eq 1 ] && [ -f "$1" ]
+          echo "file=$(basename "$1")" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$1" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
       - name: Keep the package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: package-ubuntu
-          path: /build/hearthwire_${{ needs.source.outputs.version }}-*_all.deb
+          path: /build/${{ steps.package.outputs.file }}
           if-no-files-found: error
           retention-days: 7
 
@@ -300,6 +436,9 @@ jobs:
     container: ubuntu:26.04
     env:
       VERSION: ${{ needs.source.outputs.version }}
+      SOURCE_SHA256: ${{ needs.source.outputs.sha256 }}
+      PACKAGE_FILE: ${{ needs.ubuntu-build.outputs.file }}
+      PACKAGE_SHA256: ${{ needs.ubuntu-build.outputs.sha256 }}
       DEBIAN_FRONTEND: noninteractive
     steps:
       - name: Get the source tarball
@@ -314,10 +453,22 @@ jobs:
           name: package-ubuntu
           path: /tmp/package
 
+      - name: Check the downloads against the build outputs
+        run: |
+          for value in "$SOURCE_SHA256" "$PACKAGE_SHA256"; do
+            case "$value" in *[!0-9a-f]* | "") exit 1 ;; esac
+            [ "${#value}" -eq 64 ]
+          done
+          case "$PACKAGE_FILE" in */* | *[!A-Za-z0-9._+~-]* | "") exit 1 ;; esac
+          [ "$(ls -A /tmp/source)" = "hearthwire-$VERSION.tar.gz" ]
+          [ "$(ls -A /tmp/package)" = "$PACKAGE_FILE" ]
+          printf '%s  %s\n' "$SOURCE_SHA256" "/tmp/source/hearthwire-$VERSION.tar.gz" | sha256sum --check --strict -
+          printf '%s  %s\n' "$PACKAGE_SHA256" "/tmp/package/$PACKAGE_FILE" | sha256sum --check --strict -
+
       - name: Install the package
         run: |
           apt-get update
-          apt-get install -y /tmp/package/hearthwire_*_all.deb
+          apt-get install -y "/tmp/package/$PACKAGE_FILE"
 
       - name: Check what landed
         run: |
@@ -333,28 +484,57 @@ jobs:
 
   checksums:
     name: Collect the packages and checksums
-    needs: [source, arch-test, fedora-test, ubuntu-test]
+    needs: [source, arch-build, fedora-build, ubuntu-build, arch-test, fedora-test, ubuntu-test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Artifacts of this run need no token permission.
     permissions: {}
+    env:
+      ARCH_FILE: ${{ needs.arch-build.outputs.file }}
+      ARCH_SHA256: ${{ needs.arch-build.outputs.sha256 }}
+      FEDORA_FILE: ${{ needs.fedora-build.outputs.file }}
+      FEDORA_SHA256: ${{ needs.fedora-build.outputs.sha256 }}
+      UBUNTU_FILE: ${{ needs.ubuntu-build.outputs.file }}
+      UBUNTU_SHA256: ${{ needs.ubuntu-build.outputs.sha256 }}
     steps:
-      - name: Get the packages
+      - name: Get the Arch package
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: package-*
-          path: ${{ runner.temp }}/release
-          merge-multiple: true
+          name: package-arch
+          path: ${{ runner.temp }}/arch
 
-      - name: Write SHA256SUMS
-        working-directory: ${{ runner.temp }}/release
+      - name: Get the Fedora package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-fedora
+          path: ${{ runner.temp }}/fedora
+
+      - name: Get the Ubuntu package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-ubuntu
+          path: ${{ runner.temp }}/ubuntu
+
+      - name: Check the packages against the build outputs and write SHA256SUMS
         run: |
-          set -- *.pkg.tar.zst *.rpm *.deb
-          [ "$#" -eq 3 ] && [ -f "$1" ] && [ -f "$2" ] && [ -f "$3" ] || { echo "::error::Expected exactly three packages"; ls -l; exit 1; }
-          sha256sum -- "$@" > SHA256SUMS
+          release="$RUNNER_TEMP/release"
+          mkdir -p "$release"
+          take() { # FOLDER FILE SHA256: exactly that one file, with exactly that sha256
+            case "$3" in *[!0-9a-f]* | "") return 1 ;; esac
+            [ "${#3}" -eq 64 ] || return 1
+            case "$2" in */* | *[!A-Za-z0-9._+~-]* | "") return 1 ;; esac
+            [ "$(ls -A "$RUNNER_TEMP/$1")" = "$2" ] || return 1
+            printf '%s  %s\n' "$3" "$RUNNER_TEMP/$1/$2" | sha256sum --check --strict - || return 1
+            mv -- "$RUNNER_TEMP/$1/$2" "$release/$2"
+          }
+          take arch "$ARCH_FILE" "$ARCH_SHA256"
+          take fedora "$FEDORA_FILE" "$FEDORA_SHA256"
+          take ubuntu "$UBUNTU_FILE" "$UBUNTU_SHA256"
+          cd "$release"
+          sha256sum -- "$ARCH_FILE" "$FEDORA_FILE" "$UBUNTU_FILE" > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Keep the release files
+      - name: Keep the release files (the dry run's result)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-files
@@ -364,38 +544,103 @@ jobs:
 
   release:
     name: Create the draft GitHub Release
-    needs: [source, checksums]
+    needs: [source, arch-build, fedora-build, ubuntu-build, checksums]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.source.outputs.version }}
+      SOURCE_SHA256: ${{ needs.source.outputs.sha256 }}
+      ARCH_FILE: ${{ needs.arch-build.outputs.file }}
+      ARCH_SHA256: ${{ needs.arch-build.outputs.sha256 }}
+      FEDORA_FILE: ${{ needs.fedora-build.outputs.file }}
+      FEDORA_SHA256: ${{ needs.fedora-build.outputs.sha256 }}
+      UBUNTU_FILE: ${{ needs.ubuntu-build.outputs.file }}
+      UBUNTU_SHA256: ${{ needs.ubuntu-build.outputs.sha256 }}
     steps:
-      - name: Get the release files
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - name: Check out the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: release-files
-          path: ${{ runner.temp }}/release
+          persist-credentials: false
 
-      - name: Get the source tarball (for the release notes)
+      - name: Get the source tarball
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: source
           path: ${{ runner.temp }}/source
+
+      - name: Rebuild the source tarball from the tag and compare the bytes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ]
+          [ "$(python3 -I packaging/check-version.py --tag "$TAG" < pyproject.toml)" = "$VERSION" ]
+          case "$SOURCE_SHA256" in *[!0-9a-f]* | "") exit 1 ;; esac
+          [ "${#SOURCE_SHA256}" -eq 64 ]
+          rebuilt=$(packaging/source-archive.sh "$GITHUB_SHA" "$RUNNER_TEMP/rebuilt")
+          [ "$(ls -A "$RUNNER_TEMP/source")" = "hearthwire-$VERSION.tar.gz" ]
+          printf '%s  %s\n' "$SOURCE_SHA256" "$rebuilt" | sha256sum --check --strict -
+          cmp -- "$rebuilt" "$RUNNER_TEMP/source/hearthwire-$VERSION.tar.gz"
+
+      - name: Get the Arch package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-arch
+          path: ${{ runner.temp }}/arch
+
+      - name: Get the Fedora package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-fedora
+          path: ${{ runner.temp }}/fedora
+
+      - name: Get the Ubuntu package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-ubuntu
+          path: ${{ runner.temp }}/ubuntu
+
+      - name: Check the packages against the build outputs and write SHA256SUMS
+        run: |
+          release="$RUNNER_TEMP/release"
+          mkdir -p "$release"
+          take() { # FOLDER FILE SHA256: exactly that one file, with exactly that sha256
+            case "$3" in *[!0-9a-f]* | "") return 1 ;; esac
+            [ "${#3}" -eq 64 ] || return 1
+            case "$2" in */* | *[!A-Za-z0-9._+~-]* | "") return 1 ;; esac
+            [ "$(ls -A "$RUNNER_TEMP/$1")" = "$2" ] || return 1
+            printf '%s  %s\n' "$3" "$RUNNER_TEMP/$1/$2" | sha256sum --check --strict - || return 1
+            mv -- "$RUNNER_TEMP/$1/$2" "$release/$2"
+          }
+          take arch "$ARCH_FILE" "$ARCH_SHA256"
+          take fedora "$FEDORA_FILE" "$FEDORA_SHA256"
+          take ubuntu "$UBUNTU_FILE" "$UBUNTU_SHA256"
+          cd "$release"
+          sha256sum -- "$ARCH_FILE" "$FEDORA_FILE" "$UBUNTU_FILE" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/release/${{ needs.arch-build.outputs.file }}
+            ${{ runner.temp }}/release/${{ needs.fedora-build.outputs.file }}
+            ${{ runner.temp }}/release/${{ needs.ubuntu-build.outputs.file }}
+            ${{ runner.temp }}/release/SHA256SUMS
 
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          cd "$RUNNER_TEMP/source"
-          tar -xzf "hearthwire-$VERSION.tar.gz" "hearthwire-$VERSION/packaging/RELEASE_NOTES-$VERSION.md"
-          notes="$RUNNER_TEMP/source/hearthwire-$VERSION/packaging/RELEASE_NOTES-$VERSION.md"
+          notes="$GITHUB_WORKSPACE/packaging/RELEASE_NOTES-$VERSION.md"
+          [ -f "$notes" ]
           cd "$RUNNER_TEMP/release"
-          sha256sum --check SHA256SUMS
           # --draft: nothing is public until the maintainer presses Publish.
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "Hearthwire $VERSION" --notes-file "$notes" \
-            ./*.pkg.tar.zst ./*.rpm ./*.deb SHA256SUMS
+            "./$ARCH_FILE" "./$FEDORA_FILE" "./$UBUNTU_FILE" SHA256SUMS
