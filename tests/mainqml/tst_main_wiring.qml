@@ -1946,8 +1946,11 @@ TestCase {
 
     readonly property string installPattern:
         "^env HEARTHWIRE_RUN=[0-9]+ HEARTHWIRE_APPLET=7 python3 -P -s -m hearthwire --install-info$"
-    readonly property string popupInstallNotice: "An older script install is running instead of the installed package. To fix it, run ./scripts/install.sh --remove-script-install from the Hearthwire source folder, then restart Plasma. Your settings and data are kept."
-    readonly property string settingsInstallNotice: "An older script install of Hearthwire is running instead of the installed package. To use the package, run ./scripts/install.sh --remove-script-install from the Hearthwire source folder, then restart Plasma. Your settings, usage history and saved sign-ins are kept."
+    // The one retry after a failed -s run (a script install alone).
+    readonly property string installRetryPattern:
+        "^env HEARTHWIRE_RUN=[0-9]+ HEARTHWIRE_APPLET=7 python3 -P -m hearthwire --install-info$"
+    readonly property string popupInstallNotice: "A script install of Hearthwire is running instead of the installed package. To fix it, run ./scripts/install.sh --remove-script-install from the Hearthwire source folder, then restart Plasma. Your settings and data are kept."
+    readonly property string settingsInstallNotice: "A script install of Hearthwire is running instead of the installed package. To use the package, run ./scripts/install.sh --remove-script-install from the Hearthwire source folder, then restart Plasma. Your settings, usage history and saved sign-ins are kept."
 
     function installCommands(owner) {
         wait(0)
@@ -2066,7 +2069,8 @@ TestCase {
         compare(command.text, "./scripts/install.sh --remove-script-install")
         compare(command.readOnly, true)
         page.checkInstall()
-        compare(installCommands(page).length, 1, "still once")
+        // A failed first run is asked once more without -s.
+        compare(installCommands(page).length, data.exitCode !== 0 ? 2 : 1, "no more runs")
     }
 
     function test_installNoticeIsTheFirstSettingsPart() {
@@ -2156,5 +2160,102 @@ TestCase {
         running.source.newData(running.command, {"exit code": 0, "stdout": installReply({user_helper: true})})
         wait(0)
         compare(main.installShadowed, false, "only the first reply counts")
+    }
+
+    // --- Install info retry without -s (lab M1) ------------------------------
+
+    // The widget or the settings page, with its Arch hint field.
+    function installOwner(kind) {
+        if (kind === "main") {
+            var main = loadMain({})
+            main.chatVaultMissing = ["fusermount3"]
+            var full = installPopup(main)
+            var field = null
+            tryVerify(function () {
+                field = allNamed(full, "chatInstallCommand")[0] || null
+                return field !== null
+            }, 5000, "the Chat tab is built")
+            return {owner: main, hint: field, shadowed: function () { return main.installShadowed }}
+        }
+        var page = generalPage()
+        page.vaultMissing = ["fusermount3"]
+        var notice = generalPart(page, "installShadowedNotice")
+        return {owner: page, hint: generalPart(page, "vaultInstallCommand"),
+                shadowed: function () { return notice.visible }}
+    }
+
+    function test_installRetryWithoutS_data() {
+        return [
+            {tag: "widget", kind: "main", reply: installReply({helper: "user", system_helper: false, user_helper: true,
+                                                               system_plasmoid: false, user_plasmoid: true}),
+             shown: false},
+            {tag: "settings", kind: "settings", reply: installReply({helper: "user", system_helper: false,
+                                                                     user_helper: true, system_plasmoid: false,
+                                                                     user_plasmoid: true}),
+             shown: false},
+            // The notice comes from the reply that parsed, the retry's.
+            {tag: "widget shadowed", kind: "main", reply: installReply({user_plasmoid: true}), shown: true},
+            {tag: "settings shadowed", kind: "settings", reply: installReply({user_plasmoid: true}), shown: true}
+        ]
+    }
+
+    // No system package: the -s run exits 1, the retry without -s answers.
+    function test_installRetryWithoutS(data) {
+        var shown = installOwner(data.kind)
+        compare(shown.hint.text, "fusermount3", "generic before any reply")
+        answerInstall(shown.owner, "", 1)
+        var commands = installCommands(shown.owner)
+        compare(commands.length, 2, "one retry")
+        verify(new RegExp(testCase.installPattern).test(commands[0]), commands[0])
+        verify(new RegExp(testCase.installRetryPattern).test(commands[1]), commands[1])
+        compare(shown.hint.text, "fusermount3", "still generic while the retry runs")
+        answerInstall(shown.owner, data.reply)
+        compare(shown.owner.installDistro, "arch")
+        compare(shown.hint.text, "sudo pacman -S --needed fuse3")
+        tryVerify(function () { return shown.shadowed() === data.shown }, 5000, "the notice follows the retry")
+        compare(shown.owner.installInfo.known, true)
+        shown.owner.checkInstall()
+        compare(installCommands(shown.owner).length, 2, "never a third run")
+        compare(runningOn(shown.owner, "--install-info"), null, "and done")
+    }
+
+    function test_installRetryFailsToo_data() {
+        return [{tag: "widget", kind: "main", exitCode: 2}, {tag: "settings", kind: "settings", exitCode: 2},
+                {tag: "widget exit 1", kind: "main", exitCode: 1},
+                {tag: "settings exit 1", kind: "settings", exitCode: 1}]
+    }
+
+    // An old home-folder copy without --install-info: exit 2 again is unknown.
+    function test_installRetryFailsToo(data) {
+        var shown = installOwner(data.kind)
+        answerInstall(shown.owner, "", 1)
+        compare(installCommands(shown.owner).length, 2)
+        // Even a reply that would say shadowed doesn't count with a failed exit.
+        answerInstall(shown.owner, installReply({user_helper: true}), data.exitCode)
+        compare(shown.owner.installInfo.known, false)
+        compare(shown.owner.installDistro, "other")
+        compare(shown.hint.text, "fusermount3")
+        wait(50)
+        compare(shown.shadowed(), false, "no notice")
+        shown.owner.checkInstall()
+        compare(installCommands(shown.owner).length, 2, "no third run")
+        compare(runningOn(shown.owner, "--install-info"), null, "nothing running")
+    }
+
+    function test_installFirstReplyOkNoRetry_data() {
+        return [{tag: "widget", kind: "main"}, {tag: "settings", kind: "settings"}]
+    }
+
+    function test_installFirstReplyOkNoRetry(data) {
+        var shown = installOwner(data.kind)
+        answerInstall(shown.owner, installReply({distro: "fedora"}))
+        compare(installCommands(shown.owner).length, 1, "no second run")
+        compare(runningOn(shown.owner, "--install-info"), null, "nothing running")
+        compare(shown.hint.text, "sudo dnf install fuse3")
+        // A first reply that parses as unknown (exit 0) is not retried either.
+        var other = installOwner(data.kind)
+        answerInstall(other.owner, "{\"ok\":false,\"error\":\"os-error\"}")
+        compare(installCommands(other.owner).length, 1, "exit 0 is never retried")
+        compare(other.owner.installInfo.known, false)
     }
 }

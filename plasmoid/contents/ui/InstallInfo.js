@@ -34,11 +34,21 @@ function validInt(value) {
 // DataSource source name unique; the helper ignores them. -s, here only:
 // the system package answers even when an older home-folder copy (which
 // doesn't know --install-info) would; it still finds that copy. Without a
-// system package the run fails, which is unknown: nothing is shadowed.
-function command(run, applet) {
+// system package that run fails, and the widget asks once more without -s
+// (`retry`), so a script install alone still reports its distro; an old
+// copy that doesn't know the option fails again, which is unknown.
+function command(run, applet, retry) {
     if (!validInt(run) || !validInt(applet))
         return ""
-    return "env HEARTHWIRE_RUN=" + run + " HEARTHWIRE_APPLET=" + applet + " python3 -P -s -m hearthwire --install-info"
+    var prefix = "env HEARTHWIRE_RUN=" + run + " HEARTHWIRE_APPLET=" + applet
+    if (retry === true)
+        return prefix + " python3 -P -m hearthwire --install-info"
+    return prefix + " python3 -P -s -m hearthwire --install-info"
+}
+
+// The -s run failed: the one retry without -s is due (never after a retry).
+function needsRetry(exitCode, retried) {
+    return exitCode !== 0 && retried !== true
 }
 
 // A script install in the home folder next to a system package: Python and

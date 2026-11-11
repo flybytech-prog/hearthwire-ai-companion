@@ -434,11 +434,18 @@ What a package leaves to you:
   ./scripts/install.sh --remove-script-install --restart-plasma
   ```
 
-  It removes only the script's helper, widget, icons and events file, and
-  prints each one; your data, settings and sign-ins stay. It never uses
-  `sudo` and is safe to run again. If no package is installed yet, it warns
-  that Hearthwire will be gone until you install one. A widget that finds a
-  script copy hiding the package says so on **Settings → General**.
+  It removes only the script's helper (with pip's `~/.local/bin/hearthwire`
+  command, and `~/.local/bin` itself if pip leaves it empty), widget, icons
+  and events file, and prints each one; your data, settings and sign-ins
+  stay. It never uses `sudo` and is safe to run again. If no package is
+  installed yet, it warns that Hearthwire will be gone until you install one.
+  When the widget finds a script copy hiding the package, it says "A script
+  install of Hearthwire is running instead of the installed package…" on
+  **Settings → General** and in the Usage tab. A script copy older than this
+  release can't show that notice, so check by hand: if
+  `~/.local/share/plasma/plasmoids/io.github.flybytechprog.hearthwire` or
+  `~/.local/lib/python3*/site-packages/hearthwire` exists next to the
+  package, run the command above.
 - **Restarting Plasma** after an upgrade, so the running widget picks up the
   new files: log out and in, or run
   `systemctl --user restart plasma-plasmashell.service`.
@@ -532,7 +539,8 @@ rm -f ~/.local/share/icons/hicolor/scalable/apps/hearthwire{,-settings-general,-
 cp assets/hearthwire.svg assets/hearthwire-settings-{general,ai,chat}.svg ~/.local/share/icons/hicolor/scalable/apps/
 ```
 
-Use `-u plasmoid` instead of `-i` when the package is already installed.
+Use `-u plasmoid` instead of `-i` when your own copy is already in
+`~/.local/share/plasma/plasmoids` (a system package there doesn't count).
 The app icon and the settings and tab icons are loaded from
 `~/.local/share/icons/hicolor/scalable/apps/`, so copy them there too.
 

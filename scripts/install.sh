@@ -29,9 +29,21 @@ case "${XDG_CONFIG_HOME:-}" in
     /*) config_home=$XDG_CONFIG_HOME ;;
     *) config_home=$HOME/.config ;;
 esac
-data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+# Like XDG_CONFIG_HOME above, and as Qt and kpackagetool6 read it: an
+# absolute $XDG_DATA_HOME, else ~/.local/share (a relative one would put the
+# icons under the working folder).
+case "${XDG_DATA_HOME:-}" in
+    /*) data_home=$XDG_DATA_HOME ;;
+    *) data_home=$HOME/.local/share ;;
+esac
 icon_directory="$data_home/icons/hicolor/scalable/apps"
 notifyrc_directory="$data_home/knotifications6"
+# Where kpackagetool6 (without -g) keeps this user's widget. kpackagetool6 -s
+# also finds a system package in /usr/share, so whether this user has a copy
+# is decided by this folder alone (install: -u or -i; rollback and
+# --remove-script-install: remove only this copy).
+user_data_home=$data_home
+user_plasmoid="$user_data_home/plasma/plasmoids/io.github.flybytechprog.hearthwire"
 
 # The helper from this checkout, never an installed one (it may be older or
 # gone). -P (Python 3.11+, which Hearthwire requires) keeps the working folder
@@ -275,10 +287,6 @@ if [ "$remove_script_install" = true ]; then
         echo "Required command not found: python3. Nothing was removed." >&2
         exit 1
     fi
-    case "${XDG_DATA_HOME:-}" in
-        /*) user_data_home=$XDG_DATA_HOME ;;
-        *) user_data_home=$HOME/.local/share ;;
-    esac
     case "$user_data_home" in
         /*) ;;
         *)
@@ -287,7 +295,6 @@ if [ "$remove_script_install" = true ]; then
             ;;
     esac
     user_icon_directory="$user_data_home/icons/hicolor/scalable/apps"
-    user_plasmoid="$user_data_home/plasma/plasmoids/io.github.flybytechprog.hearthwire"
     # The helper from this checkout says whether a package is installed
     # (fixed words and booleans only; read only, no network).
     if ! install_info=$(helper --install-info); then
@@ -405,7 +412,8 @@ if [ "$rollback" = true ]; then
         python3 -P -m pip uninstall -y --break-system-packages hearthwire >/dev/null 2>&1 \
             || echo "Could not remove the hearthwire helper with pip; remove it by hand." >&2
     fi
-    if kpackagetool6 -t Plasma/Applet -s io.github.flybytechprog.hearthwire >/dev/null 2>&1; then
+    # Only this user's copy; a system package stays (see user_plasmoid).
+    if [ -d "$user_plasmoid" ]; then
         kpackagetool6 -t Plasma/Applet -r io.github.flybytechprog.hearthwire >/dev/null 2>&1 \
             || echo "Could not remove the Hearthwire widget package; remove it by hand." >&2
     fi
@@ -665,7 +673,9 @@ python3 -P -m pip install \
     --break-system-packages \
     "$project_directory"
 
-if kpackagetool6 -t Plasma/Applet -s io.github.flybytechprog.hearthwire >/dev/null 2>&1; then
+# -u only over this user's own copy: with only a system package, -s finds it
+# too, and -u then fails half-way (see user_plasmoid).
+if [ -d "$user_plasmoid" ]; then
     kpackagetool6 -t Plasma/Applet -u "$project_directory/plasmoid"
 else
     kpackagetool6 -t Plasma/Applet -i "$project_directory/plasmoid"

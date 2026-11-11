@@ -183,6 +183,8 @@ KCM.SimpleKCM {
     property var installInfo: InstallInfo.unknown()
     property string installInfoSourceName: ""
     property bool installInfoAsked: false
+    // The run without -s has been asked (at most once).
+    property bool installInfoRetried: false
     readonly property string installDistro: ChatStorage.installDistro(page.installInfo.distro)
     // The remedy the notice names, offered for copying.
     readonly property string removeScriptCommand: "./scripts/install.sh --remove-script-install"
@@ -191,11 +193,28 @@ KCM.SimpleKCM {
         if (page.installInfoAsked)
             return
         page.installInfoAsked = true
-        var command = InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()), page.vaultApplet)
+        page.runInstallInfo(false)
+    }
+
+    function runInstallInfo(retry) {
+        var command = InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()),
+                                          page.vaultApplet, retry)
         if (command === "")
             return
         page.installInfoSourceName = command
         installInfoSource.connectSource(command)
+    }
+
+    // A failed -s run is asked once more without -s; every reply that
+    // counts goes through the same strict parse.
+    function finishInstallInfo(exitCode, stdout) {
+        page.installInfoSourceName = ""
+        if (InstallInfo.needsRetry(exitCode, page.installInfoRetried)) {
+            page.installInfoRetried = true
+            page.runInstallInfo(true)
+            return
+        }
+        page.installInfo = InstallInfo.parseReply(exitCode, stdout)
     }
 
     function normalizedRefresh(value) {
@@ -661,8 +680,7 @@ KCM.SimpleKCM {
             installInfoSource.disconnectSource(source)
             if (source !== page.installInfoSourceName)
                 return
-            page.installInfoSourceName = ""
-            page.installInfo = InstallInfo.parseReply(data["exit code"], data["stdout"])
+            page.finishInstallInfo(data["exit code"], data["stdout"])
         }
     }
 
@@ -704,7 +722,7 @@ KCM.SimpleKCM {
             Layout.fillWidth: true
             visible: page.installInfo.shadowed === true
             type: Kirigami.MessageType.Warning
-            text: i18n("An older script install of Hearthwire is running instead of the installed package. To use the package, run ./scripts/install.sh --remove-script-install from the Hearthwire source folder, then restart Plasma. Your settings, usage history and saved sign-ins are kept.")
+            text: i18n("A script install of Hearthwire is running instead of the installed package. To use the package, run ./scripts/install.sh --remove-script-install from the Hearthwire source folder, then restart Plasma. Your settings, usage history and saved sign-ins are kept.")
         }
         QQC2.TextField {
             objectName: "installShadowedCommand"

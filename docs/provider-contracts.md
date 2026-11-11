@@ -1112,9 +1112,14 @@ A script install (`scripts/install.sh`: `pip install --user`,
 `kpackagetool6 -i`) puts the helper in the Python user site and the widget in
 `$XDG_DATA_HOME/plasma/plasmoids`. Both win over a system package, so after a
 package is installed an older script copy keeps running. The widget runs
-`hearthwire --install-info` once at start to notice that, and to pick the
-package names of the distribution family for its install hints
-(`src/hearthwire/core/installinfo.py`). `scripts/install.sh
+`hearthwire --install-info` once per start (main.qml) and once per open of
+Settings → General to notice that, and to pick the package names of the
+distribution family for its install hints
+(`src/hearthwire/core/installinfo.py`). It runs
+`python3 -P -s -m hearthwire --install-info` first, so the system package
+answers even when an older home-folder copy (which doesn't know the option)
+would be imported; when that run fails (no system package), it runs
+`python3 -P -m hearthwire --install-info` once more. `scripts/install.sh
 --remove-script-install` runs the checkout's copy to see whether a package is
 installed before it removes the script copy.
 
@@ -1157,13 +1162,20 @@ Anything else makes `distro` `other`. `ID` is looked up first, then each
 
 Any surprise is `{"ok":false,"error":"os-error"}`. The reply never holds a
 path, version, name or file text. The widget treats the install as shadowed
-when `(user_helper && system_helper) || (user_plasmoid && system_plasmoid)`.
-A helper too old to know `--install-info` exits 2 with a usage message.
+when `(user_helper && system_helper) || (user_plasmoid && system_plasmoid)`,
+and then shows the fixed notice "A script install of Hearthwire is running
+instead of the installed package…" with the remedy on Settings → General and
+in the Usage tab. A helper too old to know `--install-info` exits 2 with a
+usage message, which counts as unknown (no notice). A widget copy older than
+this release never asks, so a script install of such a version that hides
+the package shows no notice; the README says how to check by hand.
 
 `scripts/install.sh --remove-script-install [--restart-plasma]` removes what
 the script installs in the home folder and nothing else: the helper in the
 Python user site (`pip uninstall`, only when `site.getusersitepackages()`
-holds a copy and `pip show` resolves `hearthwire` to exactly that directory),
+holds a copy and `pip show` resolves `hearthwire` to exactly that directory;
+pip also deletes its `~/.local/bin/hearthwire` entry point and may remove
+`~/.local/bin` if that leaves it empty),
 the folder `$XDG_DATA_HOME/plasma/plasmoids/io.github.flybytechprog.hearthwire`
 (a link there is unlinked, never followed), the four
 `icons/hicolor/scalable/apps/hearthwire*.svg` icons and
@@ -1175,6 +1187,14 @@ run as root. Without both system copies (by `--install-info`) it first warns
 that Hearthwire is gone until a package is installed. It prints each removed
 item, says so when there was nothing to remove (a second run is harmless),
 and asks for a Plasma restart unless `--restart-plasma` did one.
+
+`kpackagetool6 -s` also finds the system package in `/usr/share`, so the
+installer never uses it to ask whether this user has a widget copy: a plain
+install runs `kpackagetool6 -u` only when
+`$XDG_DATA_HOME/plasma/plasmoids/io.github.flybytechprog.hearthwire` (an
+absolute `$XDG_DATA_HOME`, else `~/.local/share`) is a folder and `-i`
+otherwise, and `--rollback-hearthwire` runs `kpackagetool6 -r` only for that
+folder, never for the package.
 
 ## Upgrading from Hearthside
 

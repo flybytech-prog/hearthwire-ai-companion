@@ -545,11 +545,11 @@ class Flow:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("old")
 
-    def run(self, *arguments, **extra):
+    def run(self, *arguments, cwd=None, **extra):
         return subprocess.run(
             ["sh", str(self.project / "scripts" / "install.sh"), *arguments],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, env={**self.env, **extra},
-            timeout=120, check=False,
+            timeout=120, check=False, cwd=self.root if cwd is None else cwd,
         )
 
     def calls(self):
@@ -766,6 +766,7 @@ def test_rollback_restores_then_uninstalls_and_names_the_tag(tmp_path):
     flow.reply("rollback", '{"ok":false,"error":"plasma-running"}', 1)
     flow.reply("rollback", '{"ok":true,"restored":["data","config","notifyrc","wallet-entry","applets"],"pending":[]}')
     flow.installed(pip=["hearthwire"], packages=[NEW_ID])
+    (flow.home / ".local" / "share" / "plasma" / "plasmoids" / NEW_ID).mkdir(parents=True)
     icons = flow.home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps"
     icons.mkdir(parents=True)
     for name in ICON_NAMES:
@@ -969,6 +970,114 @@ def test_a_rollback_not_locked_names_the_new_helper(tmp_path):
 # <<< legacy-migration
 
 
+# --- with the system package installed (lab review M2) ---------------------------------------------
+# kpackagetool6 as it behaves next to the package: -s finds the id in
+# /usr/share whether or not this user has a copy, -u fails (exit 7) without a
+# user copy, and -i and -r act on the user folder only.
+
+SYSTEM_PACKAGE_KPACKAGETOOL = r"""#!/bin/sh
+printf 'kpackagetool6 %s %s\n' "$3" "${4##*/}" >> "$FLOW_LOG"
+case "${XDG_DATA_HOME:-}" in
+    /*) user="$XDG_DATA_HOME/plasma/plasmoids/io.github.flybytechprog.hearthwire" ;;
+    *) user="$HOME/.local/share/plasma/plasmoids/io.github.flybytechprog.hearthwire" ;;
+esac
+case "$3" in
+    -s) [ "$4" = io.github.flybytechprog.hearthwire ] ;;
+    -u)
+        if [ ! -d "$user" ]; then
+            echo "Uninstallation of $user failed: package path was deleted manually" >&2
+            exit 7
+        fi ;;
+    -i) mkdir -p "$user" && : > "$user/metadata.json" ;;
+    -r) [ -d "$user" ] && rm -rf "$user" ;;
+    *) exit 97 ;;
+esac
+"""
+
+
+def _with_system_package(flow):
+    """The Flow with a system copy of the widget that kpackagetool6 -s finds."""
+    _stub(flow.root / "stub-bin", "kpackagetool6", SYSTEM_PACKAGE_KPACKAGETOOL)
+    system = flow.root / "usr" / "share" / "plasma" / "plasmoids" / NEW_ID
+    system.mkdir(parents=True)
+    (system / "metadata.json").write_text("{}")
+    return system
+
+
+def _kpackagetool_steps(flow):
+    return [step for step in flow.steps() if step.startswith("kpackagetool6")]
+
+
+def test_with_the_package_and_no_user_copy_the_widget_is_installed_not_updated(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", NOTHING)
+    system = _with_system_package(flow)
+    completed = flow.run()
+    assert completed.returncode == 0, completed.stderr
+    assert _kpackagetool_steps(flow) == ["kpackagetool6 -i plasmoid"]
+    data = flow.home / ".local" / "share"
+    assert (data / "plasma" / "plasmoids" / NEW_ID / "metadata.json").is_file()
+    assert all((data / "icons" / "hicolor" / "scalable" / "apps" / name).is_file() for name in ICON_NAMES)
+    assert (data / "knotifications6" / "hearthwire.notifyrc").is_file()
+    assert (system / "metadata.json").read_text() == "{}"
+
+
+@pytest.mark.parametrize("xdg", [False, True])
+def test_with_the_package_and_a_user_copy_the_user_copy_is_updated(tmp_path, xdg):
+    flow = Flow(tmp_path)
+    flow.reply("status", NOTHING)
+    system = _with_system_package(flow)
+    data = tmp_path / "data" if xdg else flow.home / ".local" / "share"
+    (data / "plasma" / "plasmoids" / NEW_ID).mkdir(parents=True)
+    completed = flow.run(**({"XDG_DATA_HOME": str(data)} if xdg else {}))
+    assert completed.returncode == 0, completed.stderr
+    assert _kpackagetool_steps(flow) == ["kpackagetool6 -u plasmoid"]
+    assert (system / "metadata.json").read_text() == "{}"
+
+
+def test_a_relative_xdg_data_home_looks_for_the_user_copy_in_the_default_place(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("status", NOTHING)
+    _with_system_package(flow)
+    data = flow.home / ".local" / "share"
+    (data / "plasma" / "plasmoids" / NEW_ID).mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    completed = flow.run(XDG_DATA_HOME="relative", cwd=work)
+    assert completed.returncode == 0, completed.stderr
+    assert _kpackagetool_steps(flow) == ["kpackagetool6 -u plasmoid"]
+    # The icons and events file go there too, never under the working folder.
+    assert (data / "knotifications6" / "hearthwire.notifyrc").is_file()
+    assert list(work.iterdir()) == []
+
+
+ROLLBACK_DONE = '{"ok":true,"restored":["data"],"pending":[]}'
+
+
+def test_rollback_with_only_the_package_leaves_the_system_widget_alone(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("rollback", ROLLBACK_DONE)
+    system = _with_system_package(flow)
+    completed = flow.run("--rollback-hearthwire")
+    assert completed.returncode == 0, completed.stderr
+    assert "Could not remove the Hearthwire widget package" not in completed.stderr
+    assert [step for step in _kpackagetool_steps(flow) if "-r" in step] == []
+    assert (system / "metadata.json").read_text() == "{}"
+
+
+def test_rollback_with_the_package_removes_only_the_user_copy(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("rollback", ROLLBACK_DONE)
+    system = _with_system_package(flow)
+    user = flow.home / ".local" / "share" / "plasma" / "plasmoids" / NEW_ID
+    user.mkdir(parents=True)
+    completed = flow.run("--rollback-hearthwire")
+    assert completed.returncode == 0, completed.stderr
+    assert [step for step in _kpackagetool_steps(flow) if "-r" in step] == [f"kpackagetool6 -r {NEW_ID}"]
+    assert not user.exists()
+    assert (system / "metadata.json").read_text() == "{}"
+
+
 # --- --remove-script-install ----------------------------------------------------------------------
 # A fake HOME with a script install in it. python3 answers the checkout helper's
 # --install-info from state/install-info, the user-site query from $RSI_USER_SITE,
@@ -1086,7 +1195,7 @@ class RemoveFlow:
         return subprocess.run(
             ["sh", str(self.project / "scripts" / "install.sh"), "--remove-script-install", *arguments],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, env={**self.env, **extra},
-            timeout=60, check=False,
+            timeout=60, check=False, cwd=self.project.parent,
         )
 
     def calls(self):

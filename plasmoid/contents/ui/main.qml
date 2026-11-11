@@ -123,6 +123,8 @@ PlasmoidItem {
     property var installInfo: InstallInfo.unknown()
     property string installInfoSourceName: ""
     property bool installInfoAsked: false
+    // The run without -s has been asked (at most once).
+    property bool installInfoRetried: false
     // A leftover script install shadows the package: the Usage tab says so.
     readonly property bool installShadowed: root.installInfo.shadowed === true
     // The install hints' distro family ("other" until known).
@@ -1102,12 +1104,28 @@ PlasmoidItem {
         if (root.installInfoAsked)
             return
         root.installInfoAsked = true
+        root.runInstallInfo(false)
+    }
+
+    function runInstallInfo(retry) {
         var command = InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()),
-                                          Math.max(0, root.chatAppletId))
+                                          Math.max(0, root.chatAppletId), retry)
         if (command === "")
             return
         root.installInfoSourceName = command
         installInfoSource.connectSource(command)
+    }
+
+    // A failed -s run is asked once more without -s; every reply that
+    // counts goes through the same strict parse.
+    function finishInstallInfo(exitCode, stdout) {
+        root.installInfoSourceName = ""
+        if (InstallInfo.needsRetry(exitCode, root.installInfoRetried)) {
+            root.installInfoRetried = true
+            root.runInstallInfo(true)
+            return
+        }
+        root.installInfo = InstallInfo.parseReply(exitCode, stdout)
     }
 
     function droppedDone(reply) {
@@ -1386,8 +1404,7 @@ PlasmoidItem {
             installInfoSource.disconnectSource(source)
             if (source !== root.installInfoSourceName)
                 return
-            root.installInfoSourceName = ""
-            root.installInfo = InstallInfo.parseReply(data["exit code"], data["stdout"])
+            root.finishInstallInfo(data["exit code"], data["stdout"])
         }
     }
 

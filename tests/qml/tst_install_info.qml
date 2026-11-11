@@ -39,6 +39,26 @@ TestCase {
         compare(InstallInfo.command(5, "7; rm"), "")
         compare(InstallInfo.command(1.5, 7), "")
         compare(InstallInfo.command(2147483649, 7), "")
+        // The one retry without -s; only the exact true picks it.
+        compare(InstallInfo.command(5, 7, true),
+                "env HEARTHWIRE_RUN=5 HEARTHWIRE_APPLET=7 python3 -P -m hearthwire --install-info")
+        compare(InstallInfo.command(5, 7, false),
+                "env HEARTHWIRE_RUN=5 HEARTHWIRE_APPLET=7 python3 -P -s -m hearthwire --install-info")
+        compare(InstallInfo.command(5, 7, "true"),
+                "env HEARTHWIRE_RUN=5 HEARTHWIRE_APPLET=7 python3 -P -s -m hearthwire --install-info")
+        compare(InstallInfo.command(-1, 7, true), "")
+        compare(InstallInfo.command(5, "7; rm", true), "")
+    }
+
+    // Only a failed first run is retried, and only once.
+    function test_needsRetry() {
+        compare(InstallInfo.needsRetry(1, false), true)
+        compare(InstallInfo.needsRetry(2, false), true)
+        compare(InstallInfo.needsRetry(undefined, false), true, "no exit code")
+        compare(InstallInfo.needsRetry(0, false), false)
+        compare(InstallInfo.needsRetry(1, true), false)
+        compare(InstallInfo.needsRetry(2, true), false)
+        compare(InstallInfo.needsRetry(0, true), false)
     }
 
     function test_goodReply() {
