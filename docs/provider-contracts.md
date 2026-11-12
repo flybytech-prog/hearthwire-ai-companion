@@ -505,32 +505,37 @@ grammar; the step then fails and no command runs. main.qml runs the steps one
 at a time:
 
 - **Unlock:** once `--vault status` says `unlocked` and saved sign-ins are
-  wanted, `prepare --sites` runs for the sites the shown panes need (the
-  current site, and the second pane's in split view), never one whose
-  Clear <site> data delete is still owed. A site gets a saved profile only
+  wanted, the order is `remove-site` for each id in `chatPendingSiteClears`,
+  then `prepare --sites`, then (after the first prepare of this generation
+  since the unlock) `remove --keep G` and `prune --known`. `prepare --sites`
+  covers the sites the shown panes need (the current site, and the second
+  pane's in split view), never one whose delete is still owed, and the
+  prepare reply never counts a pending id as prepared. `remove --keep G`
+  deletes older generations, including the shared profile from 1.0.1 or
+  earlier; `prune --known` takes every built-in site id (added sites join in
+  a later version). These steps show no card. A site gets a saved profile only
   after its folder was prepared in the current generation; until then its view
   waits.
-- **After the first prepare of a generation since the unlock:**
-  `remove --keep G` (older generations, including the shared profile from
-  1.0.1 or earlier), then `prune --known` with every built-in site id (added
-  sites join in a later version), then one `remove-site` for each owed
-  Clear <site> data. These steps show no card.
 - **A shown site without a folder** (a site switch, split view): one more
-  `prepare --sites`, at most one at a time.
-- **Clear <site> data** with saved sign-ins: main.qml first stores the
-  owed delete in `chatPendingSiteClears` ("" or comma-separated site ids,
-  written with `ChatStorage.pendingClearsText` and read strictly with
-  `parsePendingClears`, which drops anything that isn't a site id) and saves
-  the configuration at once. Only if that worked does ChatView destroy the
-  site's views and then its profile. main.qml drops the site from the
-  prepared set, waits `chatProfileCloseWait` (1 s) and runs
-  `remove-site --site <id>`. On success the id leaves the list and the site is
-  prepared again when shown. On failure the Chat tab shows
-  `site-remove-failed`, and the site stays closed (never prepared) until a
-  later unlock's `remove-site` works, also after a Plasma restart. In memory
-  mode no helper runs: destroying the profile is the whole clear.
-- **Clear chat data** is unchanged: a new generation, wait, `remove`, then
-  `lock`. Deleting the generation folders deletes every `site-*` folder.
+  `prepare --sites`, at most one at a time, again without pending ids.
+- **Clear <site> data** with saved sign-ins.
+  Clear <site> data first records the site in the widget's settings, then deletes its saved sign-in; if the delete fails, the site stays closed and is deleted at the next unlock (also after a restart) before it can open again, and Clear chat data, once its delete succeeds, settles every such pending delete.
+  main.qml first stores the id in `chatPendingSiteClears` ("" or
+  comma-separated site ids, written with `ChatStorage.pendingClearsText` and
+  read strictly with `parsePendingClears`, which drops anything that isn't a
+  site id) and calls `writeConfig()` when the configuration offers it. Only if
+  the stored value took does ChatView destroy the site's views and then its
+  profile. main.qml drops the site from the prepared set, waits
+  `chatProfileCloseWait` (1 s) and runs one `remove-site --site <id>` for each
+  owed id not yet tried in this round. An ok reply removes the id from the
+  list, and the site is prepared again when shown. A failure marks it tried
+  and shows `site-remove-failed`; the id stays in the list, so the site stays
+  closed (never prepared) until a later unlock's `remove-site` works, also
+  after a Plasma restart. In memory mode no helper runs: destroying the
+  profile is the whole clear.
+- **Clear chat data:** a new generation, wait, `remove`, then `lock`. Deleting
+  the generation folders deletes every `site-*` folder, so an ok `remove`
+  reply empties `chatPendingSiteClears`; a failed one leaves it as it is.
 - **The one-time move** (`chatProfileLayout` 0): at start the widget raises
   `chatProfileGeneration` once and stores 1 (Encrypted on a widget already set
   up: the Chat tab's notice shows until **Got it** stores 2) or 2. The keep

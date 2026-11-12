@@ -77,6 +77,12 @@ CHAT_CONFIG_KEYS = {
     "chatSiteZoom": ("String", "{}"),
     # Unlock with: passphrase | wallet (plan R3); written only by configGeneral.qml.
     "chatVaultUnlock": ("String", "passphrase"),
+    # Task 004, both written only by main.qml and never backed up: the
+    # one-time move to one profile per site (0, 1, 2), and the sites a
+    # Clear <site> data still owes a delete ("" or comma-separated ids; the
+    # empty default reads as None from main.xml).
+    "chatProfileLayout": ("Int", "0"),
+    "chatPendingSiteClears": ("String", None),
 }
 # The Ollama address (plan T4). Expected once main.xml has it or the Ollama
 # view exists, so it can neither be half-added nor forgotten.
@@ -572,26 +578,34 @@ def test_chat_sites_js_has_no_imports():
     assert not lines, f"{_rel(CHAT_SITES_JS)} must stay a pure library without imports; lines {lines}"
 
 
-# --- the one profile: private by default, saved sign-ins only behind the gate ---------
+# --- one profile per site: private by default, saved sign-ins only behind the gate ----
 #
 # Rule checkers take source text so the "proof" tests below can feed them a
 # violating copy of the real file and show that each rule really fails.
+#
+# Task 004 (plan-v3-delta rule 3): every chat site has its own profile, made
+# from the one WebEngineProfile inside siteProfileComponent; no profile is
+# shared and none is declared anywhere else.
 
 # Bindings of the profile, exactly, in this order (spike result 7: the paths
 # before storageName and offTheRecord last, else Qt creates a stray folder
 # under plasmashell's own data directory).
 PROFILE_BINDINGS = (
-    ("persistentStoragePath", r'chatWeb\.staySignedIn\s*\?\s*chatWeb\.storagePath\s*:\s*""'),
-    ("cachePath", r'chatWeb\.staySignedIn\s*\?\s*chatWeb\.storagePath\s*:\s*""'),
-    ("storageName", r'chatWeb\.staySignedIn\s*\?\s*chatWeb\.profileName\s*:\s*""'),
+    ("persistentStoragePath", r'siteProfile\.saved\s*\?\s*siteProfile\.sitePath\s*:\s*""'),
+    ("cachePath", r'siteProfile\.saved\s*\?\s*siteProfile\.sitePath\s*:\s*""'),
+    ("storageName", r'siteProfile\.saved\s*\?\s*siteProfile\.siteName\s*:\s*""'),
     ("httpCacheType", r"WebEngineProfile\.MemoryHttpCache"),
     ("persistentCookiesPolicy",
-     r"chatWeb\.staySignedIn\s*\?\s*WebEngineProfile\.AllowPersistentCookies"
+     r"siteProfile\.saved\s*\?\s*WebEngineProfile\.AllowPersistentCookies"
      r"\s*:\s*WebEngineProfile\.NoPersistentCookies"),
     ("persistentPermissionsPolicy", r"WebEngineProfile\.PersistentPermissionsPolicy\.AskEveryTime"),
     ("spellCheckEnabled", r"false"),
-    ("offTheRecord", r"!\s*chatWeb\.staySignedIn"),
+    ("offTheRecord", r"!\s*siteProfile\.saved"),
 )
+# The profile's own inputs: private defaults, set only by createObject's spec.
+PROFILE_INPUTS = (("bool", "saved", "false"), ("string", "sitePath", '""'), ("string", "siteName", '""'))
+PROFILE_COMPONENT_ID = "siteProfileComponent"
+PROFILE_ID = "siteProfile"
 # Names that may appear only once each, inside the profile block.
 PROFILE_ONLY_NAMES = ("storageName", "persistentStoragePath", "cachePath", "offTheRecord",
                       "AllowPersistentCookies")
@@ -606,6 +620,45 @@ FORBIDDEN_STORAGE = {
     "live profile assignment": r"\.\s*(?:offTheRecord|storageName|persistentStoragePath|cachePath"
                                r"|persistentCookiesPolicy|httpCacheType)\s*=(?!=)",
 }
+
+
+def _profile_component_problems(code):
+    """3a: the one WebEngineProfile lives in the one siteProfileComponent and
+    is created only by ensureProfile; no shared chatProfile is left."""
+    problems = []
+    profiles = list(_blocks(code, r"\bWebEngineProfile\s*\{"))
+    components = [(start, body) for start, body in _blocks(code, r"\bComponent\s*\{")
+                  if re.search(r"\bWebEngineProfile\s*\{", body)]
+    if len(components) != 1 or len(profiles) != 1:
+        return [f"exactly one WebEngineProfile inside exactly one Component expected, "
+                f"found {len(profiles)} in {len(components)}"]
+    component = components[0][1]
+    if not re.match(rf"\{{\s*id\s*:\s*{PROFILE_COMPONENT_ID}\s*\n\s*WebEngineProfile\s*\{{", component):
+        problems.append(f"the profile must be the only child of `Component {{ id: {PROFILE_COMPONENT_ID}`")
+    _, body = profiles[0]
+    if len(re.findall(rf"(?m)^\s*id\s*:\s*{PROFILE_ID}\s*$", body)) != 1:
+        problems.append(f"the profile must have `id: {PROFILE_ID}`")
+    for kind, name, default in PROFILE_INPUTS:
+        declared = re.findall(rf"(?m)^\s*property\s+(\w+)\s+{name}\s*:\s*(.+?)\s*$", code)
+        if declared != [(kind, default)] or len(re.findall(rf"(?m)^\s*property\s+\w+\s+{name}\s*:", body)) != 1:
+            problems.append(f"`property {kind} {name}: {default}` expected once, inside the profile, got {declared}")
+        if _hits(rf"\.\s*{name}\s*=(?!=)|(?<![\w.]){name}\s*=(?!=)", code):
+            problems.append(f"the profile input {name} must never be assigned")
+    if _hits(r"\bchatProfile\b", code):
+        problems.append("the shared chatProfile must not exist")
+    creates = re.findall(rf"\b{PROFILE_COMPONENT_ID}\s*\.\s*createObject\s*\(([^)]*)\)", code)
+    body_of_ensure = _function_body(code, "ensureProfile") or ""
+    if creates != ["chatWeb, spec"] or len(re.findall(
+            rf"\b{PROFILE_COMPONENT_ID}\s*\.\s*createObject\s*\(\s*chatWeb\s*,\s*spec\s*\)", body_of_ensure)) != 1:
+        problems.append(f"{PROFILE_COMPONENT_ID}.createObject(chatWeb, spec) only once, in ensureProfile, got {creates}")
+    if len(_hits(rf"\b{PROFILE_COMPONENT_ID}\b", code)) != 2:
+        problems.append(f"{PROFILE_COMPONENT_ID} may be named only by its id and the one createObject")
+    handlers = [handler for _, handler in _handler_bodies(body, "onDownloadRequested")]
+    if not re.search(r"(?m)^\s*onDownloadRequested\s*:\s*\(\s*download\s*\)\s*=>\s*"
+                     r"chatWeb\.handleDownload\(\s*download\s*\)\s*$", body) or handlers:
+        problems.append("the profile's only handler is `onDownloadRequested: (download) => "
+                        "chatWeb.handleDownload(download)`")
+    return problems
 
 
 def _profile_problems(code):
@@ -637,12 +690,27 @@ def _profile_problems(code):
         inside = len(_hits(rf"\b{name}\b", body))
         if total != inside or inside != 1:
             problems.append(f"{name} must appear once, inside the profile block ({inside} inside, {total} total)")
-    return problems
+    return problems + _profile_component_problems(code)
 
 
 def test_chat_web_view_declares_one_profile_in_the_safe_order():
     problems = _profile_problems(_read_code(CHAT_WEB_VIEW))
     assert not problems, f"{_rel(CHAT_WEB_VIEW)}: {problems}"
+
+
+def _profile_elsewhere_offenders(sources):
+    """3a: no WebEngineProfile (and no shared chatProfile) anywhere but ChatWebView's component."""
+    return [
+        f"{name}:{line} {word}"
+        for name, code in sources.items() if not name.endswith("ChatWebView.qml")
+        for word, pattern in (("WebEngineProfile", r"\bWebEngineProfile\s*\{"), ("chatProfile", r"\bchatProfile\b"))
+        for line in _hits(pattern, code)
+    ]
+
+
+def test_no_profile_is_declared_outside_the_site_profile_component():
+    offenders = _profile_elsewhere_offenders(_all_code())
+    assert not offenders, f"a WebEngineProfile may only be declared in ChatWebView.qml's {PROFILE_COMPONENT_ID}: {offenders}"
 
 
 def _storage_offenders(sources):
@@ -668,11 +736,14 @@ def test_no_plasmoid_file_uses_forbidden_webengine_storage():
     assert not offenders, f"forbidden or out-of-place WebEngine storage: {offenders}"
 
 
+WEB_VIEW_INPUTS = (("staySignedIn", "bool", "false"), ("runtimeDir", "string", '""'),
+                   ("storageApplet", "int", "-1"), ("storageGeneration", "int", "-1"),
+                   ("preparedSites", "var", "[]"))
+
+
 def _web_view_inputs_problems(code):
     problems = []
-    for name, kind, default in (("staySignedIn", "bool", "false"),
-                                ("storagePath", "string", '""'),
-                                ("profileName", "string", '""')):
+    for name, kind, default in WEB_VIEW_INPUTS:
         declared = re.findall(rf"(?m)^\s*property\s+(\w+)\s+{name}\s*:\s*(.+?)\s*$", code)
         if declared != [(kind, default)]:
             problems.append(f"`property {kind} {name}: {default}` expected once, got {declared}")
@@ -696,8 +767,12 @@ CHAT_VIEW_GATE = (
     r'chatView\.storageReady\s*&&\s*chatView\.storagePath\s*!==\s*""\s*&&\s*'
     r'chatView\.profileName\s*!==\s*""',
     r"staySignedIn\s*:\s*chatView\.persistentReady\s*,",
-    r'storagePath\s*:\s*chatView\.persistentReady\s*\?\s*chatView\.storagePath\s*:\s*""',
-    r'profileName\s*:\s*chatView\.persistentReady\s*\?\s*chatView\.profileName\s*:\s*""',
+    r'runtimeDir\s*:\s*chatView\.persistentReady\s*\?\s*chatView\.runtimeDir\s*:\s*""\s*,',
+    r"storageApplet\s*:\s*chatView\.persistentReady\s*\?\s*chatView\.storageApplet\s*:\s*-1\s*,",
+    r"storageGeneration\s*:\s*chatView\.persistentReady\s*\?\s*chatView\.storageGeneration\s*:\s*-1\s*\}",
+    # 3f: the prepared sites reach the web view only as this binding.
+    r"webLoader\.item\.preparedSites\s*=\s*Qt\.binding\(\s*function\s*\(\s*\)\s*\{\s*"
+    r"return\s+chatView\.preparedSites\s*\}\s*\)",
     r'property\s+url\s+webSource\s*:\s*Qt\.resolvedUrl\(\s*"ChatWebView\.qml"\s*\)',
 )
 
@@ -706,6 +781,11 @@ def _chat_view_gate_problems(code):
     problems = [f"missing `{pattern}`" for pattern in CHAT_VIEW_GATE if len(re.findall(pattern, code)) != 1]
     if len(_hits(r"\bstaySignedIn\s*:", code)) != 1:
         problems.append("staySignedIn may be set exactly once (in setSource)")
+    for name in ("runtimeDir", "storageApplet", "storageGeneration"):
+        if len(_hits(rf"(?m)^\s*{name}\s*:", code)) != 1:
+            problems.append(f"{name} may be handed over exactly once (in setSource)")
+    if len(_hits(r"\bpreparedSites\s*=(?!=)", code)) != 1:
+        problems.append("preparedSites may be handed over only by the one Qt.binding in onLoaded")
     if len(_hits(r"\bwebLoader\.setSource\s*\(\s*chatView\.webSource\s*,", code)) != 1 \
             or len(_hits(r"\bsetSource\s*\(", code)) != 1:
         problems.append("the web view must be created by exactly one webLoader.setSource(chatView.webSource, ...)")
@@ -745,6 +825,18 @@ MAIN_READY = (
 )
 
 
+def _in_prepare_reply_after_ok(code, offset):
+    """``offset`` lies in chatFinish's `case "prepare":`, after its `if (reply.ok && ...)`,
+    with no other case or else branch in between."""
+    cases = [match for match in re.finditer(r'\bcase\s+"([\w-]+)"\s*:', code[:offset])]
+    if not cases or cases[-1].group(1) != "prepare":
+        return False
+    between = code[cases[-1].end():offset]
+    return bool(re.match(r"\s*if\s*\(\s*reply\.ok\s*&&\s*root\.chatOpGeneration\s*===\s*root\.chatGeneration\s*"
+                         r"&&\s*root\.chatWantsSaved\(\)\s*\)\s*\{", between)) \
+        and not re.search(r"\belse\b|\bbreak\b", between)
+
+
 def _main_ready_problems(code, full_representation):
     problems = []
     if len(re.findall(MAIN_READY, code)) != 1:
@@ -756,10 +848,8 @@ def _main_ready_problems(code, full_representation):
     granted = [match for match in re.finditer(r"\bchatPreparedGeneration\s*=(?!=)(?!\s*-1\b)", code)]
     if len(granted) != 1:
         problems.append(f"chatPreparedGeneration may be set to a generation exactly once, got {len(granted)}")
-    else:
-        before = code[max(0, granted[0].start() - 400):granted[0].start()]
-        if 'case "prepare"' not in before or not re.search(r"if\s*\(\s*reply\.ok\s*&&", before):
-            problems.append("chatPreparedGeneration may only be granted in the prepare reply after reply.ok")
+    elif not _in_prepare_reply_after_ok(code, granted[0].start()):
+        problems.append("chatPreparedGeneration may only be granted in the prepare reply after reply.ok")
     if len(_hits(r"(?m)\bstorageReady\s*:\s*root\.chatStorageReady\s*$", full_representation)) != 1:
         problems.append("FullRepresentation must pass storageReady: root.chatStorageReady")
     if _hits(r"\bstorageReady\s*:", full_representation) != _hits(r"\bstorageReady\s*:\s*root\.chatStorageReady\b",
@@ -773,17 +863,366 @@ def test_main_grants_saved_sign_ins_only_after_a_verified_prepare():
     assert not problems, f"{_rel(MAIN_QML)}: {problems}"
 
 
-def test_every_web_view_uses_the_chat_profile():
-    code = _read_code(CHAT_WEB_VIEW)
+PAGE_PROFILE = "chatWeb.profileFor(page.site)"
+# 3b: profileFor is only the lookup, keyed by the checked id.
+PROFILE_FOR_BODY = ('{ return typeof siteId === "string" && Object.prototype.hasOwnProperty.call(chatWeb.profiles, siteId) '
+                    "? chatWeb.profiles[siteId] : null }")
+
+
+def _squashed(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _page_profile_problems(code):
+    """3e: every page, the sign-in overlay included, binds its own site's profile."""
+    problems = []
     views = _hits(r"\bWebEngineView\s*\{", code)
-    bindings = re.findall(r"\bprofile\s*:\s*([\w.]+)", code)
-    wrong = [value for value in bindings if value != "chatProfile"]
-    assert views, f"{_rel(CHAT_WEB_VIEW)} declares no WebEngineView"
-    assert not wrong, f"{_rel(CHAT_WEB_VIEW)}: every `profile:` must be chatProfile, got {wrong}"
-    assert len(bindings) >= len(views), (
-        f"{_rel(CHAT_WEB_VIEW)}: {len(views)} WebEngineView declarations (lines {views}) "
-        f"but only {len(bindings)} `profile: chatProfile` bindings"
-    )
+    bindings = [_squashed(value) for value in re.findall(r"(?m)^\s*profile\s*:\s*(.+?)\s*$", code)]
+    if not views:
+        problems.append("no WebEngineView declared")
+    if bindings != [PAGE_PROFILE] * len(bindings) or len(bindings) < len(views):
+        problems.append(f"every WebEngineView needs exactly `profile: {PAGE_PROFILE}`, got {bindings} for "
+                        f"{len(views)} views")
+    if len(_hits(r"\bpageComponent\s*\.\s*createObject\s*\(", code)) != 1:
+        problems.append("pageComponent.createObject only once (the overlay)")
+    overlay = _function_body(code, "openOverlay") or ""
+    if not re.search(r"\bfunction\s+openOverlay\s*\(\s*request\s*,\s*siteId\s*,\s*openerUrl\s*\)", code) \
+            or not re.search(r"if\s*\(\s*!\s*chatWeb\.profileFor\(\s*siteId\s*\)\s*\)\s*return\b", overlay) \
+            or len(re.findall(r"(?m)^\s*site\s*:\s*siteId\s*,\s*$", overlay)) != 1:
+        problems.append("openOverlay(request, siteId, openerUrl) must open nothing without siteId's profile "
+                        "and create the window with `site: siteId`")
+    callers = re.findall(r"\bchatWeb\.openOverlay\s*\(([^,]*),\s*([^,]*),", code)
+    if callers != [("request", "page.site")]:
+        problems.append(f"the overlay is opened only by a page, with its own site: openOverlay(request, page.site, ...), "
+                        f"got {callers}")
+    body = _function_body(code, "profileFor")
+    if body is None or _squashed(body) != PROFILE_FOR_BODY:
+        problems.append(f"profileFor must be exactly `{PROFILE_FOR_BODY}`")
+    return problems
+
+
+def test_every_web_view_uses_its_own_site_profile():
+    problems = _page_profile_problems(_read_code(CHAT_WEB_VIEW))
+    assert not problems, f"{_rel(CHAT_WEB_VIEW)}: {problems}"
+
+
+PAGE_PROFILE_MUTATIONS = {
+    # 3b: profileFor returns the first or a shared profile, or keys by name.
+    "first profile": ("            ? chatWeb.profiles[siteId] : null",
+                      "            ? chatWeb.profiles[Object.keys(chatWeb.profiles)[0]] : null"),
+    "shared variable": ("            ? chatWeb.profiles[siteId] : null", "            ? chatWeb.lastProfile : null"),
+    "keyed by site name": ("Object.prototype.hasOwnProperty.call(chatWeb.profiles, siteId)",
+                           "Object.prototype.hasOwnProperty.call(chatWeb.profiles, ChatSites.byId(siteId).name)"),
+    # 3e: a fixed profile for the page or the overlay.
+    "page fixed profile": ("            profile: chatWeb.profileFor(page.site)",
+                           "            profile: chatWeb.profileFor(\"claude\")"),
+    "overlay fixed site": ("            site: siteId,\n", "            site: chatWeb.siteId,\n"),
+    "overlay without profile check": ("        if (!chatWeb.profileFor(siteId))\n            return\n        var view =",
+                                      "        var view ="),
+    "overlay for another site": ("chatWeb.openOverlay(request, page.site,", "chatWeb.openOverlay(request, chatWeb.siteId,"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PAGE_PROFILE_MUTATIONS))
+def test_proof_page_profile_rule_catches(name):
+    assert _page_profile_problems(_mutated(CHAT_WEB_VIEW, *PAGE_PROFILE_MUTATIONS[name]))
+
+
+# --- task 004 rules 3b, 3d, 3f, 3g: names, the prepared-site gate, owed deletes --------
+
+# 3b + 3f: what a site's profile is made from. Name and path only from
+# ChatStorage.siteProfileName/siteProfilePath with the same checked id, and
+# a saved one only for a site main.qml prepared.
+SITE_PROFILE_SPEC_BODY = (
+    '{ if (!ChatStorage.isSiteId(siteId) || chatWeb.retiring[siteId] === true) return null '
+    'if (!chatWeb.staySignedIn) return { saved: false, sitePath: "", siteName: "" } '
+    "if (!Array.isArray(chatWeb.preparedSites) || chatWeb.preparedSites.indexOf(siteId) < 0) return null "
+    "var name = ChatStorage.siteProfileName(chatWeb.storageApplet, chatWeb.storageGeneration, siteId) "
+    "var path = ChatStorage.siteProfilePath(chatWeb.runtimeDir, chatWeb.storageApplet, chatWeb.storageGeneration, siteId) "
+    'if (name === "" || path === "") return null '
+    "return { saved: true, sitePath: path, siteName: name } }"
+)
+ENSURE_PROFILE_BODY = (
+    "{ var existing = chatWeb.profileFor(siteId) if (existing) return existing "
+    "var spec = chatWeb.siteProfileSpec(siteId) if (!spec) return null "
+    "var profile = siteProfileComponent.createObject(chatWeb, spec) if (!profile) return null "
+    'if (chatWeb.baseUserAgent === "") { chatWeb.baseUserAgent = ChatSites.userAgent(profile.httpUserAgent) '
+    "chatWeb.baseClientHintsEnabled = profile.clientHints.isAllClientHintsEnabled "
+    "chatWeb.baseBrands = profile.clientHints.fullVersionList } "
+    "profile.httpUserAgent = chatWeb.baseUserAgent chatWeb.profiles[siteId] = profile return profile }"
+)
+
+
+def _site_profile_problems(web):
+    problems = []
+    for name, expected in (("siteProfileSpec", SITE_PROFILE_SPEC_BODY), ("ensureProfile", ENSURE_PROFILE_BODY)):
+        body = _function_body(web, name)
+        if body is None or _squashed(body) != expected:
+            problems.append(f"{name} must be exactly `{expected}`")
+    if len(_hits(r"\bsiteProfileName\s*\(", web)) != 1 or len(_hits(r"\bsiteProfilePath\s*\(", web)) != 1:
+        problems.append("siteProfileName and siteProfilePath once each, in siteProfileSpec")
+    # The profiles map: filled only by ensureProfile, emptied only by clearSite.
+    if len(_hits(r"\bprofiles\s*\[[^\]]*\]\s*=(?!=)", web)) != 1:
+        problems.append("profiles[...] may be assigned only once, in ensureProfile")
+    if _hits(r"\bprofiles\s*=(?!=)", web) or not re.search(
+            r"(?m)^\s*readonly\s+property\s+var\s+profiles\s*:\s*\(\s*\{\s*\}\s*\)\s*$", web):
+        problems.append("profiles must be `readonly property var profiles: ({})` and never reassigned")
+    clear = _function_body(web, "clearSite") or ""
+    if len(_hits(r"\bdelete\s+chatWeb\.profiles\[\s*siteId\s*\]", clear)) != 1 \
+            or len(_hits(r"\bdelete\s+chatWeb\.profiles\b", web)) != 1:
+        problems.append("a profile leaves the map only in clearSite, by `delete chatWeb.profiles[siteId]`")
+    # 3d: the web view never builds a container name or path itself.
+    for word in (r"\bprofileName\b", r"\bprofilePath\b", r"\bstoragePath\b"):
+        if _hits(word, web):
+            problems.append(f"ChatWebView.qml must not use {word.strip(chr(92) + 'b')}: names and paths come only "
+                            "from siteProfileName/siteProfilePath")
+    return problems
+
+
+def test_site_profiles_are_built_only_from_the_checked_id():
+    problems = _site_profile_problems(_read_code(CHAT_WEB_VIEW))
+    assert not problems, f"{_rel(CHAT_WEB_VIEW)}: {problems}"
+
+
+SITE_PROFILE_MUTATIONS = {
+    "name without the id": ("ChatStorage.siteProfileName(chatWeb.storageApplet, chatWeb.storageGeneration, siteId)",
+                            "ChatStorage.siteProfileName(chatWeb.storageApplet, chatWeb.storageGeneration, \"claude\")"),
+    "path at the container root": (
+        "var path = ChatStorage.siteProfilePath(chatWeb.runtimeDir, chatWeb.storageApplet,\n"
+        "            chatWeb.storageGeneration, siteId)",
+        "var path = ChatStorage.profilePath(chatWeb.runtimeDir, chatWeb.storageApplet,\n"
+        "            chatWeb.storageGeneration)"),
+    "old shared name": ("ChatStorage.siteProfileName(chatWeb.storageApplet, chatWeb.storageGeneration, siteId)",
+                        "ChatStorage.profileName(chatWeb.storageApplet, chatWeb.storageGeneration)"),
+    "no prepared-site check": (
+        "        if (!Array.isArray(chatWeb.preparedSites) || chatWeb.preparedSites.indexOf(siteId) < 0)\n"
+        "            return null\n", ""),
+    "saved without stay signed in": ("        if (!chatWeb.staySignedIn)\n", "        if (false)\n"),
+    "a new profile while the old retires": (" || chatWeb.retiring[siteId] === true", ""),
+    "profile stored under another key": ("        chatWeb.profiles[siteId] = profile\n",
+                                         "        chatWeb.profiles[chatWeb.siteId] = profile\n"),
+    "existing profile skipped": ("        var existing = chatWeb.profileFor(siteId)\n        if (existing)\n"
+                                 "            return existing\n", ""),
+    "second store": ("    function profileFor(siteId) {\n",
+                     "    function adopt(id, p) { chatWeb.profiles[id] = p }\n    function profileFor(siteId) {\n"),
+    "profile dropped elsewhere": ("    function profileFor(siteId) {\n",
+                                  "    function drop(id) { delete chatWeb.profiles[id] }\n    function profileFor(siteId) {\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SITE_PROFILE_MUTATIONS))
+def test_proof_site_profile_rule_catches(name):
+    assert _site_profile_problems(_mutated(CHAT_WEB_VIEW, *SITE_PROFILE_MUTATIONS[name]))
+
+
+def _container_name_problems(sources):
+    """3d: the old shared name (and path) names only the container: built in
+    ChatStorage.js, used by main.qml only for its readiness state, never as a
+    storageName anywhere."""
+    problems = []
+    storage = sources.get(_rel(CHAT_STORAGE_JS), "")
+    for name, allowed in (("profileName", ["siteProfileName", "profilePath"]), ("profilePath", ["siteProfilePath"])):
+        callers = sorted(
+            caller for caller in re.findall(r"\bfunction\s+(\w+)\s*\([^)]*\)\s*\{", storage)
+            if re.search(rf"(?<![\w.]){name}\s*\(", _function_body(storage, caller) or "")
+        )
+        if callers != sorted(allowed):
+            problems.append(f"ChatStorage.{name} may only be called by {allowed}, got {callers}")
+    main = sources.get(_rel(MAIN_QML), "")
+    for name, pattern in (
+            ("profileName", r"readonly\s+property\s+string\s+chatProfileName\s*:\s*"
+                            r"ChatStorage\.profileName\(\s*root\.chatAppletId\s*,\s*root\.chatGeneration\s*\)"),
+            ("profilePath", r"readonly\s+property\s+string\s+chatProfilePath\s*:\s*ChatStorage\.profilePath\(\s*"
+                            r"root\.chatRuntimeDir\s*,\s*root\.chatAppletId\s*,\s*root\.chatGeneration\s*\)")):
+        uses = [f"{file}:{line}" for file, code in sources.items()
+                for line in _hits(rf"\bChatStorage\.{name}\s*\(", code)]
+        if len(uses) != 1 or len(re.findall(pattern, main)) != 1:
+            problems.append(f"ChatStorage.{name}(...) only once, in main.qml's chatProfile{name[7:]} declaration, got {uses}")
+    for file, code in sources.items():
+        for line in _hits(r"\bstorageName\s*:(?!\s*siteProfile\.saved\b)", code):
+            problems.append(f"{file}:{line} storageName from anything but the site profile's own input")
+    return problems
+
+
+def test_the_old_shared_name_is_only_the_container():
+    problems = _container_name_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (CHAT_WEB_VIEW, "            storageName: siteProfile.saved ? siteProfile.siteName : \"\"",
+     "            storageName: ChatStorage.profileName(chatWeb.storageApplet, chatWeb.storageGeneration)"),
+    (CHAT_STORAGE_JS, "    var container = profileName(applet, generation)\n    if (container === \"\" || !isSiteId(id))",
+     "    var container = profileName(applet, generation)\n    if (container === \"\")"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { return ChatStorage.profileName(root.chatAppletId, 0) }\n    function chatNext() {"),
+    (CHAT_STORAGE_JS, "function profilePath(runtimeDir, applet, generation) {",
+     "function sharedName(a, g) { return profileName(a, g) }\nfunction profilePath(runtimeDir, applet, generation) {"),
+])
+def test_proof_container_name_rule_catches(path, old, new):
+    sources = _all_code()
+    sources[_rel(path)] = _mutated(path, old, new)
+    if path == CHAT_STORAGE_JS and "isSiteId" in old:
+        # Leaving out the id check is caught by tst_chat_storage.qml's table
+        # test (3c); here the call graph stays the same, so check that test.
+        table = (PLASMOID.parent / "tests" / "qml" / "tst_chat_storage.qml").read_text(encoding="utf-8")
+        assert "siteProfileName" in table and "ollama" in table
+        return
+    assert _container_name_problems(sources)
+
+
+# 3f: main.qml hands the web view only sites it prepared in this generation,
+# and only while saved sign-ins are ready.
+MAIN_SITE_GATE = (
+    r"readonly\s+property\s+var\s+chatReadySites\s*:\s*root\.chatStorageReady\s*\?\s*root\.chatPreparedSites\s*:\s*\[\s*\]",
+    r"readonly\s+property\s+var\s+chatPendingClears\s*:\s*"
+    r"ChatStorage\.parsePendingClears\(\s*Plasmoid\.configuration\.chatPendingSiteClears\s*\)",
+)
+CHAT_REMOVAL_PENDING_BODY = "{ return root.chatPendingClears.indexOf(siteId) >= 0 }"
+NOT_PENDING = r"\.filter\(\s*function\s*\(\s*id\s*\)\s*\{\s*return\s+!root\.chatRemovalPending\(\s*id\s*\)\s*\}\s*\)"
+
+
+def _prepared_site_problems(main, full_representation):
+    problems = [f"main.qml needs `{pattern}` once" for pattern in MAIN_SITE_GATE if len(re.findall(pattern, main)) != 1]
+    if len(_hits(r"(?m)^\s*preparedSites\s*:\s*root\.chatReadySites\s*$", full_representation)) != 1 \
+            or len(_hits(r"\bpreparedSites\s*:", full_representation)) != 1:
+        problems.append("FullRepresentation must pass exactly `preparedSites: root.chatReadySites`")
+    grants = [match.start() for match in re.finditer(r"\bchatPreparedSites\s*=(?!=)", main)]
+    narrowing = [match.start() for match in re.finditer(
+        r"\bchatPreparedSites\s*=\s*root\.chatPreparedSites\.filter\(\s*function\s*\(\s*id\s*\)\s*\{\s*"
+        r"return\s+id\s*!==\s*siteId\s*\}\s*\)", main)]
+    widening = [at for at in grants if at not in narrowing]
+    if len(narrowing) != 1 or len(widening) != 1 or not _in_prepare_reply_after_ok(main, widening[0]) \
+            or not re.match(r"chatPreparedSites\s*=\s*first\s*\?\s*created\s*:\s*root\.chatPreparedSites\.concat\(",
+                            main[widening[0]:]):
+        problems.append("chatPreparedSites may only grow in the prepare reply after reply.ok (to `created`), "
+                        "and only shrink in chatClearSite")
+    return problems
+
+
+def test_saved_profiles_only_for_prepared_sites():
+    problems = _prepared_site_problems(_read_code(MAIN_QML), _read_code(FULL_REPRESENTATION))
+    assert not problems, f"{_rel(MAIN_QML)}: {problems}"
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (MAIN_QML, "root.chatStorageReady ? root.chatPreparedSites : []", "root.chatPreparedSites"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { root.chatPreparedSites = root.chatNeededSites }\n    function chatNext() {"),
+    (MAIN_QML, "                root.chatPreparedSites = first ? created : root.chatPreparedSites.concat(",
+     "                root.chatPreparedSites = first ? root.chatOpSites : root.chatPreparedSites.concat("),
+    (FULL_REPRESENTATION, "preparedSites: root.chatReadySites", "preparedSites: root.chatPreparedSites"),
+])
+def test_proof_prepared_site_rule_catches(path, old, new):
+    main = _mutated(MAIN_QML, old, new) if path == MAIN_QML else _read_code(MAIN_QML)
+    full = _mutated(FULL_REPRESENTATION, old, new) if path == FULL_REPRESENTATION else _read_code(FULL_REPRESENTATION)
+    assert _prepared_site_problems(main, full)
+
+
+def _pending_clear_problems(main, chat_view):
+    """3g (widget side): an owed Clear <site> delete is stored before anything
+    is torn down, runs before any prepare at unlock, and a pending id is never
+    prepared or granted before its delete replied ok."""
+    problems = []
+    body = _function_body(main, "chatRemovalPending")
+    if body is None or _squashed(body) != CHAT_REMOVAL_PENDING_BODY:
+        problems.append(f"chatRemovalPending must be exactly `{CHAT_REMOVAL_PENDING_BODY}`")
+    op_sites = re.findall(r"\bchatOpSites\s*=(?!=)\s*([^\n]*(?:\n[^\n]*){0,2})", main)
+    if len(op_sites) != 1 or not re.match(
+            r'step\s*===\s*"prepare"\s*\?\s*root\.chatNeededSites' + NOT_PENDING + r"\s*:\s*\[\s*\]", op_sites[0]):
+        problems.append("chatOpSites (what prepare creates) must be the needed sites without the pending ones")
+    if len(re.findall(r'webDataCommand\(\s*"prepare"[^)]*,\s*run\s*,\s*root\.chatOpSites\s*\)', main)) != 1 \
+            or len(_hits(r'webDataCommand\(\s*"prepare"', main)) != 1:
+        problems.append("the one prepare command takes exactly root.chatOpSites")
+    if len(re.findall(r"var\s+created\s*=\s*root\.chatOpSites" + NOT_PENDING, main)) != 1:
+        problems.append("the prepare reply may grant only the created sites that are not pending")
+    missing = _function_body(main, "chatPrepareMissing") or ""
+    if not re.search(r"root\.chatPreparedSites\.indexOf\(\s*id\s*\)\s*<\s*0\s*&&\s*!root\.chatRemovalPending\(\s*id\s*\)",
+                     missing):
+        problems.append("chatPrepareMissing must not prepare again for a pending site")
+    # Unlock: every owed delete first, then prepare.
+    unlock = re.findall(r'root\.chatEnqueue\(\s*root\.chatPendingClears\.map\(\s*function\s*\(\s*\)\s*\{\s*'
+                        r'return\s+"remove-site"\s*\}\s*\)\s*\.concat\(\s*\[\s*"prepare"\s*\]\s*\)\s*\)', main)
+    prepares = re.findall(r'chatEnqueue\(([^\n]*)"prepare"', main)
+    if len(unlock) != 1 or len(prepares) != 2 \
+            or not any(re.fullmatch(r"\s*\[\s*", text) for text in prepares):
+        problems.append("the unlock queues `remove-site` for each pending id before `prepare`; "
+                        "only chatPrepareMissing queues prepare otherwise")
+    # Clear <site>: stored first (and nothing else if that fails).
+    clear = _function_body(main, "chatClearSite") or ""
+    stored = re.search(r"if\s*\(\s*!root\.chatRemovalPending\(\s*siteId\s*\)\s*&&\s*!root\.chatWritePendingClears\(\s*"
+                       r"root\.chatPendingClears\.concat\(\s*\[\s*siteId\s*\]\s*\)\s*\)\s*\)\s*return\b", clear)
+    narrowed = re.search(r"root\.chatPreparedSites\s*=", clear)
+    if not stored or not narrowed or stored.start() > narrowed.start():
+        problems.append("chatClearSite must store the owed delete (and stop if it can't) before anything else")
+    # The debt ends only on an ok delete, or Clear chat data's ok remove.
+    writes = []
+    for text in re.findall(r"(?<!function )\bchatWritePendingClears\(([^\n]*)\)", main):
+        while text.count(")") > text.count("("):
+            text = text[:text.rindex(")")]
+        writes.append(_squashed(text))
+    expected = ["root.chatPendingClears.concat([siteId])",
+                "root.chatPendingClears.filter(function (id) { return id !== removed })", "[]"]
+    if sorted(writes) != sorted(expected):
+        problems.append(f"chatWritePendingClears may only add the cleared site, drop the removed one or empty "
+                        f"the list, got {writes}")
+    if not re.search(r'case\s+"remove-site"\s*:[^}]*?if\s*\(\s*reply\.ok\s*\)\s*'
+                     r"root\.chatWritePendingClears\(\s*root\.chatPendingClears\.filter\(", main):
+        problems.append("remove-site may drop the site from the owed list only if reply.ok")
+    if not re.search(r'case\s+"remove"\s*:\s*if\s*\(\s*reply\.ok\s*\)\s*root\.chatWritePendingClears\(\s*\[\s*\]\s*\)', main):
+        problems.append("only Clear chat data's remove, after reply.ok, may empty the owed list")
+    view = _function_body(chat_view, "clearSiteData") or ""
+    asked = re.search(r"chatView\.siteDataClearRequested\(\s*siteId\s*\)\s*if\s*\(\s*!Array\.isArray\(\s*"
+                      r"chatView\.pendingSiteClears\s*\)\s*\|\|\s*chatView\.pendingSiteClears\.indexOf\(\s*siteId\s*\)"
+                      r"\s*<\s*0\s*\)\s*return\b", view)
+    torn = re.search(r"chatView\.web\.clearSite\(\s*siteId\s*\)", view)
+    if not asked or not torn or asked.start() > torn.start() or len(_hits(r"\.clearSite\s*\(", view)) != 1:
+        problems.append("ChatView.clearSiteData with saved sign-ins must ask main.qml first and tear down only "
+                        "a site that is pending afterwards")
+    return problems
+
+
+def test_owed_site_deletes_run_before_any_prepare_of_that_site():
+    problems = _pending_clear_problems(_read_code(MAIN_QML), _read_code(CHAT_VIEW))
+    assert not problems, f"{_rel(MAIN_QML)}: {problems}"
+
+
+PENDING_CLEAR_MUTATIONS = {
+    "prepare a pending site": (MAIN_QML, "        root.chatOpSites = step === \"prepare\" ? root.chatNeededSites.filter(function (id) {\n"
+                               "            return !root.chatRemovalPending(id)\n        }) : []",
+                               "        root.chatOpSites = step === \"prepare\" ? root.chatNeededSites : []"),
+    "grant a pending site": (MAIN_QML, "var created = root.chatOpSites.filter(function (id) { return !root.chatRemovalPending(id) })",
+                             "var created = root.chatOpSites"),
+    "missing prepare ignores pending": (MAIN_QML, " && !root.chatRemovalPending(id)\n        })\n        if (missing)",
+                                        "\n        })\n        if (missing)"),
+    "deletes after prepare": (MAIN_QML, '.map(function () { return "remove-site" }).concat(["prepare"])',
+                              '.map(function () { return "remove-site" }).concat([])'),
+    "unlock without the owed deletes": (MAIN_QML, 'root.chatEnqueue(root.chatPendingClears.map(function () { return "remove-site" }).concat(["prepare"]))',
+                                        'root.chatEnqueue(["prepare"])'),
+    "pending read loosely": (MAIN_QML, "return root.chatPendingClears.indexOf(siteId) >= 0",
+                             "return root.chatPendingClears.indexOf(siteId) > 0"),
+    "torn down before stored": (MAIN_QML, "        root.chatRemoveTried = root.chatRemoveTried.filter(function (id) { return id !== siteId })\n"
+                                "        root.chatPreparedSites = root.chatPreparedSites.filter(function (id) { return id !== siteId })\n",
+                                ""),
+    "failed delete ends the debt": (MAIN_QML, "            if (reply.ok)\n                root.chatWritePendingClears(",
+                                    "            if (true)\n                root.chatWritePendingClears("),
+    "clear chat data empties on failure": (MAIN_QML, "            if (reply.ok)\n                root.chatWritePendingClears([])",
+                                           "            root.chatWritePendingClears([])\n            if (reply.ok)\n                {}"),
+    "other write": (MAIN_QML, "    function chatNext() {",
+                    "    function x() { root.chatWritePendingClears(root.chatNeededSites) }\n    function chatNext() {"),
+    "view tears down first": (CHAT_VIEW, "            chatView.siteDataClearRequested(siteId)\n",
+                              "            chatView.web.clearSite(siteId)\n            chatView.siteDataClearRequested(siteId)\n"),
+    "view tears down although not stored": (CHAT_VIEW, "            if (!Array.isArray(chatView.pendingSiteClears) || chatView.pendingSiteClears.indexOf(siteId) < 0)\n                return\n",
+                                            ""),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PENDING_CLEAR_MUTATIONS))
+def test_proof_pending_clear_rule_catches(name):
+    path, old, new = PENDING_CLEAR_MUTATIONS[name]
+    main = _mutated(MAIN_QML, old, new) if path == MAIN_QML else _read_code(MAIN_QML)
+    view = _mutated(CHAT_VIEW, old, new) if path == CHAT_VIEW else _read_code(CHAT_VIEW)
+    assert _pending_clear_problems(main, view)
 
 
 def test_chat_starts_only_in_the_open_popup():
@@ -823,7 +1262,8 @@ def test_proof_chat_view_current_rule_catches(with_ollama, old, new):
 
 # --- helper commands: built only in ChatStorage.js -------------------------------------
 
-HELPER_FLAGS = ("--vault", "--web-data", "--store", "--applet", "--generation", "--keep")
+HELPER_FLAGS = ("--vault", "--web-data", "--store", "--applet", "--generation", "--keep",
+                "--sites", "--known", "--site")
 
 
 # --applet also names the widget in history and backup commands: there it
@@ -868,6 +1308,22 @@ def _chat_storage_problems(raw):
                '"add-key", "remove-key", "auto-unlock"')
     if not ops or re.sub(r"\s+", " ", ops.group(1)).strip() != allowed:
         problems.append(f"VAULT_OPERATIONS must be exactly [{allowed}]")
+    # The web-data operations, and the site ids only through the checked lists
+    # (task 004): siteList for --sites and --known, isSiteId for --site.
+    web = _function_body(code, "webDataCommand") or ""
+    if sorted(set(re.findall(r'\bop\s*===\s*"([\w-]+)"', web))) != ["prepare", "prune", "remove", "remove-site"] \
+            or not re.search(r'return\s+""\s*\}\s*$', web):
+        problems.append("webDataCommand handles exactly prepare, prune, remove-site and remove, else returns \"\"")
+    for pattern in (r'var\s+created\s*=\s*siteList\(\s*sites\s*\)\s*'
+                    r'return\s+created\s*===\s*""\s*\?\s*""\s*:\s*command\s*\+\s*" --sites "\s*\+\s*created\b',
+                    r'var\s+known\s*=\s*siteList\(\s*sites\s*\)\s*'
+                    r'return\s+known\s*===\s*""\s*\?\s*""\s*:\s*command\s*\+\s*" --known "\s*\+\s*known\b',
+                    r'return\s+isSiteId\(\s*sites\s*\)\s*\?\s*command\s*\+\s*" --site "\s*\+\s*sites\s*:\s*""'):
+        if len(re.findall(pattern, web)) != 1:
+            problems.append(f"webDataCommand must add site ids only as `{pattern}`")
+    for flag in ("--sites", "--known", "--site"):
+        if len(re.findall(rf"(?<![\w-]){flag}(?![\w-])", code)) != 1:
+            problems.append(f"{flag} must appear exactly once, in webDataCommand")
     # Every argv value is validated: no raw concatenation of op or numbers
     # other than through the checked branches.
     if _hits(r"\beval\s*\(|\bFunction\s*\(", code):
@@ -985,22 +1441,44 @@ def _mutated(path, old, new):
     return _strip_comments(raw.replace(old, new, 1))
 
 
+_PROFILE_PATH = "            persistentStoragePath: siteProfile.saved ? siteProfile.sitePath : \"\"\n"
 PROFILE_MUTATIONS = {
-    "offTheRecord first": (
-        "        persistentStoragePath: chatWeb.staySignedIn",
-        "        offTheRecord: !chatWeb.staySignedIn\n        persistentStoragePath: chatWeb.staySignedIn",
-    ),
-    "storageName before paths": (
-        "        persistentStoragePath: chatWeb.staySignedIn ? chatWeb.storagePath : \"\"\n",
-        "        storageName: \"x\"\n        persistentStoragePath: chatWeb.staySignedIn ? chatWeb.storagePath : \"\"\n",
-    ),
-    "always persistent": ("offTheRecord: !chatWeb.staySignedIn", "offTheRecord: false"),
-    "path without gate": ("cachePath: chatWeb.staySignedIn ? chatWeb.storagePath : \"\"",
-                          "cachePath: chatWeb.storagePath"),
+    "offTheRecord first": (_PROFILE_PATH, "            offTheRecord: !siteProfile.saved\n" + _PROFILE_PATH),
+    "storageName before paths": (_PROFILE_PATH, "            storageName: \"x\"\n" + _PROFILE_PATH),
+    "always persistent": ("offTheRecord: !siteProfile.saved", "offTheRecord: false"),
+    "path without gate": ("cachePath: siteProfile.saved ? siteProfile.sitePath : \"\"",
+                          "cachePath: siteProfile.sitePath"),
     "disk cache": ("WebEngineProfile.MemoryHttpCache", "WebEngineProfile.DiskHttpCache"),
     "forced cookies": ("WebEngineProfile.AllowPersistentCookies", "WebEngineProfile.ForcePersistentCookies"),
-    "second profile": ("    WebEngineProfile {\n", "    WebEngineProfile { id: other }\n    WebEngineProfile {\n"),
+    "second profile": ("        WebEngineProfile {\n", "        WebEngineProfile { id: other }\n        WebEngineProfile {\n"),
+    # 3a: no shared profile, no second component, nothing outside the component.
+    "top-level profile": ("    ListModel {\n        id: visitedSites\n",
+                          "    WebEngineProfile { id: chatProfile }\n    ListModel {\n        id: visitedSites\n"),
+    "second component": ("    ListModel {\n        id: visitedSites\n",
+                         "    Component { id: sharedComponent\n        WebEngineProfile { offTheRecord: true }\n    }\n"
+                         "    ListModel {\n        id: visitedSites\n"),
+    "shared chatProfile id": ("            id: siteProfile\n", "            id: chatProfile\n"),
+    "saved by default": ("            property bool saved: false\n", "            property bool saved: true\n"),
+    "path input preset": ("            property string sitePath: \"\"\n",
+                          "            property string sitePath: \"/tmp/shared\"\n"),
+    "input written later": ("        profile.httpUserAgent = chatWeb.baseUserAgent\n",
+                            "        profile.httpUserAgent = chatWeb.baseUserAgent\n        profile.saved = true\n"),
+    "profile made outside ensureProfile": (
+        "    function profileFor(siteId) {\n",
+        "    function shared() { return siteProfileComponent.createObject(chatWeb, {}) }\n    function profileFor(siteId) {\n"),
+    "download handler inline": ("            onDownloadRequested: (download) => chatWeb.handleDownload(download)\n",
+                                "            onDownloadRequested: (download) => download.accept()\n"),
 }
+
+
+@pytest.mark.parametrize("name, old, new", [
+    ("ChatView.qml", "    spacing: 0\n", "    spacing: 0\n    WebEngineProfile { id: spare }\n"),
+    ("main.qml", "    Timer {\n        id: chatWaitTimer\n",
+     "    property var chatProfile: null\n    Timer {\n        id: chatWaitTimer\n"),
+])
+def test_proof_profile_outside_the_component_is_caught(name, old, new):
+    path = {"ChatView.qml": CHAT_VIEW, "main.qml": MAIN_QML}[name]
+    assert _profile_elsewhere_offenders({name: _mutated(path, old, new)})
 
 
 @pytest.mark.parametrize("name", sorted(PROFILE_MUTATIONS))
@@ -1021,8 +1499,11 @@ def test_proof_profile_names_outside_chat_web_view_are_caught():
 
 @pytest.mark.parametrize("old,new", [
     ("    property bool staySignedIn: false", "    property bool staySignedIn: true"),
-    ("    property string storagePath: \"\"", "    property string storagePath: \"/tmp/x\""),
+    ("    property string runtimeDir: \"\"", "    property string runtimeDir: \"/tmp/x\""),
+    ("    property int storageGeneration: -1", "    property int storageGeneration: 0"),
+    ("    property var preparedSites: []", "    property var preparedSites: [\"claude\"]"),
     ("    function goBack() {", "    function goBack() {\n        chatWeb.staySignedIn = true"),
+    ("    function goBack() {", "    function goBack() {\n        chatWeb.preparedSites = chatWeb.siteIds"),
 ])
 def test_proof_web_view_inputs_rule_catches(old, new):
     assert _web_view_inputs_problems(_mutated(CHAT_WEB_VIEW, old, new))
@@ -1033,6 +1514,14 @@ def test_proof_web_view_inputs_rule_catches(old, new):
     ("chatView.encrypted && chatView.storageReady", "chatView.storageReady"),
     ("&& chatView.storagePath !== \"\" && chatView.profileName !== \"\"", ""),
     ("            active: false\n", "            active: chatView.started\n            source: \"ChatWebView.qml\"\n"),
+    ("runtimeDir: chatView.persistentReady ? chatView.runtimeDir : \"\",", "runtimeDir: chatView.runtimeDir,"),
+    ("storageGeneration: chatView.persistentReady ? chatView.storageGeneration : -1",
+     "storageGeneration: chatView.storageGeneration"),
+    ("Qt.binding(function () { return chatView.preparedSites })",
+     "Qt.binding(function () { return chatView.siteIds })"),
+    ("                chatView.focusLater()\n            }\n        }",
+     "                chatView.focusLater()\n                webLoader.item.preparedSites = chatView.siteIds\n"
+     "            }\n        }"),
     ("    function start() {", "    function hack() { webLoader.setSource(\"ChatWebView.qml\", {}) }\n    function start() {"),
 ])
 def test_proof_chat_view_gate_rule_catches(old, new):
@@ -1088,6 +1577,15 @@ def test_proof_applet_flag_outside_the_builders_is_caught(path, old, new):
     ("store !== \"encrypted\"", "store !== \"encrypted\" && store !== \"folder\""),
     ('"remove-key", "auto-unlock"]', '"remove-key", "auto-unlock", "purge"]'),
     ('"remove-key", "auto-unlock"]', '"remove-key"]'),
+    # task 004: site ids only through the checked lists, and only these operations.
+    ('        return created === "" ? "" : command + " --sites " + created',
+     '        return command + " --sites " + sites'),
+    ('        return known === "" ? "" : command + " --known " + known',
+     '        return command + " --known " + sites.join(",")'),
+    ('        return isSiteId(sites) ? command + " --site " + sites : ""', '        return command + " --site " + sites'),
+    ('    if (op === "remove") {', '    if (op === "purge")\n        return command\n    if (op === "remove") {'),
+    ('    return ""\n}\n\n// method:', '    return command\n}\n\n// method:'),
+    ("function isSiteId(id) {", 'var EXTRA = " --sites claude"\nfunction isSiteId(id) {'),
 ])
 def test_proof_chat_storage_rule_catches(old, new):
     raw = CHAT_STORAGE_JS.read_text(encoding="utf-8")
@@ -1259,17 +1757,20 @@ def _user_agent_problems(code):
     allowed = _block_spans(code, r"\bfunction\s+applyUserAgent\s*\([^)]*\)\s*\{")
     if len(allowed) != 1:
         return [f"exactly one applyUserAgent function expected, found {len(allowed)}"]
-    # The one initial assignment, when the item is created.
+    # The one initial assignment, when ensureProfile makes a site's profile.
+    ensure = _block_spans(code, r"\bfunction\s+ensureProfile\s*\([^)]*\)\s*\{")
     initial = [
         match.start(1) for match in re.finditer(
-            r"(?m)^\s*chatProfile\.(httpUserAgent)\s*=\s*chatWeb\.baseUserAgent\s*$", code)
+            r"(?m)^\s*profile\.(httpUserAgent)\s*=\s*chatWeb\.baseUserAgent\s*$", code)
+        if len(ensure) == 1 and ensure[0][0] <= match.start() < ensure[0][1]
     ]
     for match in re.finditer(USER_AGENT_WRITE, code):
         inside = any(lo <= match.start() < hi for lo, hi in allowed)
         if not inside and match.start() not in initial:
             problems.append(f"user agent or client hints written outside applyUserAgent (line {_line_of(code, match.start())})")
     if len(initial) != 1:
-        problems.append(f"exactly one initial `chatProfile.httpUserAgent = chatWeb.baseUserAgent` expected, found {len(initial)}")
+        problems.append("exactly one initial `profile.httpUserAgent = chatWeb.baseUserAgent` expected, "
+                        f"in ensureProfile, found {len(initial)}")
     synchronous = [
         body for opener in (r"\bfunction\s+checkUserAgent\s*\([^)]*\)\s*\{",)
         for _, body in _blocks(code, opener)
@@ -1296,11 +1797,15 @@ USER_AGENT_MUTATIONS = {
     ),
     "direct write elsewhere": (
         "    function syncUserAgent() {\n",
-        "    function syncUserAgent() {\n        chatProfile.httpUserAgent = \"x\"\n",
+        "    function syncUserAgent() {\n        chatWeb.profiles.claude.httpUserAgent = \"x\"\n",
     ),
     "hints written elsewhere": (
         "    function syncUserAgent() {\n",
-        "    function syncUserAgent() {\n        chatProfile.clientHints.isAllClientHintsEnabled = true\n",
+        "    function syncUserAgent() {\n        chatWeb.profiles.claude.clientHints.isAllClientHintsEnabled = true\n",
+    ),
+    "initial write outside ensureProfile": (
+        "    function syncUserAgent() {\n",
+        "    function syncUserAgent() {\n        profile.httpUserAgent = chatWeb.baseUserAgent\n",
     ),
 }
 
@@ -1351,6 +1856,8 @@ def test_main_xml_adds_only_the_chat_keys():
             assert entries[key]["default"] == default, (
                 f"{_rel(MAIN_XML)}: {key} default must be exactly {default!r}, got {entries[key]['default']!r}"
             )
+    assert entries["chatPendingSiteClears"]["default"] is None, (
+        f"{_rel(MAIN_XML)}: chatPendingSiteClears must default to empty (no owed delete)")
 
 
 @pytest.mark.parametrize("filename", CHAT_CONFIG_READ_ONLY_FILES)
@@ -1379,13 +1886,14 @@ def test_proof_unlisted_main_xml_key_is_caught(key):
     assert _unexpected_main_xml_keys(entries) == {key}
 
 
-# The chat keys main.qml may write: the profile generation and the zoom map
-# (the zoom map only from zoomWriteTimer, see _zoom_write_problems).
-MAIN_WRITABLE_CHAT_KEYS = {"chatProfileGeneration", "chatSiteZoom"}
+# The chat keys main.qml may write: the profile generation, the zoom map
+# (only from zoomWriteTimer, see _zoom_write_problems), and task 004's
+# migration marker and owed site deletes (see _main_site_key_write_problems).
+MAIN_WRITABLE_CHAT_KEYS = {"chatProfileGeneration", "chatSiteZoom", "chatProfileLayout", "chatPendingSiteClears"}
 
 
 def _main_config_write_offenders(code):
-    """main.qml may write chatProfileGeneration and chatSiteZoom and no other chat key."""
+    """main.qml may write only MAIN_WRITABLE_CHAT_KEYS among the chat keys."""
     return [
         f"{_line_of(code, match.start())} {match.group(1)}"
         for match in re.finditer(r"\bPlasmoid\s*\.\s*configuration\s*\.\s*(chat\w*)\s*(?:[-+*/%&|^]|\?\?)?=(?!=)", code)
@@ -1395,7 +1903,7 @@ def _main_config_write_offenders(code):
     ]
 
 
-def test_main_writes_only_the_profile_generation_and_zoom_chat_keys():
+def test_main_writes_only_its_own_chat_keys():
     offenders = _main_config_write_offenders(_read_code(MAIN_QML))
     assert not offenders, (
         f"{_rel(MAIN_QML)} may only write {sorted(MAIN_WRITABLE_CHAT_KEYS)} among chat keys: {offenders}"
@@ -1420,7 +1928,8 @@ def test_config_pages_declare_every_chat_key_and_never_write_config(page):
                 f"{_rel(page)} must declare `property {qml_type} {name}` once, got {declared}"
             )
     literals = {"chatSignInStorage": '"memory"', "chatProfileGeneration": "0", "chatAutoLockMinutes": "0",
-                "chatKeepOpen": "false", "chatSiteZoom": '"{}"', "chatVaultUnlock": '"passphrase"'}
+                "chatKeepOpen": "false", "chatSiteZoom": '"{}"', "chatVaultUnlock": '"passphrase"',
+                "chatProfileLayout": "0", "chatPendingSiteClears": '""'}
     if "chatOllamaUrl" in expected:
         literals["chatOllamaUrl"] = f'"{OLLAMA_CONFIG_KEYS["chatOllamaUrl"][1]}"'
     for key, literal in literals.items():
@@ -1433,6 +1942,10 @@ def test_config_pages_declare_every_chat_key_and_never_write_config(page):
         line for line in _hits(r"\bcfg_chatProfileGeneration\s*=(?!=)", code)
     ]
     assert len(gen_writes) <= 1, f"{_rel(page)}: cfg_chatProfileGeneration may only be synced from the config"
+    # main.qml's own keys: a page only mirrors them from the config, once.
+    for key in ("chatProfileLayout", "chatPendingSiteClears"):
+        synced = _hits(rf"\bcfg_{key}\s*=(?!=)", code)
+        assert len(synced) <= 1, f"{_rel(page)}: cfg_{key} may only be synced from the config"
 
 
 # --- settings pages: General, AI Usage, Chat ----------------------------------------
@@ -1516,11 +2029,63 @@ def test_proof_missing_page_key_is_caught():
 # Keys main.qml may write: the profile generation, the schema and first-run
 # flags, the normalized refresh interval, the popup's Left/Used buttons and
 # the debounced per-site zoom map, and (only in the one-time schema 2 -> 3
-# migration, see _main_migration_problems) the two reading choices.
+# migration, see _main_migration_problems) the two reading choices, and
+# task 004's chatProfileLayout and chatPendingSiteClears.
 MAIN_WRITABLE_KEYS = {
     "chatProfileGeneration", "configSchemaVersion", "initialSetupComplete", "refreshInterval", "usageMode",
     "chatSiteZoom", "tooltipMetrics", "providerMetrics", "usageHistoryClearOwed",
+    "chatProfileLayout", "chatPendingSiteClears",
 }
+
+
+def _main_site_key_write_problems(code):
+    """chatProfileLayout is written only by the one-time move (0 -> 1 or 2)
+    and Got it (1 -> 2); chatPendingSiteClears only by chatWritePendingClears,
+    with a list pendingClearsText checked."""
+    problems = []
+    layout = [match.start() for match in re.finditer(r"\bPlasmoid\.configuration\.chatProfileLayout\s*=(?!=)", code)]
+    migrate = _block_spans(code, r"\bfunction\s+chatMigrateLayout\s*\([^)]*\)\s*\{")
+    in_migrate = [at for at in layout if len(migrate) == 1 and migrate[0][0] <= at < migrate[0][1]]
+    rest = [at for at in layout if at not in in_migrate]
+    migrate_body = _function_body(code, "chatMigrateLayout") or ""
+    if len(in_migrate) != 1 or not re.search(
+            r"if\s*\(\s*root\.chatProfileLayout\s*!==\s*0\s*\)\s*return\b[\s\S]*"
+            r"root\.chatSetGeneration\(\s*ChatStorage\.nextGeneration\(\s*root\.chatGeneration\s*\)\s*\)\s*"
+            r"Plasmoid\.configuration\.chatProfileLayout\s*=\s*setupDone\s*===\s*true\s*&&\s*"
+            r'root\.chatStorageMode\s*===\s*"encrypted"\s*\?\s*1\s*:\s*2\s*$', migrate_body, re.M):
+        problems.append("chatMigrateLayout must run only at layout 0, bump the generation first, then store 1 or 2")
+    if len(rest) != 1 or not re.search(
+            r'case\s+"layout-notice-done"\s*:\s*if\s*\(\s*root\.chatProfileLayout\s*===\s*1\s*\)\s*'
+            r"Plasmoid\.configuration\.chatProfileLayout\s*=\s*2\s*break\b", code):
+        problems.append('chatProfileLayout may otherwise only go from 1 to 2 on "layout-notice-done"')
+    pending = _hits(r"\bPlasmoid\.configuration\.chatPendingSiteClears\s*=(?!=)", code)
+    writer = _function_body(code, "chatWritePendingClears") or ""
+    if len(pending) != 1 or not re.search(
+            r"var\s+text\s*=\s*ChatStorage\.pendingClearsText\(\s*ids\s*\)\s*"
+            r"if\s*\(\s*text\s*===\s*null\s*\)\s*return\s+false\s*"
+            r"Plasmoid\.configuration\.chatPendingSiteClears\s*=\s*text\s*$", writer, re.M):
+        problems.append("chatPendingSiteClears may only be written in chatWritePendingClears, "
+                        "with a pendingClearsText value that isn't null")
+    return problems
+
+
+def test_main_writes_the_site_isolation_keys_only_where_planned():
+    problems = _main_site_key_write_problems(_read_code(MAIN_QML))
+    assert not problems, f"{_rel(MAIN_QML)}: {problems}"
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("        if (root.chatProfileLayout !== 0)\n            return\n", ""),
+    ('root.chatStorageMode === "encrypted" ? 1 : 2', "1"),
+    ("            if (root.chatProfileLayout === 1)\n                Plasmoid.configuration.chatProfileLayout = 2",
+     "            Plasmoid.configuration.chatProfileLayout = 2"),
+    ("    function chatNext() {", "    function x() { Plasmoid.configuration.chatProfileLayout = 0 }\n    function chatNext() {"),
+    ("        if (text === null)\n            return false\n", ""),
+    ("    function chatNext() {",
+     "    function x() { Plasmoid.configuration.chatPendingSiteClears = \"\" }\n    function chatNext() {"),
+])
+def test_proof_site_isolation_key_write_rule_catches(old, new):
+    assert _main_site_key_write_problems(_mutated(MAIN_QML, old, new))
 
 
 def _main_written_keys(code):
@@ -1711,9 +2276,18 @@ def _lock_wait_problems(code):
                     earlier in ("wait", "leave-wait") for earlier in steps[:index]):
                 problems.append(f"{_line_of(code, match.start())}: {step} without an earlier wait")
     timers = [body for _, body in _blocks(code, r"\bTimer\s*\{") if re.search(r"\bid\s*:\s*chatWaitTimer\b", body)]
-    intervals = re.findall(r"\binterval\s*:\s*(\d+)\s*$", timers[0], re.M) if len(timers) == 1 else []
-    if len(intervals) != 1 or int(intervals[0]) < 1000:
-        problems.append("chatWaitTimer must exist once with a literal interval of at least 1000 ms")
+    intervals = re.findall(r"\binterval\s*:\s*(.+?)\s*$", timers[0], re.M) if len(timers) == 1 else []
+    # One named wait, a literal of 1 to 3 s (plan-v3-delta Q14), never changed.
+    waits = re.findall(r"(?m)^\s*readonly\s+property\s+int\s+chatProfileCloseWait\s*:\s*(\d+)\s*$", code)
+    if intervals != ["root.chatProfileCloseWait"] or len(waits) != 1 or not 1000 <= int(waits[0]) <= 3000 \
+            or len(_hits(r"\bchatProfileCloseWait\b", code)) != 2:
+        problems.append("chatWaitTimer must exist once with `interval: root.chatProfileCloseWait`, a readonly "
+                        "literal from 1000 to 3000 ms used nowhere else")
+    # Clear <site> data: the site's profile closes before its folder goes.
+    clear = _function_body(code, "chatClearSite") or ""
+    if not re.search(r'root\.chatEnqueue\(\s*\[\s*"wait"\s*\]\s*\.concat\(', clear) \
+            or len(_hits(r"\bchatEnqueue\s*\(", clear)) != 1:
+        problems.append('chatClearSite must queue its remove-site steps behind one "wait"')
     return problems
 
 
@@ -1728,7 +2302,12 @@ def test_every_lock_waits_for_the_profile_to_close():
      'root.chatAutoLocking = true\n            root.chatVaultHold = true\n            root.chatVaultError = ""\n'
      '            root.chatPreparedGeneration = -1\n            root.chatEnqueue(["lock"])'),
     ('["leave-wait", "leave-remove", "leave-lock"', '["leave-remove", "leave-lock"'),
-    ("        id: chatWaitTimer\n        interval: 1000", "        id: chatWaitTimer\n        interval: 200"),
+    ("        id: chatWaitTimer\n        interval: root.chatProfileCloseWait",
+     "        id: chatWaitTimer\n        interval: 200"),
+    ("readonly property int chatProfileCloseWait: 1000", "readonly property int chatProfileCloseWait: 200"),
+    ("readonly property int chatProfileCloseWait: 1000", "readonly property int chatProfileCloseWait: 5000"),
+    ("readonly property int chatProfileCloseWait: 1000", "property int chatProfileCloseWait: 1000"),
+    ('root.chatEnqueue(["wait"].concat(owed', "root.chatEnqueue([].concat(owed"),
 ])
 def test_proof_lock_wait_rule_catches(old, new):
     assert _lock_wait_problems(_mutated(MAIN_QML, old, new))
@@ -2923,8 +3502,8 @@ def _local_gate_problems(web, check):
             problems.append(f"line {_line_of(web, match.start())}: a pass is granted outside localOwnerFinished")
     sync = _function_body(web, "syncViews") or ""
     appends = len(re.findall(r"visitedSites\s*\.\s*append\s*\(", web))
-    guarded = re.search(r"ChatSites\s*\.\s*localOwnerPort\s*\([^)]*\)\s*===\s*0\s*\)\s*"
-                        r"visitedSites\s*\.\s*append\s*\(", sync)
+    guarded = re.search(r"ChatSites\s*\.\s*localOwnerPort\s*\([^)]*\)\s*===\s*0\s*\)\s*\{\s*"
+                        r"if\s*\(\s*chatWeb\.ensureProfile\(\s*wanted\s*\)\s*\)\s*visitedSites\s*\.\s*append\s*\(", sync)
     if appends != 2 or not guarded or len(re.findall(r"visitedSites\s*\.\s*append\s*\(", sync)) != 1:
         problems.append("visitedSites.append only in syncViews behind `localOwnerPort(...) === 0` "
                         "and in localOwnerFinished")
@@ -2986,8 +3565,8 @@ LOCAL_GATE_MUTATIONS = [
     (CHAT_WEB_VIEW, "                    var url = request.url.toString()\n",
      "                    var url = request.url.toString()\n                    page.checkUserAgent(request)\n"),
     (CHAT_WEB_VIEW, '        if (problem !== "") {', '        if (problem === "other") {'),
-    (CHAT_WEB_VIEW, "                                           url: home }) === 0)\n",
-     "                                           url: home }) >= 0)\n"),
+    (CHAT_WEB_VIEW, "                                           url: home }) === 0) {\n",
+     "                                           url: home }) >= 0) {\n"),
     (CHAT_WEB_VIEW, "onFinished: (port, problem) => chatWeb.localOwnerFinished(port, problem)",
      'onFinished: (port, problem) => chatWeb.localOwnerFinished(port, "")'),
     (CHAT_WEB_VIEW, "    function retryLocalOwner() {\n",
@@ -3273,8 +3852,8 @@ EXTERNAL_MUTATIONS = [
      "        Qt.openUrlExternally(url)"),
     (CHAT_WEB_VIEW, "        if (chatWeb.canOpenExternally)\n            Qt.openUrlExternally(chatWeb.activeView.url)",
      "        Qt.openUrlExternally(chatWeb.activeView.url)"),
-    (CHAT_WEB_VIEW, "        chatWeb.syncViews()\n    }\n\n    Component.onDestruction",
-     "        chatWeb.syncViews()\n        chatWeb.acceptExternal()\n    }\n\n    Component.onDestruction"),
+    (CHAT_WEB_VIEW, "        chatWeb.syncCurrentViews()\n    }\n\n    // A changed address moves",
+     "        chatWeb.syncCurrentViews()\n        chatWeb.acceptExternal()\n    }\n\n    // A changed address moves"),
     (CHAT_WEB_VIEW, "                         && ChatSites.isHttpsUrl(url))\n                    chatWeb.askExternal(url)",
      "                         && ChatSites.isHttpsUrl(url))\n                    chatWeb.acceptExternal(url)"),
     (CHAT_WEB_VIEW, "                else if (verdict !== \"block\" && request.userInitiated\n",
@@ -5081,8 +5660,12 @@ def test_proof_set_persona_rule_catches(path, old, new):
 # is off, a sign-in window covers its opener's pane, and the one WebEngineView
 # stays inside pageComponent.
 SPLIT_SYNC_APPEND = (r"ChatSites\s*\.\s*localOwnerPort\s*\(\s*\{\s*siteId\s*:\s*wanted\s*,\s*customUrls\s*:\s*"
-                     r"chatWeb\s*\.\s*customUrls\s*,\s*url\s*:\s*home\s*\}\s*\)\s*===\s*0\s*\)\s*"
-                     r"visitedSites\s*\.\s*append\s*\(\s*\{\s*site\s*:\s*wanted\s*,\s*pane\s*:\s*pane\s*\}\s*\)")
+                     r"chatWeb\s*\.\s*customUrls\s*,\s*url\s*:\s*home\s*\}\s*\)\s*===\s*0\s*\)\s*\{\s*"
+                     # Task 004: only once the site's profile exists (or could be made).
+                     r"if\s*\(\s*chatWeb\s*\.\s*ensureProfile\s*\(\s*wanted\s*\)\s*\)\s*"
+                     r"visitedSites\s*\.\s*append\s*\(\s*\{\s*site\s*:\s*wanted\s*,\s*pane\s*:\s*pane\s*\}\s*\)\s*\}")
+# The create path of a checked Local view also needs its profile first.
+SPLIT_FINISHED_PROFILE = r'\|\|\s*!\s*chatWeb\s*\.\s*ensureProfile\s*\(\s*"local"\s*\)\s*\)\s*return\b'
 SPLIT_FINISHED_APPEND = (r'visitedSites\s*\.\s*append\s*\(\s*\{\s*site\s*:\s*"local"\s*,\s*'
                          r"pane\s*:\s*pending\s*\.\s*pane\s*\}\s*\)")
 SPLIT_CREATE_GATE = (r"\belse\s+if\s*\(\s*!\s*chatWeb\s*\.\s*ownerPending\s*\)\s*"
@@ -5112,11 +5695,15 @@ def _split_view_problems(web, view):
     finished = _function_body(web, "localOwnerFinished") or ""
     # 1. Exactly two appends, each with its pane, in their owner-gated places.
     appends = list(re.finditer(r"visitedSites\s*\.\s*append\s*\(", web))
+    profile_first = re.search(SPLIT_FINISHED_PROFILE, finished)
+    finished_append = re.search(SPLIT_FINISHED_APPEND, finished)
     if len(appends) != 2 or len(re.findall(SPLIT_SYNC_APPEND, sync)) != 1 \
-            or len(re.findall(SPLIT_FINISHED_APPEND, finished)) != 1:
+            or len(re.findall(SPLIT_FINISHED_APPEND, finished)) != 1 \
+            or not profile_first or profile_first.start() > finished_append.start():
         problems.append("visitedSites.append exactly twice: `{ site: wanted, pane: pane }` in syncViews behind "
                         "`localOwnerPort({ siteId: wanted, ... url: home }) === 0` and "
-                        "`{ site: \"local\", pane: pending.pane }` in localOwnerFinished")
+                        "`{ site: \"local\", pane: pending.pane }` in localOwnerFinished, each only after "
+                        "ensureProfile(...) gave the site's profile")
     for match in appends:
         literal = re.match(r"visitedSites\s*\.\s*append\s*\(\s*\{([^}]*)\}", web[match.start():])
         if not literal or not re.search(r"\bpane\s*:", literal.group(1)):
@@ -5135,7 +5722,9 @@ def _split_view_problems(web, view):
         problems.append("overlayPane is set only as `chatWeb.overlayPane = page.pane` right before the one "
                         "chatWeb.openOverlay(request, page.site, page.url.toString())")
     created = re.search(SPLIT_CREATE_OBJECT, web)
-    if len(re.findall(r"\bcreateObject\s*\(", web)) != 1 or not created \
+    # The other createObject is siteProfileComponent's, in ensureProfile (rule 3a).
+    if len(re.findall(r"\bcreateObject\s*\(", web)) != 2 or len(re.findall(r"\bpageComponent\s*\.\s*createObject\s*\(", web)) != 1 \
+            or not created \
             or not re.search(r"\bpane\s*:\s*chatWeb\s*\.\s*overlayPane\s*,", created.group(1)) \
             or not re.search(r"\bisOverlay\s*:\s*true\s*,", created.group(1)):
         problems.append("pageComponent.createObject only once, in openOverlay, with "
@@ -5173,6 +5762,8 @@ def test_split_view_panes_share_the_gated_views():
 
 SPLIT_MUTATIONS = [
     (CHAT_WEB_VIEW, "visitedSites.append({ site: wanted, pane: pane })", "visitedSites.append({ site: wanted })"),
+    (CHAT_WEB_VIEW, "                if (chatWeb.ensureProfile(wanted))\n", "                if (true)\n"),
+    (CHAT_WEB_VIEW, ' || !chatWeb.ensureProfile("local"))\n', ")\n"),
     (CHAT_WEB_VIEW, 'visitedSites.append({ site: "local", pane: pending.pane })',
      'visitedSites.append({ site: "local" })'),
     (CHAT_WEB_VIEW, "visitedSites.append({ site: wanted, pane: pane })",
@@ -5654,6 +6245,12 @@ COMPUTED_ACCESS_ALLOWED = {
     "ChatWebView.qml": {("views", "index"), ("panes", "index"), ("files", "index"), ("panes", "at"),
                         ("panes[index]", "0"), ("panes[index]", "1")},
 }
+# Task 004: the one dotted computed access each, keyed by a site id the
+# enclosing function received (or the for-in over the profiles' own keys),
+# never reassigned there: chatWeb.profiles[siteId] and chatWeb.retiring[siteId].
+COMPUTED_MAP_ACCESS_ALLOWED = {
+    "ChatWebView.qml": {("chatWeb.profiles", "siteId"), ("chatWeb.retiring", "siteId")},
+}
 # Receivers and counters above are only ever set like this (normalized lines).
 COMPUTED_NAMES = ("views", "panes", "files", "index", "at")
 COMPUTED_NAME_SETTERS = (
@@ -5685,12 +6282,14 @@ PINNED_SETTINGS = ("screenCaptureEnabled", "pluginsEnabled", "dnsPrefetchEnabled
 PINNED_PROFILE = tuple(name for name, _ in PROFILE_BINDINGS)
 PERMISSION_HANDLER = "{ permission.deny() }"
 CERTIFICATE_HANDLER = "{ error.rejectCertificate() }"
+# Task 004: every site profile hands its downloads to this one function.
 DOWNLOAD_HANDLER = (
     "{ if (download.isSavePageDownload || chatWeb.pendingDownload !== null) { download.cancel() return } "
     "chatWeb.pendingDownload = download chatWeb.pendingDownloadName = download.downloadFileName "
-    "var source = download.view && typeof download.view.site === \"string\" "
-    "? ChatSites.byId(download.view.site) : null "
-    "chatWeb.pendingDownloadSite = source ? source.name : \"\" downloadTimeout.restart() }"
+    "var siteId = download.view && typeof download.view.site === \"string\" ? download.view.site : \"\" "
+    "var source = siteId !== \"\" ? ChatSites.byId(siteId) : null "
+    "chatWeb.pendingDownloadSite = source ? source.name : \"\" "
+    "chatWeb.pendingDownloadSiteId = source ? siteId : \"\" downloadTimeout.restart() }"
 )
 SAVE_DOWNLOAD = ("{ var download = chatWeb.pendingDownload chatWeb.clearPendingDownload() "
                  "if (download) download.accept() }")
@@ -5705,6 +6304,24 @@ NAV_TAIL = " request.reject() if (verdict === \"external\") chatWeb.askExternal(
 
 def _normalized(text):
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _site_key_is_received(code, offset):
+    """The `siteId` used at ``offset`` is the enclosing named function's
+    parameter, or the for-in variable over chatWeb.profiles, and is never
+    assigned in that function."""
+    spans = [(lo, hi) for lo, hi in _block_spans(code, r"\bfunction\s+[\w$]+\s*\([^)]*\)\s*\{") if lo <= offset < hi]
+    if not spans:
+        return False
+    lo, hi = max(spans)
+    header = code[:lo][code[:lo].rfind("function"):]
+    body = code[lo:hi]
+    received = re.search(r"\(\s*(?:[\w$]+\s*,\s*)*siteId\s*(?:,[^)]*)?\)\s*$", header) is not None
+    looped = re.findall(r"\bfor\s*\(\s*var\s+siteId\s+in\s+chatWeb\.profiles\s*\)", body)
+    assigned = re.findall(r"(?<![\w$.])siteId\s*(?:=(?!=)|[-+*/%&|^]=)", body)
+    declared = re.findall(r"\bvar\s+siteId\b", body)
+    return (received and not declared and not assigned) or (not received and len(looped) == 1
+                                                           and len(declared) == 1 and not assigned)
 
 
 def _computed_access_problems(name, code):
@@ -5743,6 +6360,11 @@ def _computed_access_problems(name, code):
         else:
             receiver = word.group(0)
             dotted = re.search(r"\.\s*[\w$]+$", before) is not None
+            owner = re.search(r"(?<![\w$.])([\w$]+)\s*\.\s*([\w$]+)$", before)
+            if dotted and owner and (f"{owner.group(1)}.{owner.group(2)}", key) in \
+                    COMPUTED_MAP_ACCESS_ALLOWED.get(_base(name), set()) \
+                    and _site_key_is_received(code, start):
+                continue
         if dotted or (receiver, key) not in allowed:
             problems.append(f"{name}:{line}: computed member access {receiver}[{key}]")
     # The allowed receivers and counters are set only as pinned.
@@ -5837,8 +6459,11 @@ def _security_handler_problems(web):
         bodies = [body for _, body in _handler_bodies(web, signal)]
         if [_normalized(body) for body in bodies] != [expected]:
             problems.append(f"{signal} must be exactly `{expected}` once, got {[_normalized(b) for b in bodies]}")
-    downloads = [body for _, body in _handler_bodies(web, "onDownloadRequested")]
-    if [_normalized(body) for body in downloads] != [_normalized(DOWNLOAD_HANDLER)]:
+    handle = _function_body(web, "handleDownload")
+    arrows = _hits(r"(?m)^\s*onDownloadRequested\s*:\s*\(\s*download\s*\)\s*=>\s*chatWeb\.handleDownload\(\s*download\s*\)\s*$", web)
+    if handle is None or _normalized(handle) != _normalized(DOWNLOAD_HANDLER) \
+            or len(_hits(r"\bonDownloadRequested\b", web)) != 1 or len(arrows) != 1 \
+            or len(_hits(r"\bhandleDownload\b", web)) != 2:
         problems.append("onDownloadRequested must keep the download pending (exact reviewed body)")
     navs = [body for _, body in _blocks(web, NAV_HANDLER)]
     if len(navs) != 1:
@@ -5900,7 +6525,7 @@ M1_MUTATIONS = [
     # 3 nav
     (CHAT_WEB_VIEW, 'if (verdict === "allow") {', 'if (verdict === "allow" || verdict === "block") {'),
     # 4 download
-    (CHAT_WEB_VIEW, "            chatWeb.pendingDownload = download\n", "            download.accept()\n"),
+    (CHAT_WEB_VIEW, "        chatWeb.pendingDownload = download\n", "        download.accept()\n"),
     # 5 runjs2
     (CHAT_WEB_VIEW, "            onLoadingChanged: (loadingInfo) => {\n",
      "            onLoadingChanged: (loadingInfo) => {\n"
@@ -5913,21 +6538,22 @@ M1_MUTATIONS = [
      "                page.settings.javascriptCanPaste = true\n"
      "                page.settings.localContentCanAccessFileUrls = true\n"),
     # 7 offrecord2
-    (CHAT_WEB_VIEW, "        chatWeb.syncViews()\n    }\n\n    Component.onDestruction",
-     "        chatWeb.syncViews()\n        chatProfile[\"persistentCookies\" + \"Policy\"] = 2\n"
-     "        chatProfile[\"offThe\" + \"Record\"] = false\n    }\n\n    Component.onDestruction"),
+    (CHAT_WEB_VIEW, "        chatWeb.syncCurrentViews()\n    }\n\n    // A changed address moves",
+     "        chatWeb.syncCurrentViews()\n        var shared = chatWeb.profileFor(\"claude\")\n"
+     "        shared[\"persistentCookies\" + \"Policy\"] = 2\n"
+     "        shared[\"offThe\" + \"Record\"] = false\n    }\n\n    // A changed address moves"),
     # computed names in other spellings and files
     (CHAT_WEB_VIEW, "                permission.deny()\n",
      "                var name = \"grant\"\n                permission[name]()\n"),
     (CHAT_WEB_VIEW, "                permission.deny()\n", "                permission.deny()\n                (permission)[\"grant\"]()\n"),
     (CHAT_WEB_VIEW, "                permission.deny()\n",
      "                permission.deny()\n                var p = { [\"gr\" + \"ant\"]: 1 }\n"),
-    (CHAT_WEB_VIEW, "            if (views[index] !== view)", "            if (views[index + 0] !== view)"),
-    (CHAT_WEB_VIEW, "            if (views[index] !== view)", "            if (chatWeb.views[index] !== view)"),
+    (CHAT_WEB_VIEW, "            if (views[index] !== view && ", "            if (views[index + 0] !== view && "),
+    (CHAT_WEB_VIEW, "            if (views[index] !== view && ", "            if (chatWeb.views[index] !== view && "),
     (CHAT_WEB_VIEW, "        var views = chatWeb.viewList()\n        var urls = []",
      "        var views = chatProfile\n        var urls = []"),
-    (CHAT_WEB_VIEW, "        for (var index = 0; index < views.length; index++) {\n            if (views[index] !== view)",
-     "        for (var index = \"offTheRecord\"; index < views.length; index++) {\n            if (views[index] !== view)"),
+    (CHAT_WEB_VIEW, "        for (var index = 0; index < views.length; index++) {\n            if (views[index] !== view && ",
+     "        for (var index = \"offTheRecord\"; index < views.length; index++) {\n            if (views[index] !== view && "),
     (CHAT_WEB_VIEW, "                permission.deny()\n",
      "                permission.deny()\n                for (var index in permission) {}\n"),
     (CHAT_WEB_VIEW, "    function viewFor(siteId, pane) {", "    function viewFor(siteId, pane, index) {"),
@@ -5946,10 +6572,10 @@ M1_MUTATIONS = [
     # accepting calls
     (CHAT_WEB_VIEW, "                request.reject()\n                if (verdict === \"external\")",
      "                request.accept()\n                if (verdict === \"external\")"),
-    (CHAT_WEB_VIEW, "            downloadTimeout.restart()\n        }",
-     "            downloadTimeout.restart()\n            Qt.callLater(download.accept)\n        }"),
-    (CHAT_WEB_VIEW, "            downloadTimeout.restart()\n        }",
-     "            downloadTimeout.restart()\n            chatWeb.saveDownload()\n        }"),
+    (CHAT_WEB_VIEW, "        downloadTimeout.restart()\n    }",
+     "        downloadTimeout.restart()\n        Qt.callLater(download.accept)\n    }"),
+    (CHAT_WEB_VIEW, "        downloadTimeout.restart()\n    }",
+     "        downloadTimeout.restart()\n        chatWeb.saveDownload()\n    }"),
     (CHAT_WEB_VIEW, "        if (download)\n            download.accept()\n    }",
      "        download.accept()\n    }"),
     (CHAT_VIEW, "onTriggered: chatView.web.cancelDownload()", "onTriggered: chatView.web.saveDownload()"),
@@ -5958,10 +6584,12 @@ M1_MUTATIONS = [
     (CHAT_WEB_VIEW, "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n",
      "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n"
      "                var s = page.settings\n                s.pluginsEnabled = true\n"),
-    (CHAT_WEB_VIEW, "        chatWeb.syncViews()\n    }\n\n    Component.onDestruction",
-     "        chatWeb.syncViews()\n        chatProfile.persistentPermissionsPolicy = 0\n    }\n\n    Component.onDestruction"),
-    (CHAT_WEB_VIEW, "        chatWeb.syncViews()\n    }\n\n    Component.onDestruction",
-     "        chatWeb.syncViews()\n        chatProfile.spellCheckEnabled = true\n    }\n\n    Component.onDestruction"),
+    (CHAT_WEB_VIEW, "        chatWeb.syncCurrentViews()\n    }\n\n    // A changed address moves",
+     "        chatWeb.syncCurrentViews()\n        chatWeb.profileFor(\"claude\").persistentPermissionsPolicy = 0\n"
+     "    }\n\n    // A changed address moves"),
+    (CHAT_WEB_VIEW, "        chatWeb.syncCurrentViews()\n    }\n\n    // A changed address moves",
+     "        chatWeb.syncCurrentViews()\n        chatWeb.profileFor(\"claude\").spellCheckEnabled = true\n"
+     "    }\n\n    // A changed address moves"),
     (CHAT_WEB_VIEW, "            settings.focusOnNavigationEnabled: false\n",
      "            settings.focusOnNavigationEnabled: false\n            settings.javascriptCanPaste: true\n"),
     (CHAT_VIEW, "onTriggered: chatView.web.cancelDownload()",
@@ -5977,9 +6605,28 @@ M1_MUTATIONS = [
      "                    page.checkUserAgent(request)\n                    return\n                    if (verdict) {}\n"),
     (CHAT_WEB_VIEW, "                permission.deny()\n", "                if (permission.isValid)\n                    permission.deny()\n"),
     (CHAT_WEB_VIEW, "                error.rejectCertificate()\n", "                error.defer()\n"),
-    (CHAT_WEB_VIEW, "            if (download.isSavePageDownload || chatWeb.pendingDownload !== null) {",
-     "            if (chatWeb.pendingDownload !== null) {"),
+    (CHAT_WEB_VIEW, "        if (download.isSavePageDownload || chatWeb.pendingDownload !== null) {",
+     "        if (chatWeb.pendingDownload !== null) {"),
+    # task 004: the site profile maps are the only other computed names.
+    (CHAT_WEB_VIEW, "            ? chatWeb.profiles[siteId] : null", "            ? chatWeb.profiles[chatWeb.siteId] : null"),
+    (CHAT_WEB_VIEW, "            ? chatWeb.profiles[siteId] : null", "            ? chatWeb.zoomMap[siteId] : null"),
+    (CHAT_WEB_VIEW, "        delete chatWeb.profiles[siteId]\n",
+     "        siteId = chatWeb.siteId\n        delete chatWeb.profiles[siteId]\n"),
+    (CHAT_WEB_VIEW, "    function profileFor(siteId) {\n",
+     "    function pick() { var siteId = \"claude\"; return chatWeb.profiles[siteId] }\n    function profileFor(siteId) {\n"),
+    (CHAT_WEB_VIEW, "    function profileFor(siteId) {\n",
+     "    function pick(id) { return chatWeb.retiring[id] }\n    function profileFor(siteId) {\n"),
+    # a download handled by its own profile instead of handleDownload
+    (CHAT_WEB_VIEW, "            onDownloadRequested: (download) => chatWeb.handleDownload(download)\n",
+     "            onDownloadRequested: (download) => { chatWeb.pendingDownload = download }\n"),
 ]
+
+
+# The dynamic name rule allows exactly profiles[siteId] and retiring[siteId].
+@pytest.mark.parametrize("index", range(len(M1_MUTATIONS) - 6, len(M1_MUTATIONS) - 1))
+def test_proof_a_third_dynamic_name_is_caught(index):
+    path, old, new = M1_MUTATIONS[index]
+    assert _dynamic_name_problems(_sources_with(path, old, new))
 
 
 @pytest.mark.parametrize(("path", "old", "new"), M1_MUTATIONS,

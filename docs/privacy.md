@@ -401,17 +401,20 @@ deletes this widget's saved sign-ins inside the folder (every site's), and
 locks the folder.
 
 **Clear <site> data…** in Encrypted mode is offered only while the folder is
-unlocked and its saved sign-ins are open (not in a private session). It first
-notes the site in the setting `chatPendingSiteClears` (if that can't be
-saved, nothing is cleared), then closes that site's pages and profile, waits
-about a second for them to finish writing, and deletes only that site's
-`site-<id>/` folder; the other sites stay signed in. The site gets a new,
-empty folder the next time it is opened. If the delete fails, the Chat tab
-says so, and the site stays closed until a later unlock's delete works. Since
-the note is kept in the settings, even after a Plasma restart the site's old
-sign-in is never opened again.
+unlocked and its saved sign-ins are open (not in a private session).
+Clear <site> data first records the site in the widget's settings, then deletes its saved sign-in; if the delete fails, the site stays closed and is deleted at the next unlock (also after a restart) before it can open again, and Clear chat data, once its delete succeeds, settles every such pending delete.
 
-After each unlock the widget also tidies its own folder: older counters of
+In detail: the site is noted in the setting `chatPendingSiteClears`, and
+Plasma is asked to save the settings at once; if the note can't be saved,
+nothing is cleared. Then the site's pages and profile close, the widget waits
+about a second for them to finish writing, and deletes only that site's
+`site-<id>/` folder; the other sites stay signed in. The note goes only once
+the delete worked, and the site gets a new, empty folder the next time it is
+opened. If the delete fails, the Chat tab says so. Clear chat data clears the
+note only after its own delete worked; if that fails, the note stays.
+
+At each unlock the widget first runs every delete still owed, then prepares
+the shown sites' folders, and then tidies its own folder: older counters of
 this widget's folder are deleted (as before), and so is anything in the
 current one that isn't a chat site's `site-<id>/` folder. Turning a site off
 in settings keeps its saved sign-in.
