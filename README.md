@@ -653,7 +653,9 @@ To go back, lock the encrypted folder and run:
 ```
 
 That moves everything back to the old names and uninstalls Hearthwire (add
-`--restart-plasma` if you don't want to be asked before Plasma stops). Then
+`--restart-plasma` if you don't want to be asked before Plasma stops).
+It removes only your own copies of the helper and widget; an installed
+package stays (remove it with your package manager). Then
 check out the `hearthside-final` tag and run its `scripts/install.sh`.
 
 ## Helper CLI

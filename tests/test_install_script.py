@@ -443,6 +443,8 @@ def test_uninstall_web_data_says_nothing_about_the_backup_when_it_failed(tmp_pat
 # A scripted helper: "--migrate OP" prints replies/OP.<n> for its n-th call (else
 # replies/OP). pip, kpackagetool6, systemctl, kquitapp6 and kstart only log; a
 # package counts as installed while state/pip-<name> or state/pkg-<id> exists.
+# pip show names the directory in state/pip-<name>, or the user site
+# ($FLOW_USER_SITE) when that file is empty.
 FLOW_PYTHON = r"""#!/bin/sh
 last=""
 for argument in "$@"; do last=$argument; done
@@ -451,9 +453,13 @@ case "$*" in
     "-P -m pip "*) printf 'pip %s\n' "$(shift 3; echo "$*")" >> "$FLOW_LOG" ;;
 esac
 case "$*" in
+    "-P -c import site; print(site.getusersitepackages())") printf '%s\n' "$FLOW_USER_SITE" ;;
     "-P -c "*) exit 0 ;;
     "-P -m pip --version") exit 0 ;;
-    "-P -m pip show "*) [ -e "$FLOW_STATE/pip-$last" ] ;;
+    "-P -m pip show "*)
+        [ -e "$FLOW_STATE/pip-$last" ] || exit 1
+        location=$(cat "$FLOW_STATE/pip-$last")
+        printf 'Name: %s\nLocation: %s\n' "$last" "${location:-$FLOW_USER_SITE}" ;;
     "-P -m pip uninstall "*) rm -f "$FLOW_STATE/pip-$last" ;;
     "-P -m pip install "*) exit "${FLOW_PIP_INSTALL_EXIT:-0}" ;;
     "-P -m hearthwire --version") echo 0.0-test ;;
@@ -527,8 +533,10 @@ class Flow:
             _stub(stubs, name, "#!/bin/sh\nexit 0\n")
         for name in ("sudo", "pacman"):
             _stub(stubs, name, PLASMA_STUB)
+        self.user_site = self.home / ".local" / "lib" / "python3.14" / "site-packages"
         self.env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(self.home), "FLOW_LOG": str(self.log),
-                    "FLOW_STATE": str(self.state), "FLOW_REPLIES": str(self.replies)}
+                    "FLOW_STATE": str(self.state), "FLOW_REPLIES": str(self.replies),
+                    "FLOW_USER_SITE": str(self.user_site)}
 
     def reply(self, operation, text, call=None):
         (self.replies / (operation if call is None else f"{operation}.{call}")).write_text(text + "\n")
@@ -1076,6 +1084,50 @@ def test_rollback_with_the_package_removes_only_the_user_copy(tmp_path):
     assert [step for step in _kpackagetool_steps(flow) if "-r" in step] == [f"kpackagetool6 -r {NEW_ID}"]
     assert not user.exists()
     assert (system / "metadata.json").read_text() == "{}"
+
+
+# --rollback-hearthwire removes the helper only from the Python user site.
+
+SYSTEM_SITE = "/usr/lib/python3.14/site-packages"
+
+
+def test_rollback_uninstalls_the_user_site_helper(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("rollback", ROLLBACK_DONE)
+    flow.installed(pip=["hearthwire"])
+    completed = flow.run("--rollback-hearthwire")
+    assert completed.returncode == 0, completed.stderr
+    assert [step for step in flow.steps() if step.startswith("pip")] == [
+        "pip uninstall -y --break-system-packages hearthwire"]
+
+
+def test_rollback_never_asks_pip_to_remove_a_system_helper(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("rollback", ROLLBACK_DONE)
+    (flow.state / "pip-hearthwire").write_text(SYSTEM_SITE)
+    completed = flow.run("--rollback-hearthwire")
+    assert completed.returncode == 0, completed.stderr
+    assert [step for step in flow.steps() if step.startswith("pip")] == []
+    assert f"Left in place: a hearthwire helper outside your Python user site ({SYSTEM_SITE})" in completed.stdout
+    assert (flow.state / "pip-hearthwire").exists()
+
+
+def test_rollback_with_no_usable_user_site_leaves_pip_alone(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("rollback", ROLLBACK_DONE)
+    flow.installed(pip=["hearthwire"])
+    completed = flow.run("--rollback-hearthwire", FLOW_USER_SITE="relative/site-packages")
+    assert completed.returncode == 0, completed.stderr
+    assert [step for step in flow.steps() if step.startswith("pip")] == []
+
+
+def test_rollback_without_any_helper_says_nothing_about_pip(tmp_path):
+    flow = Flow(tmp_path)
+    flow.reply("rollback", ROLLBACK_DONE)
+    completed = flow.run("--rollback-hearthwire")
+    assert completed.returncode == 0, completed.stderr
+    assert "Left in place" not in completed.stdout and "pip" not in completed.stderr
+    assert [step for step in flow.steps() if step.startswith("pip")] == []
 
 
 # --- --remove-script-install ----------------------------------------------------------------------

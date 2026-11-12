@@ -54,6 +54,24 @@ helper() {
     PYTHONPATH="$project_directory/src" PYTHONDONTWRITEBYTECODE=1 python3 -P -m hearthwire "$@" </dev/null
 }
 
+# The Python user site (where pip install --user put the helper), or nothing
+# when python3 names no absolute path.
+python_user_site() {
+    site_path=$(python3 -P -c 'import site; print(site.getusersitepackages())' </dev/null 2>/dev/null) || site_path=""
+    case "$site_path" in
+        /*) printf '%s\n' "$site_path" ;;
+    esac
+}
+# Whether pip resolves hearthwire to exactly the directory $1 (the user site).
+# pip uninstall removes the copy pip show names, which is a system package
+# when there is no user copy or the user site is disabled: never that one.
+# Leaves what pip names in $pip_location ("" for nothing).
+pip_resolves_to() {
+    pip_location=""
+    pip_location=$(python3 -P -m pip show hearthwire </dev/null 2>/dev/null | sed -n 's/^Location: //p') || pip_location=""
+    [ -n "$1" ] && [ "$pip_location" = "$1" ]
+}
+
 # Plasma is stopped only for the one-time move below, and an EXIT trap always
 # starts it again, also when a step fails or the script is interrupted.
 plasma_stopped=false
@@ -309,11 +327,7 @@ if [ "$remove_script_install" = true ]; then
     removed_any=false
     # The helper: only a copy in the Python user site, and only when pip
     # resolves the name to exactly that copy, never a system one.
-    user_site=$(python3 -P -c 'import site; print(site.getusersitepackages())' </dev/null 2>/dev/null) || user_site=""
-    case "$user_site" in
-        /*) ;;
-        *) user_site="" ;;
-    esac
+    user_site=$(python_user_site)
     user_helper_present() {
         [ -n "$user_site" ] || return 1
         for entry in "$user_site/hearthwire" "$user_site"/hearthwire-*.dist-info; do
@@ -324,8 +338,7 @@ if [ "$remove_script_install" = true ]; then
         return 1
     }
     if user_helper_present; then
-        pip_location=$(python3 -P -m pip show hearthwire </dev/null 2>/dev/null | sed -n 's/^Location: //p') || pip_location=""
-        if [ "$pip_location" = "$user_site" ] \
+        if pip_resolves_to "$user_site" \
             && python3 -P -m pip uninstall -y --break-system-packages hearthwire </dev/null >/dev/null 2>&1 \
             && ! user_helper_present; then
             echo "Removed: the Hearthwire helper in your Python user site ($user_site)."
@@ -408,9 +421,12 @@ if [ "$rollback" = true ]; then
             exit 1
             ;;
     esac
-    if python3 -P -m pip show hearthwire >/dev/null 2>&1; then
-        python3 -P -m pip uninstall -y --break-system-packages hearthwire >/dev/null 2>&1 \
+    # Only the copy in the Python user site; a system package stays.
+    if pip_resolves_to "$(python_user_site)"; then
+        python3 -P -m pip uninstall -y --break-system-packages hearthwire </dev/null >/dev/null 2>&1 \
             || echo "Could not remove the hearthwire helper with pip; remove it by hand." >&2
+    elif [ -n "$pip_location" ]; then
+        echo "Left in place: a hearthwire helper outside your Python user site ($pip_location), probably the system package. Remove that with your package manager if you want it gone."
     fi
     # Only this user's copy; a system package stays (see user_plasmoid).
     if [ -d "$user_plasmoid" ]; then

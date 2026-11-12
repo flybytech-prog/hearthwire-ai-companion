@@ -1115,11 +1115,29 @@ package is installed an older script copy keeps running. The widget runs
 `hearthwire --install-info` once per start (main.qml) and once per open of
 Settings → General to notice that, and to pick the package names of the
 distribution family for its install hints
-(`src/hearthwire/core/installinfo.py`). It runs
-`python3 -P -s -m hearthwire --install-info` first, so the system package
-answers even when an older home-folder copy (which doesn't know the option)
-would be imported; when that run fails (no system package), it runs
-`python3 -P -m hearthwire --install-info` once more. `scripts/install.sh
+(`src/hearthwire/core/installinfo.py`). The command is built only by
+`InstallInfo.command(run, applet, retry)` in
+`plasmoid/contents/ui/InstallInfo.js`, as
+`env HEARTHWIRE_RUN=<run> HEARTHWIRE_APPLET=<applet>` followed by one of two
+fixed forms:
+
+1. `python3 -P -s -m hearthwire --install-info` (`retry` not `true`): the
+   first run. `-s` leaves the user site off `sys.path`, so the system package
+   answers even when an older home-folder copy (which doesn't know the
+   option) would be imported; the reply still reports that copy, since the
+   directories are checked directly.
+2. `python3 -P -m hearthwire --install-info` (`retry === true`): run once,
+   only when the first run exited non-zero (`InstallInfo.needsRetry(exitCode,
+   retried)`: `exitCode !== 0 && retried !== true`), for example because no
+   system package is installed. A script install alone then still reports
+   its distro family.
+
+A first run that exits 0 is never retried, whatever it printed. The retry's
+result is final: its exit code and stdout go through the same strict
+`InstallInfo.parseReply`, so a failing retry (such as a copy too old to know
+the option) means unknown, and there is never a third run. The retried flag is
+never cleared, so a widget start or a page open makes at most two runs. Only
+the exit code and stdout are read, never stderr. `scripts/install.sh
 --remove-script-install` runs the checkout's copy to see whether a package is
 installed before it removes the script copy.
 
@@ -1194,7 +1212,11 @@ install runs `kpackagetool6 -u` only when
 `$XDG_DATA_HOME/plasma/plasmoids/io.github.flybytechprog.hearthwire` (an
 absolute `$XDG_DATA_HOME`, else `~/.local/share`) is a folder and `-i`
 otherwise, and `--rollback-hearthwire` runs `kpackagetool6 -r` only for that
-folder, never for the package.
+folder, never for the package. Likewise the rollback runs `pip uninstall
+hearthwire` only when `pip show` names exactly the Python user site
+(`site.getusersitepackages()`, the same check as `--remove-script-install`);
+a copy pip finds anywhere else, such as the system package, is left in place
+and the script says where it is.
 
 ## Upgrading from Hearthside
 

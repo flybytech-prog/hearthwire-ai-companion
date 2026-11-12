@@ -3573,8 +3573,10 @@ REFRESH_GATE_JS = UI / "RefreshGate.js"
     (INSTALL_INFO_JS, " python3 -P -s -m hearthwire --install-info", " python3 -P -s  -m hearthwire --install-info"),
     (INSTALL_INFO_JS, "function isShadowed(info) {",
      'function again() { return "env x" + " python3 -P -s -m hearthwire --install-info" }\nfunction isShadowed(info) {'),
-    (INSTALL_INFO_JS, '    return "env HEARTHWIRE_RUN="',
-     '    var other = " python3 -P -s -m hearthwire --install-info"\n    return "env HEARTHWIRE_RUN="'),
+    (INSTALL_INFO_JS, '    var prefix = "env HEARTHWIRE_RUN="',
+     '    var other = " python3 -P -s -m hearthwire --install-info"\n    var prefix = "env HEARTHWIRE_RUN="'),
+    (INSTALL_INFO_JS, '        return prefix + " python3 -P -m hearthwire --install-info"',
+     '        return prefix + " python3 -P -s -s -m hearthwire --install-info"'),
     (CHAT_STORAGE_JS, ' python3 -P -m hearthwire"', ' python3 -P -s -m hearthwire"'),
     (OLLAMA_CHAT_JS, " python3 -P -m hearthwire --port-owner ", " python3 -P -s -m hearthwire --port-owner "),
     (MAIN_QML, "        var command = InstallInfo.command(",
@@ -8346,38 +8348,68 @@ def test_proof_settings_in_command_rule_catches(path, old, new):
 # --- install hints (plan install-hints) ------------------------------------------------------------
 #
 # I1 The --install-info command is built only by InstallInfo.command, from
-# fixed text, the run number and the applet id (both checked integers), and
-# runs once per widget start (main.qml) and once per settings page open
-# (configGeneral.qml) through the usual fixed-command pattern: a guard flag,
-# the builder, connectSource(command) on its own DataSource, and a reply read
-# only through InstallInfo.parseReply from the exit code and stdout. Only the
-# checked words of that reply (shadowed, distro) are used.
+# fixed text, the run number, the applet id (both checked integers) and the
+# retry flag, in exactly two forms: `python3 -P -s` when retry isn't true and
+# the standard `python3 -P -m hearthwire --install-info` only when retry ===
+# true. It runs once per widget start (main.qml) and once per settings page
+# open (configGeneral.qml) through the usual fixed-command pattern: a guard
+# flag in checkInstall, runInstallInfo(false), the builder,
+# connectSource(command) on its own DataSource, and finishInstallInfo with the
+# exit code and stdout only. finishInstallInfo asks once more, with retry,
+# only when InstallInfo.needsRetry says the first run failed; the retried
+# flag is never cleared, so there is never a third run. Every reply that
+# counts goes through InstallInfo.parseReply, and only its checked words
+# (shadowed, distro) are used.
 
 INSTALL_INFO_FLAG = r"--install-info\b"
 INSTALL_INFO_BUILDER = (
-    "function command(run, applet) {", "command",
-    {"if", "return", "validInt", "run", "applet"},
-    {"", "env HEARTHWIRE_RUN=", " HEARTHWIRE_APPLET=", " python3 -P -s -m hearthwire --install-info"},
+    "function command(run, applet, retry) {", "command",
+    {"if", "return", "var", "validInt", "run", "applet", "retry", "prefix", "true"},
+    {"", "env HEARTHWIRE_RUN=", " HEARTHWIRE_APPLET=", " python3 -P -m hearthwire --install-info",
+     " python3 -P -s -m hearthwire --install-info"},
 )
+INSTALL_INFO_COMMAND_BODY = (
+    '{ if (!validInt(run) || !validInt(applet)) return "" '
+    'var prefix = "env HEARTHWIRE_RUN=" + run + " HEARTHWIRE_APPLET=" + applet '
+    'if (retry === true) return prefix + " python3 -P -m hearthwire --install-info" '
+    'return prefix + " python3 -P -s -m hearthwire --install-info" }'
+)
+INSTALL_INFO_NEEDS_RETRY = ("function needsRetry(exitCode, retried) {",
+                            "{ return exitCode !== 0 && retried !== true }")
 INSTALL_INFO_VALID_INT = ('return typeof value === "number" && Number.isInteger(value) && value >= 0 '
                           "&& value <= 2147483648")
-# file -> (the page or widget id, the one builder call)
+# file -> (the page or widget id, the applet argument of the one builder call)
 INSTALL_INFO_CALLERS = {
-    MAIN_QML.name: ("root", "InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()), "
-                            "Math.max(0, root.chatAppletId))"),
-    CONFIG_GENERAL.name: ("page", "InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()), "
-                                  "page.vaultApplet)"),
+    MAIN_QML.name: ("root", "Math.max(0, root.chatAppletId)"),
+    CONFIG_GENERAL.name: ("page", "page.vaultApplet"),
 }
-INSTALL_INFO_PARSE = 'InstallInfo.parseReply(data["exit code"], data["stdout"])'
+
+
+def _install_info_bodies(owner, applet):
+    """The exact (squeezed) checkInstall, runInstallInfo and finishInstallInfo of one caller."""
+    o = owner
+    return {
+        "checkInstall": ("function checkInstall() {",
+                         f"{{ if ({o}.installInfoAsked) return {o}.installInfoAsked = true {o}.runInstallInfo(false) }}"),
+        "runInstallInfo": ("function runInstallInfo(retry) {",
+                           "{ var command = InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()), "
+                           f'{applet}, retry) if (command === "") return {o}.installInfoSourceName = command '
+                           "installInfoSource.connectSource(command) }"),
+        "finishInstallInfo": ("function finishInstallInfo(exitCode, stdout) {",
+                              f'{{ {o}.installInfoSourceName = "" '
+                              f"if (InstallInfo.needsRetry(exitCode, {o}.installInfoRetried)) {{ "
+                              f"{o}.installInfoRetried = true {o}.runInstallInfo(true) return }} "
+                              f"{o}.installInfo = InstallInfo.parseReply(exitCode, stdout) }}"),
+    }
 
 
 def _install_info_forms(owner):
-    """Every line that may mention installInfo, installInfoAsked or installInfoSourceName."""
+    """Every line that may mention the install-info state of one caller."""
     o = re.escape(owner)
     return {
         "installInfo": (
             r"^\s*property var installInfo: InstallInfo\.unknown\(\)\s*$",
-            rf'^\s*{o}\.installInfo = InstallInfo\.parseReply\(data\["exit code"\], data\["stdout"\]\)\s*$',
+            rf"^\s*{o}\.installInfo = InstallInfo\.parseReply\(exitCode, stdout\)\s*$",
             rf"\b{o}\.installInfo\.shadowed === true\b",
             rf"\bChatStorage\.installDistro\({o}\.installInfo\.distro\)",
         ),
@@ -8385,6 +8417,11 @@ def _install_info_forms(owner):
             r"^\s*property bool installInfoAsked: false\s*$",
             rf"^\s*if \({o}\.installInfoAsked\)\s*$",
             rf"^\s*{o}\.installInfoAsked = true\s*$",
+        ),
+        "installInfoRetried": (
+            r"^\s*property bool installInfoRetried: false\s*$",
+            rf"^\s*if \(InstallInfo\.needsRetry\(exitCode, {o}\.installInfoRetried\)\) \{{\s*$",
+            rf"^\s*{o}\.installInfoRetried = true\s*$",
         ),
         "installInfoSourceName": (
             r'^\s*property string installInfoSourceName: ""\s*$',
@@ -8395,30 +8432,28 @@ def _install_info_forms(owner):
     }
 
 
-def _install_info_caller_problems(name, code, owner, call):
+def _install_info_caller_problems(name, code, owner, applet):
     problems = []
-    where = f"{name} checkInstall()"
-    body = _function_body(code, "checkInstall")
-    if body is None:
-        return [f"{name}: exactly one checkInstall() expected"]
-    problems += _pin_problems(body, (
-        f"if ({owner}.installInfoAsked) return", f"{owner}.installInfoAsked = true", f"var command = {call}",
-        'if (command === "") return', f"{owner}.installInfoSourceName = command",
-        "installInfoSource.connectSource(command)"), where)
-    if len(_hits(rf"\bcommand\b{WRITE_OPERATOR}", body)) != 1:
-        problems.append(f"{where}: command is set once, by InstallInfo.command")
-    problems += [f"{where}: {match} must not be near the command" for match in re.findall(SINK_BANS, body)]
-    if len(_squeezed(_strip_comments(body, blank_strings=True)).split(";")) > 1 or _hits(r"['`]", body):
-        problems.append(f"{where}: no other statements or strings")
-    # Once per start: defined once, called once, from Component.onCompleted.
-    if len(_hits(r"\bcheckInstall\s*\(", code)) != 2:
-        problems.append(f"{name}: checkInstall() is called once")
+    for function, (signature, expected) in _install_info_bodies(owner, applet).items():
+        problems += _pin_problems(code, (signature,), name)
+        body = _function_body(code, function)
+        if body is None or _squeezed(body) != expected:
+            problems.append(f"{name}: {function} must stay {expected}")
+    # Once per start: checkInstall from Component.onCompleted only; the first
+    # run from checkInstall, the one retry from finishInstallInfo.
+    for word, count in (("checkInstall", 2), ("runInstallInfo", 3), ("finishInstallInfo", 2)):
+        if len(_hits(rf"\b{word}\s*\(", code)) != count:
+            problems.append(f"{name}: {word}( expected {count} times (definition and calls), "
+                            f"found {len(_hits(rf'\b{word}\s*\(', code))}")
+    for argument in ("false", "true"):
+        if len(_hits(rf"\brunInstallInfo\s*\(\s*{argument}\s*\)", code)) != 1:
+            problems.append(f"{name}: runInstallInfo({argument}) once")
     completed = [body for _, body in _blocks(code, r"\bComponent\s*\.\s*onCompleted\s*:\s*\{")]
     if len(completed) != 1 or len(_hits(rf"(?m)^\s*{owner}\s*\.\s*checkInstall\s*\(\s*\)\s*$", completed[0])) != 1:
         problems.append(f"{name}: checkInstall() runs from Component.onCompleted")
-    # Its own source, started only here, reading only the exit code and stdout.
+    # Its own source, started only in runInstallInfo, read only for the exit code and stdout.
     if len(_hits(r"\binstallInfoSource\s*\.\s*connectSource\s*\(", code)) != 1:
-        problems.append(f"{name}: installInfoSource runs a command only in checkInstall()")
+        problems.append(f"{name}: installInfoSource runs a command only in runInstallInfo()")
     if _hits(r"\binstallInfoSource\s*\.\s*connectedSources\b", code):
         problems.append(f"{name}: installInfoSource's sources are set only by connectSource")
     sources = [body for _, body in _blocks(code, r"\bPlasma5Support\s*\.\s*DataSource\s*\{")
@@ -8428,7 +8463,8 @@ def _install_info_caller_problems(name, code, owner, call):
     else:
         top = _top_level_raw(sources[0])
         problems += _pin_problems(top, ('engine: "executable"', "connectedSources: []"), f"{name} installInfoSource")
-        problems += _pin_problems(sources[0], (INSTALL_INFO_PARSE, "installInfoSource.disconnectSource(source)"),
+        problems += _pin_problems(sources[0], (f'{owner}.finishInstallInfo(data["exit code"], data["stdout"])',
+                                               "installInfoSource.disconnectSource(source)"),
                                   f"{name} installInfoSource")
         if _hits(r"\bstderr\b", sources[0]):
             problems.append(f"{name}: installInfoSource must read stdout only")
@@ -8443,26 +8479,35 @@ def _install_info_command_problems(sources):
         base = _base(name)
         flags = _hits(INSTALL_INFO_FLAG, code)
         uses = _hits(r"\bInstallInfo\s*\.\s*command\b", code)
+        retries = _hits(r"\bInstallInfo\s*\.\s*needsRetry\b", code)
         if base == INSTALL_INFO_JS.name:
             body = _function_body(code, "command") or ""
-            if len(flags) != 1 or len(_hits(INSTALL_INFO_FLAG, body)) != 1:
-                problems.append(f"{name}: --install-info belongs to command() only (lines {flags})")
+            if len(flags) != 2 or len(_hits(INSTALL_INFO_FLAG, body)) != 2:
+                problems.append(f"{name}: --install-info belongs to command() only, in its two forms (lines {flags})")
             if len(_hits(r"\bcommand\s*\(", code)) != 1:
                 problems.append(f"{name}: command() is defined once, and not called here")
+            if len(_hits(r"\bneedsRetry\s*\(", code)) != 1:
+                problems.append(f"{name}: needsRetry() is defined once, and not called here")
             problems += _builder_problems(INSTALL_INFO_JS, code, INSTALL_INFO_BUILDER)
-            problems += _pin_problems(body, ('if (!validInt(run) || !validInt(applet)) return ""',), f"{name} command()")
+            if _squeezed(body) != INSTALL_INFO_COMMAND_BODY:
+                problems.append(f"{name}: command() must stay {INSTALL_INFO_COMMAND_BODY}")
+            signature, expected = INSTALL_INFO_NEEDS_RETRY
+            problems += _pin_problems(code, (signature,), name)
+            if _squeezed(_function_body(code, "needsRetry") or "") != expected:
+                problems.append(f"{name}: needsRetry() must stay {expected}")
             valid = _function_body(code, "validInt")
             if valid is None or _squeezed(valid.strip()[1:-1]) != INSTALL_INFO_VALID_INT:
                 problems.append(f"{name}: validInt must stay {INSTALL_INFO_VALID_INT}")
         elif flags:
             problems.append(f"{name}: --install-info belongs to InstallInfo.command only (lines {flags})")
         if base in INSTALL_INFO_CALLERS:
-            owner, call = INSTALL_INFO_CALLERS[base]
-            if len(uses) != 1:
-                problems.append(f"{name}: one InstallInfo.command call expected, found {len(uses)}")
-            problems += _install_info_caller_problems(name, code, owner, call)
-        elif uses:
-            problems.append(f"{name}: must not build the install-info command (lines {uses})")
+            owner, applet = INSTALL_INFO_CALLERS[base]
+            if len(uses) != 1 or len(retries) != 1:
+                problems.append(f"{name}: one InstallInfo.command and one InstallInfo.needsRetry call expected, "
+                                f"found {len(uses)} and {len(retries)}")
+            problems += _install_info_caller_problems(name, code, owner, applet)
+        elif uses or retries:
+            problems.append(f"{name}: must not build or retry the install-info command (lines {uses + retries})")
     for base in INSTALL_INFO_CALLERS:
         if not any(_base(name) == base for name in sources):
             problems.append(f"{base} is missing")
@@ -8475,24 +8520,61 @@ def test_install_info_command_is_built_only_from_checked_values():
 
 
 INSTALL_INFO_COMMAND_MUTATIONS = [
-    # The builder.
-    (INSTALL_INFO_JS, ' --install-info"', ' --install-info --json"'),
-    (INSTALL_INFO_JS, "function command(run, applet) {", "function command(run, applet, extra) {"),
+    # The builder: two forms only, chosen by retry === true.
+    (INSTALL_INFO_JS, '" python3 -P -s -m hearthwire --install-info"\n',
+     '" python3 -P -s -m hearthwire --install-info --json"\n'),
+    (INSTALL_INFO_JS, "function command(run, applet, retry) {", "function command(run, applet, retry, extra) {"),
     (INSTALL_INFO_JS, "    if (!validInt(run) || !validInt(applet))\n        return \"\"\n", ""),
     (INSTALL_INFO_JS, '" HEARTHWIRE_APPLET=" + applet', '" HEARTHWIRE_APPLET=" + String(applet)'),
     (INSTALL_INFO_JS, '" HEARTHWIRE_APPLET=" + applet', "' HEARTHWIRE_APPLET=' + applet"),
     (INSTALL_INFO_JS, '" HEARTHWIRE_APPLET=" + applet', '" HEARTHWIRE_APPLET=" + applet + " x"'),
+    (INSTALL_INFO_JS, '" HEARTHWIRE_APPLET=" + applet', '" HEARTHWIRE_APPLET=" + applet + " " + retry'),
+    (INSTALL_INFO_JS, "    if (retry === true)\n", "    if (retry)\n"),
+    (INSTALL_INFO_JS, "    if (retry === true)\n", "    if (retry !== true)\n"),
+    # A retry that keeps -s, or a first run without it.
+    (INSTALL_INFO_JS, '        return prefix + " python3 -P -m hearthwire --install-info"',
+     '        return prefix + " python3 -P -s -m hearthwire --install-info"'),
+    (INSTALL_INFO_JS, '    return prefix + " python3 -P -s -m hearthwire --install-info"\n',
+     '    return prefix + " python3 -P -m hearthwire --install-info"\n'),
     (INSTALL_INFO_JS, "value <= 2147483648", "value <= 1e300"),
     (INSTALL_INFO_JS, 'typeof value === "number" && ', ""),
+    # A retry built outside command().
     (INSTALL_INFO_JS, "function isShadowed(info) {",
-     'function again() { return "python3 -P -m hearthwire --install-info" }\nfunction isShadowed(info) {'),
-    (INSTALL_INFO_JS, "function unknown() {", "function rerun() { return command(1, 1) }\nfunction unknown() {"),
-    # The callers.
-    (MAIN_QML, "Math.random()),\n                                          Math.max(0, root.chatAppletId))",
-     "Math.random()),\n                                          Plasmoid.configuration.chatSites)"),
+     'function retryCommand(run) { return "env HEARTHWIRE_RUN=" + run + " python3 -P -m hearthwire --install-info" }\n'
+     "function isShadowed(info) {"),
+    (MAIN_QML, "            root.runInstallInfo(true)\n",
+     '            installInfoSource.connectSource("python3 -P -m hearthwire --install-info")\n'),
+    (CONFIG_GENERAL, "    function normalizedRefresh(value) {",
+     '    function retryInstall() { var command = InstallInfo.command(1, 1, true) }\n    function normalizedRefresh(value) {'),
+    (INSTALL_INFO_JS, "function unknown() {", "function rerun() { return command(1, 1, true) }\nfunction unknown() {"),
+    # needsRetry: a retry after exit 0, or after a retry.
+    (INSTALL_INFO_JS, "    return exitCode !== 0 && retried !== true", "    return retried !== true"),
+    (INSTALL_INFO_JS, "    return exitCode !== 0 && retried !== true", "    return exitCode !== 0"),
+    (INSTALL_INFO_JS, "    return exitCode !== 0 && retried !== true", "    return exitCode !== 0 || retried !== true"),
+    (MAIN_QML, "        if (InstallInfo.needsRetry(exitCode, root.installInfoRetried)) {",
+     "        if (exitCode === 0 || InstallInfo.needsRetry(exitCode, root.installInfoRetried)) {"),
+    (CONFIG_GENERAL, "        if (InstallInfo.needsRetry(exitCode, page.installInfoRetried)) {",
+     "        if (InstallInfo.needsRetry(exitCode, false)) {"),
+    # A third run.
+    (MAIN_QML, "            root.installInfoRetried = true\n", ""),
+    (MAIN_QML, "        root.installInfo = InstallInfo.parseReply(exitCode, stdout)\n",
+     "        root.installInfo = InstallInfo.parseReply(exitCode, stdout)\n        root.installInfoRetried = false\n"),
+    (CONFIG_GENERAL, "        page.installInfo = InstallInfo.parseReply(exitCode, stdout)\n",
+     "        page.installInfo = InstallInfo.parseReply(exitCode, stdout)\n        page.runInstallInfo(true)\n"),
+    (MAIN_QML, "        root.runInstallInfo(false)\n", "        root.runInstallInfo(false)\n        root.runInstallInfo(false)\n"),
+    (MAIN_QML, "    function droppedDone(reply) {",
+     "    function again() { root.installInfoAsked = false; root.checkInstall() }\n    function droppedDone(reply) {"),
+    (MAIN_QML, "        root.checkInstall()\n", "        root.checkInstall()\n        root.checkInstall()\n"),
+    (CONFIG_GENERAL, "        page.checkInstall()\n", ""),
+    # The callers' command lines.
+    (MAIN_QML, "                                          Math.max(0, root.chatAppletId), retry)",
+     "                                          Plasmoid.configuration.chatSites, retry)"),
     (MAIN_QML, "        var command = InstallInfo.command(ChatStorage.firstRun(Date.now(), Math.random()),",
      "        var command = InstallInfo.command(root.chatOpRun,"),
-    (CONFIG_GENERAL, "page.vaultApplet)\n        if (command", "page.cfg_chatCustomUrls)\n        if (command"),
+    (CONFIG_GENERAL, "                                          page.vaultApplet, retry)",
+     "                                          page.cfg_chatCustomUrls, retry)"),
+    (CONFIG_GENERAL, "                                          page.vaultApplet, retry)",
+     "                                          page.vaultApplet, page.installInfo.helper)"),
     (CONFIG_GENERAL, "        page.installInfoSourceName = command\n",
      "        command += \" \" + page.cfg_chatSites\n        page.installInfoSourceName = command\n"),
     (CONFIG_GENERAL, "        installInfoSource.connectSource(command)\n",
@@ -8500,21 +8582,19 @@ INSTALL_INFO_COMMAND_MUTATIONS = [
     (MAIN_QML, "        installInfoSource.connectSource(command)\n",
      "        installInfoSource.connectSource(command)\n        installInfoSource.connectSource(command)\n"),
     (MAIN_QML, "        if (root.installInfoAsked)\n            return\n", ""),
-    (MAIN_QML, "        root.checkInstall()\n", "        root.checkInstall()\n        root.checkInstall()\n"),
-    (MAIN_QML, "    function droppedDone(reply) {",
-     "    function again() { root.installInfoAsked = false; root.checkInstall() }\n    function droppedDone(reply) {"),
-    (CONFIG_GENERAL, "        page.checkInstall()\n", ""),
-    (CONFIG_GENERAL, "    function checkInstall() {",
-     "    function redo() { var command = InstallInfo.command(1, 1) }\n    function checkInstall() {"),
     (MAIN_QML, "    function droppedDone(reply) {",
      '    function x() { usageSource.connectSource("python3 -P -m hearthwire --install-info") }\n    function droppedDone(reply) {'),
     (UI / "UsageView.qml", "        visible: root.installShadowed\n",
-     "        visible: root.installShadowed\n        property string c: InstallInfo.command(1, 1)\n"),
-    # The reply.
-    (MAIN_QML, 'root.installInfo = InstallInfo.parseReply(data["exit code"], data["stdout"])',
-     'root.installInfo = InstallInfo.parseReply(data["exit code"], data["stderr"])'),
-    (CONFIG_GENERAL, 'page.installInfo = InstallInfo.parseReply(data["exit code"], data["stdout"])',
-     'page.installInfo = JSON.parse(data["stdout"])'),
+     "        visible: root.installShadowed\n        property string c: InstallInfo.command(1, 1, false)\n"),
+    # The reply: exit code and stdout only, through parseReply.
+    (MAIN_QML, 'root.finishInstallInfo(data["exit code"], data["stdout"])',
+     'root.finishInstallInfo(data["exit code"], data["stderr"])'),
+    (MAIN_QML, 'root.finishInstallInfo(data["exit code"], data["stdout"])',
+     'root.finishInstallInfo(data["exit code"], data["stdout"] + data["stderr"])'),
+    (CONFIG_GENERAL, "        page.installInfo = InstallInfo.parseReply(exitCode, stdout)\n",
+     "        page.installInfo = JSON.parse(stdout)\n"),
+    (CONFIG_GENERAL, "    function finishInstallInfo(exitCode, stdout) {",
+     "    function finishInstallInfo(exitCode, stdout, stderr) {"),
     (MAIN_QML, "    readonly property bool installShadowed: root.installInfo.shadowed === true",
      "    readonly property bool installShadowed: root.installInfo.shadowed === true\n"
      "    readonly property string installWhere: root.installInfo.helper"),
@@ -8537,6 +8617,7 @@ def test_proof_install_info_command_rule_catches(path, old, new):
 # or a child; none can run a command.
 
 INSTALL_NOTICE_REMEDY = "./scripts/install.sh --remove-script-install"
+INSTALL_NOTICE_OPENING = "A script install of Hearthwire is running instead of the installed package."
 REMOVE_SCRIPT_COMMAND = f'readonly property string removeScriptCommand: "{INSTALL_NOTICE_REMEDY}"'
 TEXT_FIELD = r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)?TextField\s*\{"
 NOTICE_LITERAL = r'(?:^|[\n;])\s*text\s*:\s*i18n\(\s*"([^"\\<>&]*)"\s*\)\s*(?=;|\n|$)'
@@ -8562,6 +8643,8 @@ def _notice_text_problems(body, name):
     match = re.search(NOTICE_LITERAL, _top_level_raw(body))
     if match is None or len(re.findall(r"(?:^|[\n;])\s*text\s*:", _top_level(body))) != 1:
         return [f"{name} text must be one fixed i18n literal without markup characters"]
+    if not match.group(1).startswith(INSTALL_NOTICE_OPENING):
+        return [f"{name} must start with {INSTALL_NOTICE_OPENING!r}"]
     if INSTALL_NOTICE_REMEDY not in match.group(1) or "kept" not in match.group(1):
         return [f"{name} must name {INSTALL_NOTICE_REMEDY} and say the data is kept"]
     return []
@@ -8603,9 +8686,11 @@ INSTALL_NOTICE_MUTATIONS = [
      '            objectName: "installShadowedNotice"\n            onLinkActivated: (link) => Qt.openUrlExternally(link)\n'),
     (CONFIG_GENERAL, '            objectName: "installShadowedNotice"\n',
      '            objectName: "installShadowedNotice"\n            actions: [Kirigami.Action { text: "Fix"; onTriggered: page.runBackup("status") }]\n'),
-    (CONFIG_GENERAL, "text: i18n(\"An older script install of Hearthwire",
-     "text: i18n(\"<a href='x'>An older</a> script install of Hearthwire"),
-    (CONFIG_GENERAL, "text: i18n(\"An older script install of Hearthwire", "text: page.removeScriptCommand + i18n(\"An older script install of Hearthwire"),
+    (CONFIG_GENERAL, "text: i18n(\"A script install of Hearthwire",
+     "text: i18n(\"<a href='x'>A script</a> install of Hearthwire"),
+    (CONFIG_GENERAL, "text: i18n(\"A script install of Hearthwire", "text: page.removeScriptCommand + i18n(\"A script install of Hearthwire"),
+    (CONFIG_GENERAL, "text: i18n(\"A script install of Hearthwire is running instead of the installed package.",
+     "text: i18n(\"Hearthwire may be out of date."),
     (CONFIG_GENERAL, "then restart Plasma. Your settings, usage history and saved sign-ins are kept.",
      "then restart Plasma."),
     (CONFIG_GENERAL, '            objectName: "installShadowedCommand"\n',
@@ -8620,10 +8705,12 @@ INSTALL_NOTICE_MUTATIONS = [
     (CONFIG_GENERAL, "            text: page.removeScriptCommand\n", "            text: page.installInfo.helper\n"),
     (CONFIG_GENERAL, "            text: page.removeScriptCommand\n",
      "            text: page.removeScriptCommand\n            readOnly: true\n"),
-    (USAGE_VIEW, "        textFormat: Text.PlainText\n        text: i18n(\"An older script install is running",
-     "        textFormat: Text.StyledText\n        text: i18n(\"An older script install is running"),
-    (USAGE_VIEW, "        textFormat: Text.PlainText\n        text: i18n(\"An older script install is running",
-     "        text: i18n(\"An older script install is running"),
+    (USAGE_VIEW, "        textFormat: Text.PlainText\n        text: i18n(\"A script install of Hearthwire is running",
+     "        textFormat: Text.StyledText\n        text: i18n(\"A script install of Hearthwire is running"),
+    (USAGE_VIEW, "        textFormat: Text.PlainText\n        text: i18n(\"A script install of Hearthwire is running",
+     "        text: i18n(\"A script install of Hearthwire is running"),
+    (USAGE_VIEW, "text: i18n(\"A script install of Hearthwire is running instead of the installed package. To fix it,",
+     "text: i18n(\"An older script install is running. To fix it,"),
     (USAGE_VIEW, "        visible: root.installShadowed\n",
      "        visible: root.installShadowed\n        TapHandler { onTapped: root.refresh() }\n"),
     (USAGE_VIEW, 'objectName: "usageInstallNotice"', 'objectName: "usageInstallNoticeX"'),
