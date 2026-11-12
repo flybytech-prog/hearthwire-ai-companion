@@ -62,6 +62,8 @@ an account, a plan name, a reading or an error from a provider.
 | `middleClickOpens` | General → Popup → Middle-click opens | `refresh` (the default), `usage`, `ollama`, or a web chat site id such as `claude`; anything else is read as `refresh` |
 | `usageHistoryEnabled` | General → Privacy → Usage history | `true` or `false` (the default) |
 | `usageHistoryClearOwed` | Written by the widget | `true` while turning Usage history off still has to delete the stored history, else `false` (the default) |
+| `chatProfileLayout` | Written by the widget | `0` (the default: the old shared chat profile, or a new install), `1` (moved to one profile per site; the Chat tab's one-time notice still shows), or `2` (done). It makes the [move to one profile per site](#one-profile-per-site-the-one-time-move) run once |
+| `chatPendingSiteClears` | Written by the widget | Which chat sites still owe the delete of a **Clear <site> data** with saved sign-ins, so a failed delete is retried and the site stays closed even after a Plasma restart: chat site ids separated by commas, for example `claude,gemini`, never a path, an address or a sign-in; empty (the default) when none. Anything in it that isn't a site id is ignored |
 
 Antigravity is the one provider that requires a derived access-token cache
 because its Secret Service entry can contain only a refresh token. That cache
@@ -194,7 +196,8 @@ there is no file dialog.
   prompts, personalities, chat text or model names; and the settings
   `chatSignInStorage`, `chatProfileGeneration`, `chatAutoLockMinutes`,
   `chatVaultUnlock`, `chatSiteZoom`, `configSchemaVersion`,
-  `initialSetupComplete`, `usageHistoryEnabled` and `usageHistoryClearOwed`.
+  `initialSetupComplete`, `usageHistoryEnabled`, `usageHistoryClearOwed`,
+  `chatProfileLayout` and `chatPendingSiteClears`.
   An import never turns on Usage history or Stay signed in.
 - Export saves the widget's applied settings only: the helper reads them
   itself from Plasma's configuration file
@@ -236,6 +239,11 @@ sends no browser brand in its client hints, so Google allows the sign-in;
 everywhere else it reports its real Chromium-based engine. Google may change
 this check at any time, and sign-in with Google could stop working.
 
+Each chat site signs in on its own (see
+[One profile per chat site](#one-profile-per-chat-site)). Signing in to Google
+in Gemini no longer signs you in on other sites, and "Sign in with Google" on
+Claude, ChatGPT, Grok or Copilot asks for your Google account separately.
+
 **Stay signed in** (Settings → General → Privacy) has two choices:
 
 - **Off** (the default): everything you enter (accounts, passwords, prompts,
@@ -245,8 +253,9 @@ this check at any time, and sign-in with Google could stop working.
   folder made with gocryptfs, so you stay signed in across Plasma restarts.
 
 **Split view** (the Chat toolbar's Split button, not saved in the settings)
-shows a second site in a second page of the same profile: same sign-ins,
-same rules (Off or Encrypted, permissions, external-link prompts, sign-in
+shows a second site in a second page. Two different sites use their own
+two profiles; the same site in both panes shares that site's one profile and
+sign-in. The rules are the same (Off or Encrypted, permissions, external-link prompts, sign-in
 windows over the pane that opened them, plain-text notices), and Hearthwire
 never scripts either page. The notices and toolbar act on the pane you last
 clicked into. Two sites use about twice the memory of one (each page has
@@ -261,17 +270,48 @@ or site storage itself (it does not use KDE Wallet for them), so a saved
 sign-in would sit on disk as readable text. Hearthwire therefore saves
 sign-ins only inside the encrypted folder.
 
-### Off: private in-memory profile
+### One profile per chat site
 
-All chat pages, including sign-in windows, share one off-the-record Qt
-WebEngine profile with an in-memory HTTP cache and no persistent cookies.
-Qt WebEngine creates no profile directory for it. Cookies, sessions, local
-storage, IndexedDB, service workers, history, and favicons exist only in
-memory. Spell checking is off. You are signed out on every Plasma restart.
+Every chat site (Claude, ChatGPT, Grok, Gemini, GitHub Copilot, Microsoft
+Copilot and Local web UI) has its own Qt WebEngine profile; no profile is
+shared between sites. A site's profile is made the first time that site is
+opened, so memory grows only with the sites you actually open (each one adds
+its own network context and in-memory cache on top of the page itself). A site's sign-in windows use that site's profile.
+
+What this guarantees:
+
+- Each chat site has its own cookies, local storage, IndexedDB, cache,
+  service workers and permissions.
+- A compromised or hostile page on one site can't send requests that carry
+  another site's sign-in, and can't read another site's data. Another site
+  framed inside it shows as signed out.
+
+Its limits:
+
+- One Qt WebEngine process serves all the profiles. A page that exploits a
+  bug in the page renderer and also escapes Chromium's sandbox runs as you,
+  and could read every site's data in memory and, while it is unlocked, the
+  encrypted folder.
+- The clipboard, your Downloads folder, your system browser and your network
+  are shared by all sites.
+
+### Off: private in-memory profiles
+
+Every site's profile, including the sign-in windows that use it, is off the
+record, with an in-memory HTTP cache and no persistent cookies. Qt WebEngine
+creates no profile directory for them. Cookies, sessions, local storage,
+IndexedDB, service workers, history, and favicons exist only in memory.
+Spell checking is off. You are signed out on every Plasma restart.
+
+**Clear <site> data…** (a Chat toolbar button for the site of the pane you
+are using, after a confirmation) closes that site's pages and sign-in window
+and destroys its profile, which signs you out of that site only; the other
+sites stay signed in. A new, empty profile is made when you open the site
+again.
 
 **Clear chat data** (in the Chat tab, after a confirmation) destroys every
-chat page together with the profile, which signs you out of all chat sites at
-once. Chat is the first tab, so Qt WebEngine starts the first time you open
+chat page together with every site's profile, which signs you out of all
+chat sites at once. Chat is the first tab, so Qt WebEngine starts the first time you open
 the popup on a web site; it doesn't start while no web chat sites are enabled
 or while only the Ollama chat is shown, and it is never started just because
 the widget is on the panel.
@@ -291,7 +331,14 @@ How it works:
   `~/.local/share/hearthwire/vault/`). While unlocked, gocryptfs shows their
   readable view at `$XDG_RUNTIME_DIR/hearthwire/vault/` (usually
   `/run/user/<uid>/hearthwire/vault/`), which lives in memory. Each widget
-  keeps its profile in its own subfolder there.
+  keeps its saved sign-ins in its own folder there,
+  `web/applet-<N>-g<G>/` (N is the widget's Plasma id, G a counter that
+  Clear chat data raises), and each chat site in its own `site-<id>/` folder
+  inside that one, for example `web/applet-42-g3/site-claude/`. A site's
+  folder is made only when the site is first opened while the folder is
+  unlocked, and a site never opens with saved sign-ins before its folder is
+  ready: until then its page waits, it never silently opens privately
+  instead.
 - What is encrypted: cookies, local storage, IndexedDB, session storage and
   every other file the sites write, including the file names. The HTTP cache
   stays in memory.
@@ -350,7 +397,44 @@ sign-in is lost and you sign in again. To be sure, lock the folder or wait half
 a minute after signing in before restarting Plasma or logging out.
 
 **Clear chat data** in Encrypted mode signs you out of all chat sites,
-deletes this widget's saved sign-ins inside the folder, and locks the folder.
+deletes this widget's saved sign-ins inside the folder (every site's), and
+locks the folder.
+
+**Clear <site> data…** in Encrypted mode is offered only while the folder is
+unlocked and its saved sign-ins are open (not in a private session). It first
+notes the site in the setting `chatPendingSiteClears` (if that can't be
+saved, nothing is cleared), then closes that site's pages and profile, waits
+about a second for them to finish writing, and deletes only that site's
+`site-<id>/` folder; the other sites stay signed in. The site gets a new,
+empty folder the next time it is opened. If the delete fails, the Chat tab
+says so, and the site stays closed until a later unlock's delete works. Since
+the note is kept in the settings, even after a Plasma restart the site's old
+sign-in is never opened again.
+
+After each unlock the widget also tidies its own folder: older counters of
+this widget's folder are deleted (as before), and so is anything in the
+current one that isn't a chat site's `site-<id>/` folder. Turning a site off
+in settings keeps its saved sign-in.
+
+#### One profile per site: the one-time move
+
+Versions up to 1.0.1 kept every site in one shared profile. The first time a
+newer version starts, it moves to one profile per site once
+(`chatProfileLayout`):
+
+- It switches to a new, empty profile counter, so nothing of the old shared
+  profile is ever opened again. Every site asks you to sign in once more.
+- After the next unlock, the old shared profile's folder is deleted inside the
+  encrypted folder, with the same safe delete as Clear chat data. Until then
+  it stays encrypted and unused.
+- With saved sign-ins on a widget you had already set up, the Chat tab shows
+  a one-time notice saying so (and the Google sign-in note above), until you
+  click **Got it**.
+
+Going back to 1.0.1 is harmless: its sign-ins start empty, and its Clear chat
+data still deletes everything, including the per-site folders. Upgrading
+again shows no second notice; the tidying after the next unlock deletes what
+1.0.1 left behind, and you sign in to each site once more.
 
 Turning Stay signed in **Off** (after a confirmation in settings) deletes the
 whole encrypted folder, with every sign-in saved in it, for all Hearthwire
@@ -455,12 +539,12 @@ What Encrypted mode does not protect against:
 
 | Data | Off | Encrypted |
 | --- | --- | --- |
-| Cookies, sessions, site storage | Memory only; dropped on Clear chat data or Plasma restart | Encrypted folder; deleted on Clear chat data (this widget) or when you turn it Off (all widgets) |
+| Cookies, sessions, site storage | Memory only, one profile per site; dropped on Clear <site> data (that site), Clear chat data or Plasma restart | Encrypted folder, one `site-<id>` folder per site; deleted on Clear <site> data (that site), Clear chat data (this widget) or when you turn it Off (all widgets) |
 | HTTP cache | Memory only | Memory only |
 | Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them | Same; Qt WebEngine's own history files, if any, are inside the encrypted folder |
 | Passphrase | Not used | Never stored; typed into kdialog, read by gocryptfs |
 | Passwords and form autofill | Not supported by Qt WebEngine; nothing is saved | Same |
-| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the Ollama address (`chatOllamaUrl`), the zoom of each site and of the Ollama chat, set with the zoom keys or Ctrl+scroll (`chatSiteZoom`, for example `{"claude":1.25}`; sites at 100% are left out), the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `chatKeepOpen`, `chatAutoLockMinutes`, `shortcutOpens`, `middleClickOpens`, and
+| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the one-time profile move's state (`chatProfileLayout`), the sites still owing a Clear <site> data delete (`chatPendingSiteClears`), the Ollama address (`chatOllamaUrl`), the zoom of each site and of the Ollama chat, set with the zoom keys or Ctrl+scroll (`chatSiteZoom`, for example `{"claude":1.25}`; sites at 100% are left out), the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `chatKeepOpen`, `chatAutoLockMinutes`, `shortcutOpens`, `middleClickOpens`, and
 `chatVaultUnlock`, Passphrase or KDE Wallet), and the usage settings in the table near the top of this page, in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
 | Ollama conversation | Plasma memory only (and the Ollama server, see below); dropped on Clear conversation, when you turn Ollama off in settings, or on Plasma restart; kept while the popup is closed or another site is shown | Same; never in the encrypted folder |
 | Prompt library | This session's prompts and personalities in Plasma memory only | Saved in the encrypted folder (`library/`); in Plasma memory only while unlocked; never in the configuration |
@@ -717,8 +801,9 @@ prompt. **Open in browser** in the toolbar, your own click, opens the
 current site's page directly. Your browser may keep an opened address in its
 history, and the address briefly appears in the browser's process arguments.
 Sign-in popups open only after a click; one a page tries to open by itself is
-dropped. They stay inside the widget, in a sign-in overlay that uses the same
-profile as the chat page (private in Off, the saved one in Encrypted). Its
+dropped. They stay inside the widget, in a sign-in overlay that uses the
+profile of the site that opened it (private in Off, that site's saved one in
+Encrypted). Its
 title always names a host: "Sign-in window: accounts.google.com", or while
 the window is still blank (`about:blank`, or text a page wrote into it)
 "Window opened by claude.ai", the host of the page that opened it. See [Provider contracts](provider-contracts.md#chat-tab) for the exact
@@ -746,6 +831,9 @@ The Chat tab protects against:
 - with the Ollama chat: other users' programs on the Ollama port, cloud
   models, and leftovers of the conversation on disk from Hearthwire;
 - with Local web UI: other users' programs on its port;
+- one chat site's page using or reading another chat site's sign-in or data
+  (each site has its own profile; see the limits under
+  [One profile per chat site](#one-profile-per-chat-site));
 - provider replies or pages that try to slip markup into the widget's own
   text, hide direction characters in replies or download names, or move a
   chat page to another site unnoticed;
@@ -767,7 +855,11 @@ It does not protect against:
   its memory until the model is unloaded;
 - security bugs in the web engine itself: Qt WebEngine ships its own copy of
   Chromium, which often lags weeks behind Chrome's security fixes, and a
-  page that exploits such a bug runs inside Plasma (see below);
+  page that exploits such a bug runs inside Plasma (see below); one web
+  engine process serves every site's profile, so such a page that also
+  escapes Chromium's sandbox can reach every site's data;
+- what all sites share: the clipboard, your Downloads folder, your system
+  browser and your network;
 - swap, hibernation, core dumps, or clipboard managers, unless configured as
   below;
 - other local users seeing, in the process list, the path of a file dropped

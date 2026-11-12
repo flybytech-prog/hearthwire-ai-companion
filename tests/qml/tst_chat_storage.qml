@@ -813,4 +813,35 @@ TestCase {
             compare(ChatStorage.stepOperation(step), step)
         })
     }
+
+    function test_pendingClears() {
+        compare(ChatStorage.parsePendingClears(""), [])
+        compare(ChatStorage.parsePendingClears("claude"), ["claude"])
+        compare(ChatStorage.parsePendingClears("claude,user-0123abcd"), ["claude", "user-0123abcd"])
+        // Strict: only whole valid ids, each once; the rest is dropped.
+        compare(ChatStorage.parsePendingClears("claude,claude,../x,ollama, gemini,gemini ,,local"),
+                ["claude", "local"])
+        compare(ChatStorage.parsePendingClears(null), [])
+        compare(ChatStorage.parsePendingClears(7), [])
+        compare(ChatStorage.parsePendingClears(["claude"]), [])
+        compare(ChatStorage.pendingClearsText([]), "")
+        compare(ChatStorage.pendingClearsText(["claude", "gemini"]), "claude,gemini")
+        compare(ChatStorage.pendingClearsText(["claude", "claude"]), null)
+        compare(ChatStorage.pendingClearsText(["ollama"]), null)
+        compare(ChatStorage.pendingClearsText("claude"), null)
+        var many = []
+        for (var index = 0; index < 208; index++)
+            many.push("user-" + ("0000000" + index.toString(16)).slice(-8))
+        compare(ChatStorage.pendingClearsText(many), null)
+        compare(ChatStorage.pendingClearsText(many.slice(0, 207)), many.slice(0, 207).join(","))
+        // Round trip.
+        compare(ChatStorage.parsePendingClears(ChatStorage.pendingClearsText(many.slice(0, 207))), many.slice(0, 207))
+    }
+
+    // A site's delete runs only while the folder is unlocked; else it stays owed.
+    function test_removeSiteOnlyWhileUnlocked() {
+        verify(ChatStorage.dropStep("remove-site", {mode: "encrypted", state: "locked"}))
+        verify(ChatStorage.dropStep("remove-site", {mode: "encrypted", state: ""}))
+        verify(!ChatStorage.dropStep("remove-site", {mode: "encrypted", state: "unlocked"}))
+    }
 }

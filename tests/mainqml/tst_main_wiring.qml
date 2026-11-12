@@ -2519,8 +2519,15 @@ TestCase {
         compare(text.textFormat, Text.PlainText)
         compare(text.text, "Clear Claude data? This signs you out of this site and deletes its saved sign-in. Other sites stay signed in.")
         var count = storageCommands(main).length
+        // The delete it owes is stored before anything is torn down.
+        var storedAtTeardown = []
+        chat.web.clearHook = function (siteId) {
+            storedAtTeardown.push(Plasmoid.configuration.chatPendingSiteClears)
+        }
         allNamed(chat, "clearSiteConfirm")[0].clicked()
+        compare(storedAtTeardown, ["claude"])
         compare(chat.web.clearedSites, ["claude"])
+        compare(chat.pendingSiteClears, ["claude"])
         compare(chat.confirmingClearSite, "")
         compare(main.chatReadySites, [], "claude's folder no longer counts")
         compare(chat.web.preparedSites, [])
@@ -2528,7 +2535,10 @@ TestCase {
         compare(storageCommands(main).length, count)
         compare(main.chatOp, "wait")
         compare(main.chatProfileCloseWait, 1000)
+        compare(Plasmoid.configuration.chatPendingSiteClears, "claude")
         expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"))
+        // Only the ok reply ends the debt.
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
         expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
         compare(main.chatReadySites, ["claude"])
         compare(chat.web.preparedSites, ["claude"])
@@ -2548,6 +2558,7 @@ TestCase {
         wait(50)
         compare(main.chatStorageNotice, "site-remove-failed")
         compare(main.chatReadySites, [])
+        compare(Plasmoid.configuration.chatPendingSiteClears, "claude", "a failed delete stays owed")
         verify(storageCommands(main).every(function (command, index, all) {
             return index < all.length - 1 || command.indexOf("--sites claude") < 0
         }))
@@ -2560,11 +2571,12 @@ TestCase {
         main.chatStorageRequest("unlock")
         expectStorage(main, "--vault unlock")
         expectStorage(main, "--vault status", testCase.unlockedReply)
-        expectStorage(main, webData("prepare", " --generation " + generation))
+        // The owed delete comes first; only then is claude prepared.
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"))
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
         expectStorage(main, webData("remove", " --keep " + generation))
         expectStorage(main, webData("prune", " --generation " + generation + " --known " + builtIns.join(",")))
-        expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"))
-        expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
         compare(main.chatReadySites, ["claude"])
     }
 
@@ -2653,5 +2665,160 @@ TestCase {
         page.cfg_chatProfileLayout = 1
         Plasmoid.configuration.chatProfileLayout = 2
         compare(page.cfg_chatProfileLayout, 2)
+    }
+
+    // --- Clear <site> data survives a restart (chatPendingSiteClears) -------
+
+    // Plasma restarted with a delete still owed: the unlock deletes the
+    // folder before anything prepares that site.
+    function test_restartRunsTheOwedDeleteBeforeAnyPrepare() {
+        var main = loadMain({chatSignInStorage: "encrypted", chatPendingSiteClears: "claude"})
+        var generation = main.chatGeneration
+        compare(main.chatPendingClears, ["claude"])
+        main.chatStorageRequest("open")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"))
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
+        expectStorage(main, webData("remove", " --keep " + generation))
+        expectStorage(main, webData("prune", " --generation " + generation + " --known " + builtIns.join(",")))
+        compare(main.chatReadySites, ["claude"])
+    }
+
+    // The delete fails after a restart: the site stays closed (prepared
+    // without it) and owed; the rest goes on.
+    function test_restartWithAFailedDeleteKeepsTheSiteClosed() {
+        var main = loadMain({chatSignInStorage: "encrypted", chatPendingSiteClears: "claude"})
+        var generation = main.chatGeneration
+        main.chatStorageRequest("open")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"),
+                      JSON.stringify({ok: false, error: "os-error"}))
+        expectStorage(main, webData("prepare", " --generation " + generation))
+        expectStorage(main, webData("remove", " --keep " + generation))
+        expectStorage(main, webData("prune", " --generation " + generation + " --known " + builtIns.join(",")))
+        wait(50)
+        compare(Plasmoid.configuration.chatPendingSiteClears, "claude")
+        compare(main.chatReadySites, [])
+        compare(main.chatStorageNotice, "site-remove-failed")
+        verify(storageCommands(main).every(function (command) { return command.indexOf("--sites claude") < 0 }))
+        verify(main.chatStorageReady)
+        // Another site shown meanwhile is prepared; claude never is.
+        main.chatSiteId = "gemini"
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites gemini"))
+        compare(main.chatReadySites, ["gemini"])
+        compare(Plasmoid.configuration.chatPendingSiteClears, "claude")
+    }
+
+    function test_storedClearsAreReadStrictly_data() {
+        return [
+            {tag: "bad parts dropped", text: "claude,../evil,user-XYZ,gemini,claude,", pending: ["claude", "gemini"]},
+            {tag: "spaces", text: "claude, gemini", pending: ["claude"]},
+            {tag: "added site", text: "user-0123abcd,ollama", pending: ["user-0123abcd"]},
+            {tag: "unreadable", text: "%%%;rm -rf", pending: []},
+            {tag: "empty", text: "", pending: []}
+        ]
+    }
+
+    // Unreadable parts never reach a command and never let a listed site
+    // be prepared; every readable id is deleted first.
+    function test_storedClearsAreReadStrictly(data) {
+        var main = loadMain({chatSignInStorage: "encrypted", chatPendingSiteClears: data.text})
+        var generation = main.chatGeneration
+        compare(main.chatPendingClears, data.pending)
+        main.chatStorageRequest("open")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        var failed = JSON.stringify({ok: false, error: "os-error"})
+        data.pending.forEach(function (id) {
+            expectStorage(main, webData("remove-site", " --generation " + generation + " --site " + id), failed)
+        })
+        // claude is shown: prepared only when it isn't listed.
+        expectStorage(main, webData("prepare", " --generation " + generation
+                                    + (data.pending.indexOf("claude") >= 0 ? "" : " --sites claude")))
+        storageCommands(main).forEach(function (command) {
+            verify(/^--(vault|web-data) [a-z-]+( --[a-z]+ [a-z0-9,-]+)*$/.test(command), command)
+            verify(!/evil|XYZ|ollama|%|;| ,/.test(command), command)
+        })
+        // A delete that works stores the list back clean.
+        if (data.pending.length > 1) {
+            main.chatStorageRequest("lock")
+            tryVerify(function () { return lastStorageCommand(main) === webData("remove", " --keep " + generation) }, 3000)
+            answerStorage(main, testCase.okReply)
+            expectStorage(main, webData("prune", " --generation " + generation + " --known " + builtIns.join(",")))
+            expectStorage(main, "--vault lock")
+            expectStorage(main, "--vault status", JSON.stringify({ok: true, state: "locked", wallet: "off"}))
+            main.chatStorageRequest("unlock")
+            expectStorage(main, "--vault unlock")
+            expectStorage(main, "--vault status", testCase.unlockedReply)
+            expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"))
+            compare(Plasmoid.configuration.chatPendingSiteClears, "gemini")
+        }
+    }
+
+    // Every settings page keeps chatPendingSiteClears in step, so Apply
+    // never writes an owed delete away.
+    function test_pagesKeepThePendingClearsInStep_data() {
+        return [{tag: "usage", file: testCase.usagePageFile}, {tag: "general", file: testCase.generalPageFile},
+                {tag: "chat", file: testCase.chatPageFile}]
+    }
+
+    function test_pagesKeepThePendingClearsInStep(data) {
+        var page = load(data.file, {})
+        compare(page.cfg_chatPendingSiteClears, "")
+        compare(page.cfg_chatPendingSiteClearsDefault, "")
+        Plasmoid.configuration.chatPendingSiteClears = "claude"
+        compare(page.cfg_chatPendingSiteClears, "claude")
+        Plasmoid.configuration.chatPendingSiteClears = ""
+        compare(page.cfg_chatPendingSiteClears, "")
+    }
+
+    // The owed delete can't be stored (the list is full): nothing is torn
+    // down and nothing is deleted, so nothing is half cleared.
+    function test_clearSiteNotTornDownWhenItCantBeStored() {
+        var main = unlockedMain({}, true)
+        var chat = testCase.chatOpened
+        tryVerify(function () { return chat.persistentActive }, 3000)
+        var full = []
+        for (var index = 0; index < 207; index++)
+            full.push("user-" + ("0000000" + index.toString(16)).slice(-8))
+        Plasmoid.configuration.chatPendingSiteClears = full.join(",")
+        var count = storageCommands(main).length
+        chat.askClearSite()
+        allNamed(chat, "clearSiteConfirm")[0].clicked()
+        compare(chat.web.clearedSites, [])
+        compare(Plasmoid.configuration.chatPendingSiteClears, full.join(","))
+        compare(main.chatReadySites, ["claude"])
+        wait(50)
+        compare(storageCommands(main).length, count)
+        compare(main.chatQueue, [])
+    }
+
+    function test_clearChatDataEndsTheOwedDeletes_data() {
+        return [{tag: "remove ok", reply: JSON.stringify({ok: true}), left: ""},
+                {tag: "remove failed", reply: JSON.stringify({ok: false, error: "os-error"}), left: "gemini,claude"}]
+    }
+
+    // Clear chat data deletes every generation: once that remove replied
+    // ok, no Clear <site> delete is owed; if it failed, the list stays.
+    function test_clearChatDataEndsTheOwedDeletes(data) {
+        var main = unlockedMain()
+        var generation = main.chatGeneration
+        // Owed from an earlier failed delete (as if written by an earlier run).
+        Plasmoid.configuration.chatPendingSiteClears = "gemini"
+        main.chatClearSite("claude")
+        compare(Plasmoid.configuration.chatPendingSiteClears, "gemini,claude")
+        tryVerify(function () { return main.chatOp === "" || main.chatOp === "remove-site" }, 3000)
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site gemini"),
+                      JSON.stringify({ok: false, error: "os-error"}))
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"),
+                      JSON.stringify({ok: false, error: "os-error"}))
+        compare(Plasmoid.configuration.chatPendingSiteClears, "gemini,claude")
+        main.chatStorageRequest("clear-saved")
+        compare(main.chatGeneration, generation + 1)
+        // Not before the remove step's reply.
+        compare(Plasmoid.configuration.chatPendingSiteClears, "gemini,claude")
+        expectStorage(main, webData("remove", ""), data.reply)
+        compare(Plasmoid.configuration.chatPendingSiteClears, data.left)
+        expectStorage(main, "--vault lock")
     }
 }

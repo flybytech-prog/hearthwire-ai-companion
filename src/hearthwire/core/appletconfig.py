@@ -65,6 +65,7 @@ CONFIG_ENTRIES: dict[str, tuple[str, object]] = {
     "chatSignInStorage": ("String", "memory"),
     "chatProfileGeneration": ("Int", 0),
     "chatProfileLayout": ("Int", 0),
+    "chatPendingSiteClears": ("String", ""),
     "chatAutoLockMinutes": ("Int", 0),
     "chatVaultUnlock": ("String", "passphrase"),
     "chatKeepOpen": ("Bool", False),

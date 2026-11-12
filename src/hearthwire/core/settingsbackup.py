@@ -75,12 +75,13 @@ BACKUP_KEYS = (
 )
 # Never saved, never restored: sign-ins, the encrypted folder, per-site zoom,
 # schema and first-run state, the history opt-in (D70) with its owed delete,
-# and the per-site profile migration marker (task 004, written by main.qml).
+# the per-site profile migration marker and the site clears still owed after
+# a failed delete (task 004, both written only by main.qml).
 EXCLUDED_KEYS = (
     "chatSignInStorage", "chatProfileGeneration", "chatAutoLockMinutes",
     "chatVaultUnlock", "chatSiteZoom", "configSchemaVersion",
     "initialSetupComplete", "usageHistoryEnabled", "usageHistoryClearOwed",
-    "chatProfileLayout",
+    "chatProfileLayout", "chatPendingSiteClears",
 )
 
 # Chat sites as in plasmoid/contents/ui/ChatSites.js (``sites``) and the

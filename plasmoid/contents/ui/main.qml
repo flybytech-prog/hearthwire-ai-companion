@@ -215,9 +215,16 @@ PlasmoidItem {
     // Every site id whose folder prune keeps: the built-ins (added sites
     // join in a later version).
     readonly property var chatKnownSites: ChatStorage.BUILTIN_SITE_IDS
-    // Clear <site> data with saved sign-ins: [{site, generation}] still to
-    // delete. Such a site's folder is never prepared again before that.
-    property var chatSiteRemovals: []
+    // Clear <site> data with saved sign-ins: the sites whose folder is still
+    // to delete, stored (chatPendingSiteClears) so a restart can't open the
+    // old data again. Such a site is never prepared before its delete worked.
+    readonly property var chatPendingClears:
+        ChatStorage.parsePendingClears(Plasmoid.configuration.chatPendingSiteClears)
+    // Pending sites whose delete already failed in this round; tried again
+    // at the next unlock (or the next Clear of that site).
+    property var chatRemoveTried: []
+    // The site the running remove-site deletes.
+    property string chatRemoveSite: ""
     // Sites the running prepare creates.
     property var chatOpSites: []
     // How long a destroyed profile gets to write and close its files before
@@ -766,10 +773,8 @@ PlasmoidItem {
             return ChatStorage.webDataCommand("prune", "encrypted",
                 root.chatAppletId, root.chatGeneration, null, run, root.chatKnownSites)
         case "remove-site":
-            var removal = root.chatSiteRemovals.length > 0 ? root.chatSiteRemovals[0] : null
-            return removal && removal.generation === root.chatGeneration
-                ? ChatStorage.webDataCommand("remove-site", "encrypted",
-                    root.chatAppletId, root.chatGeneration, null, run, removal.site) : ""
+            return ChatStorage.webDataCommand("remove-site", "encrypted",
+                root.chatAppletId, root.chatGeneration, null, run, root.chatRemoveSite)
         case "remove":
         case "leave-remove":
             return ChatStorage.webDataCommand("remove", "encrypted",
@@ -805,6 +810,14 @@ PlasmoidItem {
             chatWaitTimer.start()
             return
         }
+        if (step === "remove-site") {
+            root.chatRemoveSite = root.chatNextRemoval()
+            // Nothing (left) to delete this round.
+            if (root.chatRemoveSite === "") {
+                Qt.callLater(root.chatNext)
+                return
+            }
+        }
         root.chatOpRun = ChatStorage.nextRun(root.chatOpRun)
         // The sites shown now, but never one whose folder still waits to be
         // deleted (Clear <site> data).
@@ -823,9 +836,25 @@ PlasmoidItem {
     }
 
     function chatRemovalPending(siteId) {
-        return root.chatSiteRemovals.some(function (removal) {
-            return removal.site === siteId && removal.generation === root.chatGeneration
-        })
+        return root.chatPendingClears.indexOf(siteId) >= 0
+    }
+
+    // The first pending site not yet tried this round; "" when none.
+    function chatNextRemoval() {
+        var left = root.chatPendingClears.filter(function (id) { return root.chatRemoveTried.indexOf(id) < 0 })
+        return left.length > 0 ? left[0] : ""
+    }
+
+    // Stores the pending list at once; false when it can't be stored.
+    function chatWritePendingClears(ids) {
+        var text = ChatStorage.pendingClearsText(ids)
+        if (text === null)
+            return false
+        Plasmoid.configuration.chatPendingSiteClears = text
+        // Plasma saves the configuration a moment later; this saves now.
+        if (typeof Plasmoid.configuration.writeConfig === "function")
+            Plasmoid.configuration.writeConfig()
+        return Plasmoid.configuration.chatPendingSiteClears === text
     }
 
     // A shown site has no folder yet while the generation is prepared:
@@ -841,16 +870,22 @@ PlasmoidItem {
             root.chatEnqueue(["prepare"])
     }
 
-    // Clear <site> data with saved sign-ins: ChatView already dropped the
-    // site's views and profile. Its folder no longer counts as prepared;
+    // Clear <site> data with saved sign-ins, before ChatView drops the
+    // site's views and profile (it does so only if the site is pending
+    // afterwards): the site is stored as pending first, so the delete is
+    // owed even across a restart. Its folder no longer counts as prepared;
     // after the wait it is deleted, then made again if the site is shown.
     function chatClearSite(siteId) {
         if (!ChatStorage.isSiteId(siteId) || !root.chatStorageReady)
             return
+        if (!root.chatRemovalPending(siteId)
+                && !root.chatWritePendingClears(root.chatPendingClears.concat([siteId])))
+            return
+        root.chatRemoveTried = root.chatRemoveTried.filter(function (id) { return id !== siteId })
         root.chatPreparedSites = root.chatPreparedSites.filter(function (id) { return id !== siteId })
-        if (!root.chatRemovalPending(siteId))
-            root.chatSiteRemovals = root.chatSiteRemovals.concat([{site: siteId, generation: root.chatGeneration}])
-        root.chatEnqueue(["wait", "remove-site"])
+        // One delete for each owed site not tried yet this round, this one too.
+        var owed = root.chatPendingClears.filter(function (id) { return root.chatRemoveTried.indexOf(id) < 0 })
+        root.chatEnqueue(["wait"].concat(owed.map(function () { return "remove-site" })))
         root.chatPrepareMissing()
     }
 
@@ -881,8 +916,12 @@ PlasmoidItem {
             if (root.chatVaultState !== "unlocked")
                 root.chatPreparedGeneration = -1
             else if (root.chatWantsSaved()
-                     && root.chatPreparedGeneration !== root.chatGeneration)
-                root.chatEnqueue(["prepare"])
+                     && root.chatPreparedGeneration !== root.chatGeneration) {
+                // Every owed site delete first, then prepare (keep and prune
+                // follow it).
+                root.chatRemoveTried = []
+                root.chatEnqueue(root.chatPendingClears.map(function () { return "remove-site" }).concat(["prepare"]))
+            }
             break
         case "prepare":
             if (reply.ok && root.chatOpGeneration === root.chatGeneration && root.chatWantsSaved()) {
@@ -897,9 +936,8 @@ PlasmoidItem {
                     // Old generations of this widget (e.g. after Clear, or the
                     // old shared profile after the update) go away, then
                     // everything in this generation but the known sites'
-                    // folders; a site cleared earlier still owes its delete.
+                    // folders.
                     root.chatEnqueue(["keep", "prune"])
-                    root.chatSiteRemovals.forEach(function () { root.chatEnqueue(["remove-site"]) })
                     // Another widget may lock the folder while the view opens it.
                     chatRecheckTimer.restart()
                 }
@@ -915,16 +953,25 @@ PlasmoidItem {
         case "prune":
             break
         case "remove-site":
-            // Kept on failure: the site stays closed until a later unlock's
-            // delete works.
-            if (reply.ok && root.chatSiteRemovals.length > 0)
-                root.chatSiteRemovals = root.chatSiteRemovals.slice(1)
-            else if (!reply.ok)
+            // Only an ok reply ends the debt. On failure the site stays
+            // pending and closed until a later unlock's delete works.
+            var removed = root.chatRemoveSite
+            root.chatRemoveSite = ""
+            if (reply.ok)
+                root.chatWritePendingClears(root.chatPendingClears.filter(function (id) { return id !== removed }))
+            else {
+                root.chatRemoveTried = root.chatRemoveTried.concat([removed])
                 root.chatStorageNotice = "site-remove-failed"
+            }
             root.chatPrepareMissing()
             break
         case "remove":
-            if (!reply.ok && root.chatStorageMode === "encrypted")
+            // Clear chat data's delete of every generation: all site
+            // folders are gone, so no Clear <site> delete is owed any more.
+            // On failure the list stays.
+            if (reply.ok)
+                root.chatWritePendingClears([])
+            else if (root.chatStorageMode === "encrypted")
                 root.chatVaultError = "remove-failed"
             break
         case "auto-unlock":
@@ -1069,8 +1116,6 @@ PlasmoidItem {
         case "clear-saved":
             root.chatVaultHold = true
             root.chatPreparedGeneration = -1
-            // remove deletes every generation, these sites' folders too.
-            root.chatSiteRemovals = []
             root.chatSetGeneration(ChatStorage.nextGeneration(root.chatGeneration))
             root.chatVaultError = "cleared"
             root.chatEnqueue(["wait", "remove", "lock"])
@@ -1122,7 +1167,6 @@ PlasmoidItem {
         root.chatAutoLocking = false
         root.chatVaultError = ""
         root.chatPreparedGeneration = -1
-        root.chatSiteRemovals = []
         chatRecheckTimer.stop()
         root.chatQueue = ChatStorage.queueForMode(root.chatQueue, root.chatStorageMode)
         if (root.chatStorageMode === "encrypted") {

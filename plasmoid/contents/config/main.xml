@@ -41,6 +41,9 @@
         <entry name="chatProfileLayout" type="Int">
             <default>0</default>
         </entry>
+        <entry name="chatPendingSiteClears" type="String">
+            <default></default>
+        </entry>
         <entry name="chatAutoLockMinutes" type="Int">
             <default>0</default>
         </entry>

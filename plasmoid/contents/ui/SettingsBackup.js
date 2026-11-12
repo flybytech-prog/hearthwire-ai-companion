@@ -21,7 +21,7 @@ var EXCLUDED_KEYS = [
     "chatSignInStorage", "chatProfileGeneration", "chatAutoLockMinutes",
     "chatVaultUnlock", "chatSiteZoom", "configSchemaVersion",
     "initialSetupComplete", "usageHistoryEnabled", "usageHistoryClearOwed",
-    "chatProfileLayout"
+    "chatProfileLayout", "chatPendingSiteClears"
 ]
 var OPERATIONS = ["status", "export", "import"]
 var ERRORS = ["absent", "invalid", "unsupported", "too-large", "bad-data", "symlink", "not-owned",

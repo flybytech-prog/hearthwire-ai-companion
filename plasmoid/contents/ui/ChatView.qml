@@ -41,6 +41,9 @@ ColumnLayout {
     property int storageApplet: -1
     property int storageGeneration: -1
     property var preparedSites: []
+    // Sites whose saved folder a Clear <site> data still has to delete
+    // (main.qml, stored).
+    property var pendingSiteClears: []
     // chatProfileLayout: 1 = the one-time "own sign-in per site" notice is
     // still to show (main.qml writes it).
     property int profileLayout: 2
@@ -73,8 +76,9 @@ ColumnLayout {
     // create, unlock, private, lock, auto-lock, retry, held-open, clear-saved,
     // open, recheck, dismiss-notice, saved-session, layout-notice-done
     signal storageRequest(string action)
-    // Clear <site> data with saved sign-ins: the site's views and profile
-    // are gone; main.qml waits, then deletes its folder.
+    // Clear <site> data with saved sign-ins, before the site's views and
+    // profile go: main.qml stores the site as pending, waits, then deletes
+    // its folder.
     signal siteDataClearRequested(string siteId)
     // Ctrl+= / Ctrl+- / Ctrl+0 on the site shown: +1, -1 or 0 (reset).
     signal zoomRequested(int direction)
@@ -198,16 +202,19 @@ ColumnLayout {
     }
 
     // The site's views and profile go (in memory mode that is all its
-    // data); with saved sign-ins main.qml then deletes its folder.
+    // data). With saved sign-ins main.qml first stores the delete it owes,
+    // and nothing is torn down unless that worked.
     function clearSiteData() {
         var siteId = chatView.confirmingClearSite
         chatView.confirmingClearSite = ""
         if (!chatView.canClearSiteFor(siteId))
             return
-        var saved = chatView.persistentActive
-        chatView.web.clearSite(siteId)
-        if (saved)
+        if (chatView.persistentActive) {
             chatView.siteDataClearRequested(siteId)
+            if (!Array.isArray(chatView.pendingSiteClears) || chatView.pendingSiteClears.indexOf(siteId) < 0)
+                return
+        }
+        chatView.web.clearSite(siteId)
         chatView.focusLater()
     }
 

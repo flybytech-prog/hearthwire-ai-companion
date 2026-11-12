@@ -54,5 +54,11 @@ Item {
     function cancelDownload() {}
     function closeOverlay() {}
     function saveDownload() {}
-    function clearSite(siteId) { clearedSites = clearedSites.concat([siteId]) }
+    // Called with the site id at teardown, if a test sets it.
+    property var clearHook: null
+    function clearSite(siteId) {
+        clearedSites = clearedSites.concat([siteId])
+        if (clearHook)
+            clearHook(siteId)
+    }
 }

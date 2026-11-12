@@ -264,7 +264,7 @@ New windows requested by a page:
 
 - A popup dialog (`about:blank` or `https:`) or an `https:` window on one of
   the site's sign-in hosts opens in a sign-in overlay inside the popup, using
-  the same profile as the site view, and closes when the page closes it.
+  the profile of the site that opened it, and closes when the page closes it.
   Its plain-text title names its own host ("Sign-in window: <host>"), or
   while it has none (`about:blank`, empty, written by a script) the opener's
   ("Window opened by <host>", `ChatSites.overlayHost`).
@@ -492,6 +492,50 @@ at a time without following symlinks.
 | `--web-data remove-site --store encrypted --applet N --generation G --site ID` | Deletes `applet-N-gG/site-<ID>` only (a symlink there is unlinked, never followed); a missing folder is success. Used by "Clear <site> data" after the site's profile is gone | `{"ok":true}` |
 | `--web-data remove --store encrypted --applet N [--keep G]` | Deletes this widget's `applet-N-g*` folders, except generation `G` when given; nothing there is success. Unchanged by per-site folders: deleting a generation folder deletes its `site-*` folders with it | `{"ok":true}` |
 | `--web-data purge` | Deletes the encrypted folder and `vault-keys/` for `scripts/install.sh --uninstall-web-data`, then the wallet entry when `vault-keys/` held a wallet slot, kwallet-query and qdbus6 are there and the wallet holds it; refuses while anything is mounted at the mountpoint or from the cipher directory (also checks `/run/user/<uid>`); runs no other tool | `{"ok":true,"removed":[...]}` with any of `"vault"`, `"vault-keys"`, `"wallet-entry"` in that order (empty when nothing was there) |
+
+#### How the widget uses the web-data commands
+
+Every chat site has its own Qt WebEngine profile. Its storage name
+`applet-<N>-g<G>-<id>` (only a label; the path is given explicitly) and its
+folder `<runtime>/hearthwire/vault/web/applet-<N>-g<G>/site-<id>` are built
+only by `ChatStorage.siteProfileName` and `siteProfilePath`, which return ""
+for anything that isn't a site id. The `prepare`, `prune` and `remove-site`
+builders in `ChatStorage.webDataCommand` return "" when any id fails the
+grammar; the step then fails and no command runs. main.qml runs the steps one
+at a time:
+
+- **Unlock:** once `--vault status` says `unlocked` and saved sign-ins are
+  wanted, `prepare --sites` runs for the sites the shown panes need (the
+  current site, and the second pane's in split view), never one whose
+  Clear <site> data delete is still owed. A site gets a saved profile only
+  after its folder was prepared in the current generation; until then its view
+  waits.
+- **After the first prepare of a generation since the unlock:**
+  `remove --keep G` (older generations, including the shared profile from
+  1.0.1 or earlier), then `prune --known` with every built-in site id (added
+  sites join in a later version), then one `remove-site` for each owed
+  Clear <site> data. These steps show no card.
+- **A shown site without a folder** (a site switch, split view): one more
+  `prepare --sites`, at most one at a time.
+- **Clear <site> data** with saved sign-ins: main.qml first stores the
+  owed delete in `chatPendingSiteClears` ("" or comma-separated site ids,
+  written with `ChatStorage.pendingClearsText` and read strictly with
+  `parsePendingClears`, which drops anything that isn't a site id) and saves
+  the configuration at once. Only if that worked does ChatView destroy the
+  site's views and then its profile. main.qml drops the site from the
+  prepared set, waits `chatProfileCloseWait` (1 s) and runs
+  `remove-site --site <id>`. On success the id leaves the list and the site is
+  prepared again when shown. On failure the Chat tab shows
+  `site-remove-failed`, and the site stays closed (never prepared) until a
+  later unlock's `remove-site` works, also after a Plasma restart. In memory
+  mode no helper runs: destroying the profile is the whole clear.
+- **Clear chat data** is unchanged: a new generation, wait, `remove`, then
+  `lock`. Deleting the generation folders deletes every `site-*` folder.
+- **The one-time move** (`chatProfileLayout` 0): at start the widget raises
+  `chatProfileGeneration` once and stores 1 (Encrypted on a widget already set
+  up: the Chat tab's notice shows until **Got it** stores 2) or 2. The keep
+  step after the next unlock's prepare then deletes the old shared profile's
+  folder.
 
 `absent` means there is no cipher directory or it is empty. `damaged` means the
 cipher directory holds files but no regular `gocryptfs.conf`: gocryptfs can
@@ -1043,7 +1087,7 @@ doesn't depend on the Python build's recursion handling. Only `BACKUP_KEYS` are 
 `EXCLUDED_KEYS` (`chatSignInStorage`, `chatProfileGeneration`,
 `chatAutoLockMinutes`, `chatVaultUnlock`, `chatSiteZoom`,
 `configSchemaVersion`, `initialSetupComplete`, `usageHistoryEnabled`,
-`usageHistoryClearOwed`) and
+`usageHistoryClearOwed`, `chatProfileLayout`, `chatPendingSiteClears`) and
 known keys with a value the widget would not store are dropped and counted
 in `dropped`. Strings hold at most 4096 characters (`chatCustomUrls` 32768)
 and no C0/C1 controls or lone surrogates; a boolean is never an integer.

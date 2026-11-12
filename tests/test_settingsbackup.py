@@ -162,7 +162,8 @@ def test_the_decided_keys_are_on_the_right_side():
     assert "chatCustomUrls" in backup.BACKUP_KEYS  # D74
     assert "usageHistoryEnabled" in backup.EXCLUDED_KEYS  # D70: never set by import.
     for key in ("chatSignInStorage", "chatProfileGeneration", "chatAutoLockMinutes", "chatVaultUnlock",
-                "chatSiteZoom", "configSchemaVersion", "initialSetupComplete", "chatProfileLayout"):
+                "chatSiteZoom", "configSchemaVersion", "initialSetupComplete", "chatProfileLayout",
+                "chatPendingSiteClears"):
         assert key in backup.EXCLUDED_KEYS
 
 

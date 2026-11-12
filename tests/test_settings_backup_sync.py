@@ -204,6 +204,38 @@ def test_proof_coverage_rule_catches(backup, excluded, extra_xml):
     assert coverage_problems(backup, excluded, main_xml_keys(read(MAIN_XML)) + list(extra_xml))
 
 
+# Task 004: main.qml's migration marker and the site clears still owed are
+# per-computer state, so a backup never carries them.
+SITE_ISOLATION_KEYS = {"chatProfileLayout": ("Int", 0), "chatPendingSiteClears": ("String", "")}
+
+
+def site_isolation_key_problems(backup, excluded, table, xml_keys):
+    problems = []
+    for key, entry in SITE_ISOLATION_KEYS.items():
+        if key in backup or key not in excluded:
+            problems.append(f"{key} must be in EXCLUDED_KEYS only")
+        if table.get(key) != entry:
+            problems.append(f"{key} must default to {entry!r}")
+        if key not in xml_keys:
+            problems.append(f"{key} missing from main.xml")
+    return problems
+
+
+def test_site_isolation_keys_are_never_backed_up():
+    problems = site_isolation_key_problems(BACKUP_KEYS, EXCLUDED_KEYS, CONFIG_ENTRIES, main_xml_keys(read(MAIN_XML)))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize("key", sorted(SITE_ISOLATION_KEYS))
+def test_proof_site_isolation_key_rule_catches(key):
+    xml_keys = set(main_xml_keys(read(MAIN_XML)))
+    excluded = tuple(name for name in EXCLUDED_KEYS if name != key)
+    assert site_isolation_key_problems(BACKUP_KEYS + (key,), excluded, CONFIG_ENTRIES, xml_keys)
+    assert site_isolation_key_problems(BACKUP_KEYS, EXCLUDED_KEYS, dict(CONFIG_ENTRIES, **{key: ("String", "x")}),
+                                       xml_keys)
+    assert site_isolation_key_problems(BACKUP_KEYS, EXCLUDED_KEYS, CONFIG_ENTRIES, xml_keys - {key})
+
+
 def test_proof_main_xml_keys_are_read_from_entries():
     xml = mutated(MAIN_XML, '<entry name="panelRing"', '<entry name="panelRingRenamed"')
     assert coverage_problems(BACKUP_KEYS, EXCLUDED_KEYS, main_xml_keys(xml))
@@ -270,6 +302,8 @@ def test_proof_export_read_rule_catches(asked, saved):
 @pytest.mark.parametrize("table", [
     {key: value for key, value in CONFIG_ENTRIES.items() if key != "chatCustomUrls"},
     {key: value for key, value in CONFIG_ENTRIES.items() if key != "usageHistoryClearOwed"},
+    {key: value for key, value in CONFIG_ENTRIES.items() if key != "chatProfileLayout"},
+    {key: value for key, value in CONFIG_ENTRIES.items() if key != "chatPendingSiteClears"},
     dict(CONFIG_ENTRIES, usageBrandNew=("String", "")),
 ])
 def test_proof_default_table_rule_catches(table):

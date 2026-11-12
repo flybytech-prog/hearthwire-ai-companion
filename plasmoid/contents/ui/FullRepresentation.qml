@@ -587,6 +587,7 @@ PlasmaExtras.Representation {
                     storageApplet: root.chatAppletId
                     storageGeneration: root.chatGeneration
                     preparedSites: root.chatReadySites
+                    pendingSiteClears: root.chatPendingClears
                     profileLayout: root.chatProfileLayout
                     onSiteDataClearRequested: (siteId) => root.chatClearSite(siteId)
                     card: root.chatCard

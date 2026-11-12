@@ -173,6 +173,34 @@ function siteList(ids) {
     return ids.join(",")
 }
 
+// chatPendingSiteClears: the sites a Clear <site> data still owes a delete,
+// as stored ("" or ids separated by commas). Read strictly: anything that
+// isn't a valid id is dropped and never reaches a command; a valid id in a
+// damaged text still counts, so that site is never prepared before its
+// delete worked. Not a string: nothing is pending.
+function parsePendingClears(text) {
+    if (typeof text !== "string" || text === "")
+        return []
+    var ids = []
+    var parts = text.split(",")
+    for (var index = 0; index < parts.length; index++) {
+        if (isSiteId(parts[index]) && ids.indexOf(parts[index]) < 0)
+            ids.push(parts[index])
+    }
+    return ids
+}
+
+// What is stored for `ids`: "" for none, else the checked list; null when
+// it can't be stored (a bad or repeated id, or more than MAX_SITE_IDS).
+function pendingClearsText(ids) {
+    if (!Array.isArray(ids))
+        return null
+    if (ids.length === 0)
+        return ""
+    var text = siteList(ids)
+    return text === "" ? null : text
+}
+
 // First run number for a widget or settings page: the clock plus a random
 // part, so two pages (or widgets) started together don't share source names.
 function firstRun(now, random) {
@@ -541,6 +569,9 @@ function dropStep(step, context) {
     // and never after the user locked it.
     if (step === "auto-unlock")
         return value.state !== "locked" || value.wallet !== "set-up" || value.hold === true
+    // A site's delete runs only inside the unlocked folder; it stays owed.
+    if (step === "remove-site")
+        return value.state !== "unlocked"
     // The Chat tab only deletes a folder the helper reported as damaged.
     if (step === "destroy")
         return value.state !== "damaged"

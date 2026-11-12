@@ -73,7 +73,14 @@ plasmashell's memory.
   turning it off puts the popup back to the width it had before. Two sites
   use about twice the memory of one; turning Split off closes the second
   page.
-- **Private by default**: pages run in an in-memory browser profile. You sign
+- **One profile per site**: every chat site has its own browser profile
+  (cookies, storage, cache, service workers, permissions), so one site's page
+  can't use or read another site's sign-in. Each site signs in on its own,
+  Google sign-in included. **Clear <site> data…** in the Chat toolbar signs
+  you out of just the site you are using. The sites still share one web
+  engine process, the clipboard, your Downloads folder and your network
+  (see [the limits](docs/privacy.md#one-profile-per-chat-site)).
+- **Private by default**: pages run in in-memory browser profiles. You sign
   in on each site normally; nothing is saved to disk, and you are signed out
   when Plasma restarts or you choose **Clear chat data**. Every site
   permission (microphone, camera, screen sharing, notifications, location,
@@ -107,6 +114,9 @@ plasmashell's memory.
   copies the prompt to the clipboard.
 - **Google sign-in** works on Google's sign-in page (Hearthwire presents
   itself as Firefox there only, because Google refuses embedded browsers).
+  Signing in to Google in Gemini doesn't sign you in on other sites, and
+  "Sign in with Google" on Claude, ChatGPT, Grok or Copilot asks for your
+  Google account separately.
 - **Sign-in pop-ups** open only after a click: a sign-in window a page tries
   to open by itself is dropped, so if nothing appears, click the site's
   sign-in button.
@@ -579,6 +589,15 @@ python3 -m pip uninstall --break-system-packages ai-usage-kde
 kpackagetool6 -t Plasma/Applet -r com.bgn.aiusage
 ```
 
+## Upgrading from Hearthwire 1.0.1 or earlier
+
+Newer versions give every chat site its own profile. After the update, sign
+in once more to each chat site: the old shared profile is not used again, and
+with Stay signed in → Encrypted it is deleted inside the encrypted folder after
+the next unlock. The Chat tab says so once (**Got it** hides it). Going back to
+1.0.1 is harmless, but its chat sign-ins start empty too. See
+[Privacy](docs/privacy.md#one-profile-per-site-the-one-time-move).
+
 ## Upgrading from AI Usage 2.x
 
 Hearthwire 1.0.0 is the renamed AI Usage 2.x. Run the installer once:
@@ -714,7 +733,10 @@ is the only authentication cache created by Hearthwire; it is stored with mode
 `0600` under `$XDG_CACHE_HOME/hearthwire` and keyed to a one-way refresh-token
 fingerprint.
 
-The Chat tab keeps cookies, sessions, and site data in memory only, denies
+The Chat tab gives every chat site its own profile, so no site can use or
+read another's sign-in (one web engine process, the clipboard, Downloads and
+the network are still shared). It keeps cookies, sessions, and site data in
+memory only, denies
 every site permission (microphone, camera, screen sharing, notifications,
 location, clipboard reading), asks before each download, asks before opening
 an outside link in your browser (which may keep it in its history), and
@@ -725,8 +747,8 @@ characters made visible. The Chat tab's engine is Qt WebEngine (Chromium):
 keep it updated and restart Plasma after it updates. Page console messages
 are discarded. Custom chat addresses are stored in plain text in your Plasma
 configuration file. With Stay signed in, sign-ins and site data are saved
-only in your encrypted folder; while it is unlocked, programs running as you
-can read it. The Ollama chat keeps the conversation in memory only and sends
+only in your encrypted folder, in one folder per site; while it is unlocked,
+programs running as you can read it. The Ollama chat keeps the conversation in memory only and sends
 it over loopback to the Ollama server on this computer, which can read it
 (see [Ollama](docs/privacy.md#ollama-built-in-chat)). The
 [Chat tab privacy notes](docs/privacy.md#chat-tab) also list what it does not

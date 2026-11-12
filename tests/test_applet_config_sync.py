@@ -75,6 +75,10 @@ def test_every_backup_default_passes_the_backup_rules():
     ("<default>auto</default>", "<default></default>"),
     ('<entry name="usageHistoryClearOwed" type="Bool">\n            <default>false</default>\n        </entry>\n',
      ""),                                                                       # a removed key
+    ('<entry name="chatPendingSiteClears" type="String">\n            <default></default>\n        </entry>\n',
+     ""),
+    ('<entry name="chatProfileLayout" type="Int">\n            <default>0</default>',
+     '<entry name="chatProfileLayout" type="Int">\n            <default>1</default>'),
     ("    </group>", '        <entry name="newKey" type="String">\n            <default>x</default>\n'
                      "        </entry>\n    </group>"),                          # an added key
     ('<entry name="showUsageTab" type="Bool">\n            <default>true</default>',
