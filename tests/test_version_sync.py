@@ -8,7 +8,7 @@ import hearthwire
 
 
 ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_VERSION = "1.0.0"
+EXPECTED_VERSION = "1.0.1"
 
 
 def _pyproject_version():

@@ -48,4 +48,4 @@ def _drop_working_directory_from_path() -> None:
 _drop_working_directory_from_path()
 del _drop_working_directory_from_path
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"

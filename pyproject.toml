@@ -1,6 +1,6 @@
 [project]
 name = "hearthwire"
-version = "1.0.0"
+version = "1.0.1"
 description = "Hearthwire: an AI companion for KDE Plasma 6 with subscription usage meters and chats with AI sites"
 requires-python = ">=3.11"
 # PySide6 is provided by the system package (pacman), intentionally NOT a pip dep.

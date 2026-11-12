@@ -1,3 +1,11 @@
+hearthwire (1.0.1-1) resolute; urgency=medium
+
+  * Warn when an older script install shadows the package.
+  * Install hints per distro; install.sh fixes beside the package.
+  * New helper command --install-info.
+
+ -- flybytech-prog <104578369+flybytech-prog@users.noreply.github.com>  Wed, 11 Nov 2026 12:00:00 +0000
+
 hearthwire (1.0.0-1) resolute; urgency=medium
 
   * First packaged release.

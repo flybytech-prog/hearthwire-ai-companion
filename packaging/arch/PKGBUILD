@@ -3,14 +3,14 @@
 # Arch Linux, CachyOS, Manjaro. The source is `git archive` of the release
 # tag, made by packaging/source-archive.sh next to this file:
 #
-#   packaging/source-archive.sh v1.0.0 packaging/arch
+#   packaging/source-archive.sh v1.0.1 packaging/arch
 #   cd packaging/arch && makepkg -si
 #
 # The package installs files only: no install scriptlet runs, and removing it
 # never touches anything in a home folder (sign-ins, history, backups stay).
 
 pkgname=hearthwire
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="AI companion for KDE Plasma 6: AI subscription usage meters and chats with AI sites"
 arch=('any')

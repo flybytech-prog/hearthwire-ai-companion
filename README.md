@@ -376,13 +376,13 @@ together with `SHA256SUMS`, check it, and install it:
 sha256sum --check --ignore-missing SHA256SUMS
 
 # Arch Linux, CachyOS, Manjaro
-sudo pacman -U ./hearthwire-1.0.0-1-any.pkg.tar.zst
+sudo pacman -U ./hearthwire-1.0.1-1-any.pkg.tar.zst
 
 # Fedora KDE (Fedora 43 and 44)
-sudo dnf install ./hearthwire-1.0.0-1.fc44.noarch.rpm
+sudo dnf install ./hearthwire-1.0.1-1.fc44.noarch.rpm
 
 # Kubuntu / Ubuntu 26.04 LTS (the first Ubuntu LTS with Plasma 6)
-sudo apt install ./hearthwire_1.0.0-1_all.deb
+sudo apt install ./hearthwire_1.0.1-1_all.deb
 ```
 
 Then right-click the panel, choose **Add Widgets…**, search for
@@ -393,10 +393,10 @@ workflow run built it from which commit. With the
 [GitHub CLI](https://cli.github.com) you can check it:
 
 ```bash
-gh attestation verify ./hearthwire-1.0.0-1-any.pkg.tar.zst \
+gh attestation verify ./hearthwire-1.0.1-1-any.pkg.tar.zst \
   --repo flybytech-prog/hearthwire-ai-companion \
   --signer-workflow flybytech-prog/hearthwire-ai-companion/.github/workflows/release.yml \
-  --source-ref refs/tags/v1.0.0
+  --source-ref refs/tags/v1.0.1
 ```
 
 Use the file name of the package you downloaded. The command prints the
