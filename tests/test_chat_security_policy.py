@@ -8724,3 +8724,154 @@ def test_proof_install_notice_rule_catches(path, old, new):
     general = _mutated(path, old, new) if path == CONFIG_GENERAL else _read_code(CONFIG_GENERAL)
     view = _mutated(path, old, new) if path == USAGE_VIEW else _read_code(USAGE_VIEW)
     assert _install_notice_problems(general, view)
+
+
+# --- Task 003: help popups on Settings → General ----------------------------------------
+
+# The long Usage history and Backup texts moved into "?" buttons. One short
+# safety line each stays on the page: plain text, always shown, and saying
+# what deletes the history and that Export needs Apply first.
+
+SAFETY_LINES = {
+    "usageHistoryExplanation": "applying deletes",
+    "backupExplanation": "press Apply first",
+}
+SAFETY_HELP_BUTTONS = ("usageHistoryHelp", "backupHelp")
+HELP_BUTTON = r"(?<![\w.])Kirigami\s*\.\s*ContextualHelpButton\s*\{"
+ANY_ELEMENT = r"(?<![\w.])(?:[A-Za-z_]\w*\s*\.\s*)*[A-Z]\w*\s*\{"
+HELP_LITERAL = r'i18n\(\s*"[^"\\<>&]*"\s*\)'
+MIN_SHOWN_OPACITY = 0.5
+
+
+def _enclosing_tops(code, at):
+    """The top-level bindings of each block that encloses offset ``at``."""
+    blanked = _strip_comments(code, blank_strings=True)
+    opened = []
+    for index, char in enumerate(blanked[:at]):
+        if char == "{":
+            opened.append(index)
+        elif char == "}" and opened:
+            opened.pop()
+    return [_top_level(code[brace:_brace_end(blanked, brace)]) for brace in opened]
+
+
+def _shown_problems(top, name):
+    problems = []
+    if re.search(r"(?:^|[\n;])\s*visible\s*:", top):
+        problems.append(f"{name} may not bind visible")
+    for value in re.findall(r"(?:^|[\n;])\s*opacity\s*:\s*([^\n;]+)", top):
+        if not re.fullmatch(r"\d*\.?\d+", value.strip()) or float(value) < MIN_SHOWN_OPACITY:
+            problems.append(f"{name} opacity must be a fixed number of at least {MIN_SHOWN_OPACITY}, found {value.strip()}")
+    return problems
+
+
+def _safety_line_problems(general):
+    problems = []
+    for name, phrase in SAFETY_LINES.items():
+        label_problems = _plain_label_problems(general, TEXT_ELEMENT, name, None)
+        problems += label_problems
+        labels = _named_elements(general, TEXT_ELEMENT, name)
+        if len(labels) != 1:
+            continue
+        start, body = labels[0]
+        top = _top_level(body)
+        # No id, so no other code can hide it; neither it nor any parent binds visible.
+        if re.search(r"(?:^|[\n;])\s*id\s*:", top):
+            problems.append(f"{name} may have no id")
+        problems += _shown_problems(top, name)
+        for parent in _enclosing_tops(general, start):
+            problems += _shown_problems(parent, f"a parent of {name}")
+        match = re.search(NOTICE_LITERAL, _top_level_raw(body))
+        if match is None or len(re.findall(r"(?:^|[\n;])\s*text\s*:", top)) != 1:
+            problems.append(f"{name} text must be one fixed i18n literal without markup characters")
+        elif phrase not in match.group(1):
+            problems.append(f"{name} must say {phrase!r}, found {match.group(1)!r}")
+    return problems
+
+
+def _safety_help_problems(general):
+    problems = []
+    helps = {name: len(_named_elements(general, HELP_BUTTON, name)) for name in SAFETY_HELP_BUTTONS}
+    for name in SAFETY_HELP_BUTTONS:
+        if len(_named_elements(general, ANY_ELEMENT, name)) != 1 or helps[name] != 1:
+            problems.append(f"exactly one Kirigami.ContextualHelpButton {name} expected, found {helps[name]}")
+            continue
+        body = _named_elements(general, HELP_BUTTON, name)[0][1]
+        top = _top_level_raw(body)
+        hints = re.findall(r"(?:^|[\n;])\s*toolTipText\s*:\s*([^\n]+)", top)
+        problems += [f"{name}: {problem}" for problem in _help_hint_problems(top)]
+        if len(hints) != 1 or not re.fullmatch(HELP_LITERAL, hints[0].strip()):
+            problems.append(f"{name} toolTipText must be one fixed i18n literal without markup characters, found {[hint[:60] for hint in hints]}")
+        if re.search(r"(?:^|[\n;])\s*text\s*:", top):
+            problems.append(f"{name} may set only toolTipText")
+    return problems
+
+
+def test_settings_general_safety_lines_stay_plain_and_shown():
+    problems = _safety_line_problems(_read_code(CONFIG_GENERAL))
+    assert not problems, problems
+
+
+def test_settings_general_help_buttons_show_fixed_text():
+    problems = _safety_help_problems(_read_code(CONFIG_GENERAL))
+    assert not problems, problems
+
+
+USAGE_LINE = ('            objectName: "usageHistoryExplanation"\n            Layout.fillWidth: true\n'
+              '            wrapMode: Text.WordWrap\n            textFormat: Text.PlainText\n')
+BACKUP_LINE = USAGE_LINE.replace("usageHistoryExplanation", "backupExplanation")
+USAGE_TEXT = "text: i18n(\"Only on this computer. Turning it off and applying deletes this widget's history.\")"
+BACKUP_TEXT = 'text: i18n("Export saves the applied settings: press Apply first.")'
+SAFETY_LINE_MUTATIONS = {
+    "usage text removed": (USAGE_TEXT, 'text: i18n("Only on this computer.")'),
+    "usage text from a variable": (USAGE_TEXT, "text: page.historyClearState"),
+    "usage text with markup": (USAGE_TEXT, USAGE_TEXT.replace("applying deletes", "applying <b>deletes</b>")),
+    "usage hidden": (USAGE_LINE, USAGE_LINE + "            visible: false\n"),
+    "usage hidden by a condition": (USAGE_LINE, USAGE_LINE + "            visible: page.cfg_usageHistoryEnabled\n"),
+    "usage faded out": ("            opacity: 0.72\n            " + USAGE_TEXT, "            opacity: 0\n            " + USAGE_TEXT),
+    "usage given an id": (USAGE_LINE, USAGE_LINE + "            id: usageLine\n"),
+    "usage PlainText dropped": (USAGE_LINE, USAGE_LINE.replace("            textFormat: Text.PlainText\n", "")),
+    "usage StyledText": (USAGE_LINE, USAGE_LINE.replace("PlainText", "StyledText")),
+    "usage renamed": ('objectName: "usageHistoryExplanation"', 'objectName: "usageHistoryNote"'),
+    "usage twice": (USAGE_LINE, USAGE_LINE + "            QQC2.Label { objectName: \"usageHistoryExplanation\" }\n"),
+    "backup text removed": (BACKUP_TEXT, 'text: i18n("Export saves the applied settings.")'),
+    "backup hidden": (BACKUP_LINE, BACKUP_LINE + "            visible: false\n"),
+    "backup hidden by a condition": (BACKUP_LINE, BACKUP_LINE + "            visible: page.confirmingImport\n"),
+    "backup PlainText dropped": (BACKUP_LINE, BACKUP_LINE.replace("            textFormat: Text.PlainText\n", "")),
+    "backup renamed": ('objectName: "backupExplanation"', 'objectName: "backupNote"'),
+    "form hidden": ("    Kirigami.FormLayout {\n", "    Kirigami.FormLayout {\n        visible: page.cfg_usageHistoryEnabled\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SAFETY_LINE_MUTATIONS))
+def test_proof_safety_line_rule_catches(name):
+    assert _safety_line_problems(_mutated(CONFIG_GENERAL, *SAFETY_LINE_MUTATIONS[name]))
+
+
+USAGE_HELP = '                objectName: "usageHistoryHelp"\n                toolTipText: i18n("Off by default.'
+BACKUP_HELP = '                toolTipText: i18n("One file on this computer,'
+SAFETY_HELP_MUTATIONS = {
+    "usage argument added": ("applying deletes this widget's history; Delete usage history deletes it at once.\")",
+                             "applying deletes this widget's history; Delete usage history deletes it at once. %1\", page.cfg_usageMode)"),
+    "usage variable": (USAGE_HELP, '                objectName: "usageHistoryHelp"\n                toolTipText: page.historyClearState\n'
+                       '                property string old: i18n("Off by default.'),
+    "usage text appended": ("Delete usage history deletes it at once.\")",
+                            "Delete usage history deletes it at once.\") + page.historyClearState"),
+    "usage markup": (USAGE_HELP, USAGE_HELP.replace("Off by default.", "<b>Off</b> by default.")),
+    "usage ampersand": ("No names, plans, amounts or accounts", "No names, plans, amounts &amp; accounts"),
+    "usage renamed": ('objectName: "usageHistoryHelp"', 'objectName: "usageHistoryHint"'),
+    "usage not a help button": ('            Kirigami.ContextualHelpButton {\n                objectName: "usageHistoryHelp"',
+                                '            QQC2.ToolButton {\n                objectName: "usageHistoryHelp"'),
+    "usage second text": (USAGE_HELP, '                objectName: "usageHistoryHelp"\n                text: page.historyClearState\n'
+                          '                toolTipText: i18n("Off by default.'),
+    "backup argument added": ("the usage history setting are not part of it.\")",
+                              "the usage history setting are not part of it. %1\", page.backupMessage)"),
+    "backup variable": (BACKUP_HELP, '                toolTipText: page.backupMessage\n                property string old: i18n("One file on this computer,'),
+    "backup markup": (BACKUP_HELP, BACKUP_HELP.replace("One file", "One <i>file</i>")),
+    "backup renamed": ('objectName: "backupHelp"', 'objectName: "backupHint"'),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SAFETY_HELP_MUTATIONS))
+def test_proof_safety_help_rule_catches(name):
+    assert _safety_help_problems(_mutated(CONFIG_GENERAL, *SAFETY_HELP_MUTATIONS[name]))

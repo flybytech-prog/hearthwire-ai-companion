@@ -936,6 +936,10 @@ KCM.SimpleKCM {
                 checked: page.cfg_usageHistoryEnabled
                 onToggled: page.cfg_usageHistoryEnabled = checked
             }
+            Kirigami.ContextualHelpButton {
+                objectName: "usageHistoryHelp"
+                toolTipText: i18n("Off by default. When on, the percent used of each reading is kept for 7 days in the hearthwire/usage-history folder of your data folder (usually ~/.local/share). Each widget keeps its own history. It is saved at most every 15 minutes, keeping one value per hour. No names, plans, amounts or accounts are saved. Turning it off and applying deletes this widget's history; Delete usage history deletes it at once.")
+            }
         }
         QQC2.Label {
             objectName: "usageHistoryExplanation"
@@ -943,7 +947,7 @@ KCM.SimpleKCM {
             wrapMode: Text.WordWrap
             textFormat: Text.PlainText
             opacity: 0.72
-            text: i18n("Off by default. When on, the percent used of each reading is kept for 7 days, only on this computer, in the hearthwire/usage-history folder of your data folder (usually ~/.local/share). Each widget keeps its own history. It is saved at most every 15 minutes, keeping one value per hour. No names, plans, amounts or accounts are saved. Turning it off and applying deletes this widget's history; Delete usage history deletes it at once.")
+            text: i18n("Only on this computer. Turning it off and applying deletes this widget's history.")
             Layout.preferredWidth: page.wrappedTextWidth
         }
         RowLayout {
@@ -1265,14 +1269,33 @@ KCM.SimpleKCM {
             Kirigami.FormData.label: i18n("Backup")
         }
 
-        QQC2.Label {
-            objectName: "backupStatus"
+        RowLayout {
             Kirigami.FormData.label: i18n("Settings backup:")
             Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            textFormat: Text.PlainText
-            text: page.backupStatusText()
             Layout.preferredWidth: page.wrappedTextWidth
+            spacing: Kirigami.Units.smallSpacing
+
+            // No wider than its text, so the "?" follows it; a long status
+            // shrinks and wraps before the "?".
+            QQC2.Label {
+                objectName: "backupStatus"
+                Layout.fillWidth: true
+                Layout.maximumWidth: Math.ceil(implicitWidth)
+                // As high as the "?", so a one-line status sits level with
+                // it; a wrapped one starts at the top beside it.
+                Layout.minimumHeight: backupHelp.implicitHeight
+                Layout.alignment: Qt.AlignTop
+                verticalAlignment: Text.AlignVCenter
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                text: page.backupStatusText()
+            }
+            Kirigami.ContextualHelpButton {
+                id: backupHelp
+                objectName: "backupHelp"
+                Layout.alignment: Qt.AlignTop
+                toolTipText: i18n("One file on this computer, in the hearthwire folder of your configuration folder (usually ~/.config). It holds these settings, including your custom chat addresses. Sign-ins, the encrypted folder, zoom and the usage history setting are not part of it.")
+            }
         }
         QQC2.Label {
             objectName: "backupExplanation"
@@ -1280,7 +1303,7 @@ KCM.SimpleKCM {
             wrapMode: Text.WordWrap
             textFormat: Text.PlainText
             opacity: 0.72
-            text: i18n("One file on this computer, in the hearthwire folder of your configuration folder (usually ~/.config). It holds these settings, including your custom chat addresses. Sign-ins, the encrypted folder, zoom and the usage history setting are not part of it. Export saves the applied settings: press Apply first, because changes not yet applied on any page are not exported.")
+            text: i18n("Export saves the applied settings: press Apply first.")
             Layout.preferredWidth: page.wrappedTextWidth
         }
         RowLayout {

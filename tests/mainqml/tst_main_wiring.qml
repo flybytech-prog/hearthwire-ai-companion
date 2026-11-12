@@ -1056,15 +1056,22 @@ TestCase {
         compare(historyCommands(page), [], "ticking runs nothing by itself")
     }
 
+    // The short line stays shown; the rest is in the "?" beside the box.
     function test_settingsExplanationIsPlainAndSaysWhere() {
-        var label = generalPart(generalPage(), "usageHistoryExplanation")
+        var page = generalPage()
+        var label = generalPart(page, "usageHistoryExplanation")
         compare(label.textFormat, Text.PlainText)
-        verify(label.text.indexOf("usage-history") >= 0, "where")
-        verify(label.text.indexOf("percent used") >= 0, "what")
-        verify(label.text.indexOf("Each widget keeps its own history.") >= 0, "per widget")
-        verify(label.text.indexOf("saved at most every 15 minutes, keeping one value per hour") >= 0, "how often")
-        verify(label.text.indexOf("once per hour") < 0, "not the old wording")
-        verify(label.text.indexOf("Turning it off and applying deletes this widget's history") >= 0, "what off deletes")
+        compare(label.text, "Only on this computer. Turning it off and applying deletes this widget's history.")
+        var help = generalPart(page, "usageHistoryHelp")
+        compare(help.parent, generalPart(page, "usageHistoryChoice").parent, "beside the box")
+        var text = help.toolTipText
+        verify(text.indexOf("usage-history") >= 0, "where")
+        verify(text.indexOf("percent used") >= 0, "what")
+        verify(text.indexOf("Each widget keeps its own history.") >= 0, "per widget")
+        verify(text.indexOf("saved at most every 15 minutes, keeping one value per hour") >= 0, "how often")
+        verify(text.indexOf("once per hour") < 0, "not the old wording")
+        verify(text.indexOf("No names, plans, amounts or accounts are saved.") >= 0, "what is not kept")
+        verify(text.indexOf("Delete usage history deletes it at once.") >= 0, "the button")
     }
 
     function pressDelete(page) {
@@ -1451,10 +1458,41 @@ TestCase {
                 "The backup file isn't safe to use, so it was left alone. Check the owner and permissions of its folder.")
     }
 
+    // The "?" follows the status text, as on every other row: right after a
+    // short status, and top-aligned beside a long one that wraps.
+    function test_backupHelpFollowsTheStatus_data() {
+        var unsafe = {ok: false, error: "unsafe-mode"}
+        return [{tag: "short", status: {ok: true, exists: false}, units: 38, wraps: false},
+                {tag: "long", status: unsafe, units: 38, wraps: true},
+                {tag: "long smallest", status: unsafe, units: 23, wraps: true}]
+    }
+
+    function test_backupHelpFollowsTheStatus(data) {
+        var page = backupPage(data.status)
+        page.width = Kirigami.Units.gridUnit * data.units - 1
+        page.height = Kirigami.Units.gridUnit * 30
+        wait(100)
+        var label = generalPart(page, "backupStatus")
+        var help = generalPart(page, "backupHelp")
+        compare(label.lineCount > 1, data.wraps, "wraps only when long")
+        var shown = Math.min(label.implicitWidth, label.width)
+        var at = label.mapToItem(label.parent, 0, 0)
+        var helpAt = help.mapToItem(label.parent, 0, 0)
+        fuzzyCompare(helpAt.x, at.x + shown + label.parent.spacing, 1, "right after the text")
+        fuzzyCompare(helpAt.y, at.y, 1, "top-aligned")
+        verify(helpAt.x + help.width <= label.parent.width + 0.5, "not clipped")
+        compare(partsPastTheEdge(page), [])
+    }
+
+    // The short line stays shown; where and what is in the "?" beside the status.
     function test_backupExplanationIsPlain() {
-        var label = generalPart(backupPage(), "backupExplanation")
+        var page = backupPage()
+        var label = generalPart(page, "backupExplanation")
         compare(label.textFormat, Text.PlainText)
-        verify(label.text.indexOf("usage history") >= 0, "says what is left out")
+        compare(label.text, "Export saves the applied settings: press Apply first.")
+        var help = generalPart(page, "backupHelp")
+        compare(help.parent, generalPart(page, "backupStatus").parent, "beside the status")
+        compare(help.toolTipText, "One file on this computer, in the hearthwire folder of your configuration folder (usually ~/.config). It holds these settings, including your custom chat addresses. Sign-ins, the encrypted folder, zoom and the usage history setting are not part of it.")
     }
 
     function test_backupExportWithoutABackupRunsAtOnce() {
@@ -1505,8 +1543,7 @@ TestCase {
 
     function test_backupExportSaysApplied() {
         var page = backupPage({ok: true, exists: true, exported_at: backupStamp})
-        verify(generalPart(page, "backupExplanation").text.indexOf("Export saves the applied settings: press Apply first") >= 0)
-        verify(generalPart(page, "backupExplanation").text.indexOf("not yet applied on any page are not exported") >= 0)
+        compare(generalPart(page, "backupExplanation").text, "Export saves the applied settings: press Apply first.")
         generalPart(page, "backupExport").clicked()
         compare(generalPart(page, "backupExportConfirm").text,
                 "Replace the existing backup with the applied settings? Changes not yet applied are not exported.")
@@ -1932,12 +1969,16 @@ TestCase {
         page.backupMessage = "settings-unreadable"
         answerInstall(page, installReply({user_helper: true}))
         wait(100)
-        var named = ["installShadowedNotice", "installShadowedCommand", "usageHistoryExplanation", "usageHistoryStatus", "usageHistoryOwedNotice", "walletOffConfirm",
+        var named = ["installShadowedNotice", "installShadowedCommand", "usageHistoryHelp", "usageHistoryExplanation",
+                     "usageHistoryStatus", "usageHistoryOwedNotice", "walletOffConfirm", "backupStatus", "backupHelp",
                      "backupExplanation", "backupExportConfirm", "backupImportConfirm", "backupAddressChanges",
                      "backupMessage"]
         named.forEach(function (name) { verify(generalPart(page, name).visible, name + " is shown") })
-        verify(generalPart(page, "usageHistoryExplanation").lineCount > 2, "it wraps")
-        verify(generalPart(page, "backupExplanation").lineCount > 2, "it wraps")
+        compare(generalPart(page, "usageHistoryExplanation").text,
+                "Only on this computer. Turning it off and applying deletes this widget's history.")
+        compare(generalPart(page, "backupExplanation").text, "Export saves the applied settings: press Apply first.")
+        verify(generalPart(page, "usageHistoryHelp").toolTipText.indexOf("usage-history") >= 0, "the moved text")
+        verify(generalPart(page, "backupHelp").toolTipText.indexOf("~/.config") >= 0, "the moved text")
         verify(shownParts(page.flickable.contentItem).length > 40, "the walk sees the page")
         compare(partsPastTheEdge(page), [])
     }
