@@ -749,3 +749,471 @@ def test_webdata_module_never_prints():
     code = Path(webdata.__file__).read_text(encoding="utf-8")
     assert "print(" not in code
     assert "subprocess" not in code
+
+
+# --- per-site folders: prepare --sites, prune --known, remove-site (task 004) -----------------
+
+
+BUILTINS = ("claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot", "local")
+USER_IDS = tuple(f"user-{number:08x}" for number in range(200))
+
+
+def web_op(capsys, operation, applet=1, generation=0, **options):
+    argv = [operation, "--store", "encrypted", "--applet", str(applet), "--generation", str(generation)]
+    for name, value in options.items():
+        argv += [f"--{name}", value]
+    return web_reply(argv, capsys)
+
+
+def make_container(mountpoint, applet=1, generation=0, sites=(), root_files=("Cookies",)):
+    container = mountpoint / "web" / f"applet-{applet}-g{generation}"
+    container.mkdir(parents=True, exist_ok=True)
+    for name in root_files:
+        (container / name).write_text("x")
+    for site in sites:
+        (container / f"site-{site}").mkdir()
+        (container / f"site-{site}" / "Cookies").write_text(site)
+    return container
+
+
+def names(path):
+    return sorted(entry.name for entry in path.iterdir())
+
+
+def outside_target(tmp_path):
+    target = tmp_path / "outside"
+    target.mkdir()
+    target.chmod(0o755)
+    (target / "precious").write_text("keep")
+    return target
+
+
+def assert_target_intact(target):
+    assert names(target) == ["precious"]
+    assert (target / "precious").read_text() == "keep"
+    assert mode(target) == 0o755
+
+
+def fake_foreign_owner(monkeypatch, foreign_name):
+    """Make lstat-style lookups of ``foreign_name`` report another owner.
+
+    Unprivileged tests cannot chown, so the owner check is exercised by
+    rewriting st_uid of the stat result for that one name.
+    """
+    real_stat = os.stat
+
+    def stat_with_foreign_owner(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == foreign_name:
+            fields = list(result[:10])
+            fields[4] = os.getuid() + 1
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(os, "stat", stat_with_foreign_owner)
+
+
+def test_builtin_site_ids_match_the_backup_helper():
+    from hearthwire.core import settingsbackup
+    assert webdata.BUILTIN_SITE_IDS == settingsbackup.WEB_SITE_IDS == BUILTINS
+    assert "ollama" not in webdata.BUILTIN_SITE_IDS
+    assert webdata.MAX_SITE_IDS == len(BUILTINS) + len(USER_IDS) == 207
+
+
+@pytest.mark.parametrize("value", [*BUILTINS, "user-00000000", "user-0123abcd", "user-ffffffff"])
+def test_valid_site_ids(value):
+    assert webdata.valid_site_id(value)
+    assert webdata.site_folder(value) == f"site-{value}"
+
+
+@pytest.mark.parametrize("value", [
+    "", "ollama", "Claude", "CLAUDE", " claude", "claude ", "claude\n", "claude/..", "../claude", ".", "..",
+    "site-claude", "user-", "user-deadbee", "user-deadbeef0", "user-DEADBEEF", "user-deadbeeg", "user_deadbeef",
+    "user-deadbeef/", "user-١٢٣٤٥٦٧٨", "xclaude", "claudex", "local2", None, 1,
+])
+def test_invalid_site_ids(value):
+    assert not webdata.valid_site_id(value)
+    if isinstance(value, str):
+        with pytest.raises(ValueError):
+            webdata.site_folder(value)
+
+
+def test_prepare_creates_only_the_listed_site_folders_private(data, capsys, mounted):
+    assert web_op(capsys, "prepare", 3, 2, sites="claude,user-0a1b2c3d") == {"ok": True}
+    container = mounted / "web" / "applet-3-g2"
+    assert names(container) == ["site-claude", "site-user-0a1b2c3d"]
+    for path in (mounted / "web", container, container / "site-claude", container / "site-user-0a1b2c3d"):
+        assert path.is_dir() and not path.is_symlink()
+        assert mode(path) == 0o700
+    assert names(mounted / "web") == ["applet-3-g2"]
+    assert no_plaintext_store(data)
+
+
+def test_prepare_sites_is_idempotent_resets_modes_and_keeps_data(data, capsys, mounted):
+    container = make_container(mounted, sites=("gemini",), root_files=())
+    (container / "site-gemini").chmod(0o755)
+    assert web_op(capsys, "prepare", sites="gemini,grok") == {"ok": True}
+    assert web_op(capsys, "prepare", sites="gemini,grok") == {"ok": True}
+    assert names(container) == ["site-gemini", "site-grok"]
+    assert mode(container / "site-gemini") == mode(container / "site-grok") == 0o700
+    assert (container / "site-gemini" / "Cookies").read_text() == "gemini"
+
+
+def test_prepare_without_sites_creates_only_the_container(data, capsys, mounted):
+    assert prepare(capsys, 1, 0) == {"ok": True}
+    assert names(mounted / "web" / "applet-1-g0") == []
+
+
+def test_prepare_accepts_207_ids(data, capsys, mounted):
+    ids = BUILTINS + USER_IDS
+    assert web_op(capsys, "prepare", sites=",".join(ids)) == {"ok": True}
+    assert names(mounted / "web" / "applet-1-g0") == sorted(f"site-{site}" for site in ids)
+
+
+def test_prepare_refuses_a_symlinked_site_folder(data, capsys, tmp_path, mounted):
+    target = outside_target(tmp_path)
+    container = make_container(mounted, root_files=())
+    (container / "site-chatgpt").symlink_to(target)
+    assert web_op(capsys, "prepare", sites="chatgpt") == {"ok": False, "error": "symlink"}
+    assert (container / "site-chatgpt").is_symlink()
+    assert_target_intact(target)
+
+
+def test_prepare_sites_refuses_a_symlinked_container(data, capsys, tmp_path, mounted):
+    target = outside_target(tmp_path)
+    (mounted / "web").mkdir()
+    (mounted / "web" / "applet-1-g0").symlink_to(target)
+    assert web_op(capsys, "prepare", sites="claude") == {"ok": False, "error": "symlink"}
+    assert_target_intact(target)
+
+
+def test_prepare_refuses_a_file_as_site_folder(data, capsys, mounted):
+    container = make_container(mounted, root_files=("site-grok",))
+    assert web_op(capsys, "prepare", sites="grok") == {"ok": False, "error": "not-directory"}
+    assert (container / "site-grok").read_text() == "x"
+
+
+def test_prepare_refuses_a_foreign_site_folder(data, capsys, mounted, monkeypatch):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    (container / "site-claude").chmod(0o755)
+    fake_foreign_owner(monkeypatch, "site-claude")
+    assert web_op(capsys, "prepare", sites="claude") == {"ok": False, "error": "not-owned"}
+    assert mode(container / "site-claude") == 0o755
+
+
+def test_prune_keeps_exactly_the_known_site_folders(data, capsys, mounted):
+    container = make_container(
+        mounted,
+        sites=("claude", "gemini", "user-0000000a", "user-0000000b"),
+        root_files=("Cookies", "Preferences", "site-copilot-old", "site-"),
+    )
+    for name in ("Local Storage", "Service Worker", "site-ollama", "site-bogus", "site-claude.bak", "site-Claude"):
+        (container / name).mkdir()
+        (container / name / "data").write_text("x")
+    known = ",".join(BUILTINS + ("user-0000000a",))
+    assert web_op(capsys, "prune", known=known) == {"ok": True}
+    assert names(container) == ["site-claude", "site-gemini", "site-user-0000000a"]
+    assert (container / "site-claude" / "Cookies").read_text() == "claude"
+    assert (container / "site-user-0000000a" / "Cookies").read_text() == "user-0000000a"
+
+
+def test_prune_never_touches_other_generations_or_applets(data, capsys, mounted):
+    make_container(mounted, 1, 0, sites=("claude",))
+    others = {
+        (1, 1): make_container(mounted, 1, 1, sites=("claude", "user-0000000b")),
+        (2, 0): make_container(mounted, 2, 0, sites=("user-0000000b",)),
+        (12, 0): make_container(mounted, 12, 0, sites=("grok",)),
+        (1, 10): make_container(mounted, 1, 10, sites=("grok",)),
+    }
+    before = {key: names(path) for key, path in others.items()}
+    (mounted / "web" / "applet-1-g0.bak").mkdir()
+    (mounted / "web" / "notes.txt").write_text("keep")
+    assert web_op(capsys, "prune", 1, 0, known="claude") == {"ok": True}
+    assert names(mounted / "web" / "applet-1-g0") == ["site-claude"]
+    assert {key: names(path) for key, path in others.items()} == before
+    assert (mounted / "web" / "applet-1-g0.bak").is_dir()
+    assert (mounted / "web" / "notes.txt").read_text() == "keep"
+
+
+def test_prune_of_missing_folders_is_ok_and_creates_nothing(data, capsys, mounted):
+    assert web_op(capsys, "prune", known="claude") == {"ok": True}
+    assert not (mounted / "web").exists()
+    (mounted / "web").mkdir()
+    assert web_op(capsys, "prune", known="claude") == {"ok": True}
+    assert names(mounted / "web") == []
+
+
+def test_prune_refuses_a_symlinked_container(data, capsys, tmp_path, mounted):
+    target = outside_target(tmp_path)
+    (target / "site-gone").mkdir()
+    (mounted / "web").mkdir()
+    (mounted / "web" / "applet-1-g0").symlink_to(target)
+    assert web_op(capsys, "prune", known="claude") == {"ok": False, "error": "symlink"}
+    assert names(target) == ["precious", "site-gone"]
+    assert (mounted / "web" / "applet-1-g0").is_symlink()
+
+
+def test_prune_refuses_a_symlinked_web_folder(data, capsys, tmp_path, mounted):
+    target = outside_target(tmp_path)
+    (target / "applet-1-g0").mkdir()
+    (target / "applet-1-g0" / "Cookies").write_text("x")
+    (mounted / "web").symlink_to(target)
+    assert web_op(capsys, "prune", known="claude") == {"ok": False, "error": "symlink"}
+    assert (target / "applet-1-g0" / "Cookies").read_text() == "x"
+
+
+@pytest.mark.parametrize("name", ["site-claude", "site-grok", "site-ollama", "Cookies"])
+def test_prune_unlinks_symlinks_and_never_follows_them(data, capsys, tmp_path, mounted, name):
+    # site-claude is known but a symlink is never a profile, so it is unlinked too.
+    target = outside_target(tmp_path)
+    container = make_container(mounted, sites=("chatgpt",), root_files=())
+    (container / name).symlink_to(target)
+    (container / "site-chatgpt" / "link").symlink_to(target)
+    assert web_op(capsys, "prune", known="claude,chatgpt") == {"ok": True}
+    assert names(container) == ["site-chatgpt"]
+    assert (container / "site-chatgpt" / "link").is_symlink()
+    assert_target_intact(target)
+
+
+def test_prune_deletes_a_known_name_that_is_a_file(data, capsys, mounted):
+    container = make_container(mounted, root_files=("site-claude",))
+    assert web_op(capsys, "prune", known="claude") == {"ok": True}
+    assert names(container) == []
+
+
+def test_prune_refuses_a_foreign_folder(data, capsys, mounted, monkeypatch):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    (container / "leftover").mkdir()
+    fake_foreign_owner(monkeypatch, "leftover")
+    assert web_op(capsys, "prune", known="claude") == {"ok": False, "error": "not-owned"}
+    assert (container / "leftover").is_dir()
+
+
+def test_prune_refuses_a_foreign_container(data, capsys, mounted, monkeypatch):
+    container = make_container(mounted, root_files=("Cookies",))
+    fake_foreign_owner(monkeypatch, "applet-1-g0")
+    assert web_op(capsys, "prune", known="claude") == {"ok": False, "error": "not-owned"}
+    assert names(container) == ["Cookies"]
+
+
+def test_prune_requires_symlink_safe_rmtree(data, capsys, mounted, monkeypatch):
+    container = make_container(mounted, root_files=("Cookies",))
+    monkeypatch.setattr(shutil.rmtree, "avoids_symlink_attacks", False)
+    assert web_op(capsys, "prune", known="claude") == {"ok": False, "error": "os-error"}
+    assert names(container) == ["Cookies"]
+
+
+def test_prune_needs_a_verified_mount(data, capsys, tmp_path, mounted):
+    container = make_container(mounted, root_files=("Cookies",))
+    (tmp_path / "mountinfo").write_text("")
+    assert web_op(capsys, "prune", known="claude") == {"ok": False, "error": "not-verified"}
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "not-verified"}
+    assert web_op(capsys, "prepare", sites="claude") == {"ok": False, "error": "not-verified"}
+    assert names(container) == ["Cookies"]
+
+
+def test_remove_site_deletes_only_its_target(data, capsys, mounted):
+    container = make_container(mounted, sites=("claude", "chatgpt", "user-0000000c"), root_files=("Cookies",))
+    other_generation = make_container(mounted, 1, 1, sites=("claude",))
+    other_applet = make_container(mounted, 2, 0, sites=("claude",))
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == ["Cookies", "site-chatgpt", "site-user-0000000c"]
+    assert names(other_generation) == ["Cookies", "site-claude"]
+    assert names(other_applet) == ["Cookies", "site-claude"]
+    assert web_op(capsys, "remove-site", site="user-0000000c") == {"ok": True}
+    assert names(container) == ["Cookies", "site-chatgpt"]
+
+
+def test_remove_site_of_missing_folders_is_ok(data, capsys, mounted):
+    assert web_op(capsys, "remove-site", site="grok") == {"ok": True}
+    assert not (mounted / "web").exists()
+    make_container(mounted, root_files=())
+    assert web_op(capsys, "remove-site", site="grok") == {"ok": True}
+
+
+def test_remove_site_unlinks_a_symlink_and_never_follows_it(data, capsys, tmp_path, mounted):
+    target = outside_target(tmp_path)
+    container = make_container(mounted, sites=("gemini",), root_files=())
+    (container / "site-claude").symlink_to(target)
+    (container / "site-gemini" / "link").symlink_to(target)
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert web_op(capsys, "remove-site", site="gemini") == {"ok": True}
+    assert names(container) == []
+    assert_target_intact(target)
+
+
+def test_remove_site_refuses_a_symlinked_container(data, capsys, tmp_path, mounted):
+    target = outside_target(tmp_path)
+    (target / "site-claude").mkdir()
+    (mounted / "web").mkdir()
+    (mounted / "web" / "applet-1-g0").symlink_to(target)
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "symlink"}
+    assert names(target) == ["precious", "site-claude"]
+
+
+def test_remove_site_refuses_a_foreign_folder(data, capsys, mounted, monkeypatch):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    fake_foreign_owner(monkeypatch, "site-claude")
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "not-owned"}
+    assert (container / "site-claude" / "Cookies").read_text() == "claude"
+
+
+def test_remove_keep_still_works_with_site_folders(data, capsys, tmp_path, mounted):
+    target = outside_target(tmp_path)
+    old = make_container(mounted, 1, 0, sites=("claude", "user-0000000d"))
+    (old / "site-claude" / "link").symlink_to(target)
+    kept = make_container(mounted, 1, 1, sites=("claude", "gemini"))
+    other = make_container(mounted, 2, 0, sites=("claude",))
+    assert remove(capsys, 1, keep=1) == {"ok": True}
+    assert names(mounted / "web") == ["applet-1-g1", "applet-2-g0"]
+    assert names(kept) == ["Cookies", "site-claude", "site-gemini"]
+    assert names(other) == ["Cookies", "site-claude"]
+    assert_target_intact(target)
+    assert remove(capsys, 1) == {"ok": True}
+    assert names(mounted / "web") == ["applet-2-g0"]
+
+
+def test_prepare_prune_remove_site_flow(data, capsys, mounted):
+    # Unlock: prepare then prune; a site's data is cleared; an added site is removed.
+    old_root = make_container(mounted, 4, 2, root_files=("Cookies", "Preferences"))
+    assert web_op(capsys, "prepare", 4, 2, sites="claude,user-000000ff") == {"ok": True}
+    assert web_op(capsys, "prune", 4, 2, known=",".join(BUILTINS + ("user-000000ff",))) == {"ok": True}
+    assert names(old_root) == ["site-claude", "site-user-000000ff"]
+    assert web_op(capsys, "remove-site", 4, 2, site="claude") == {"ok": True}
+    assert web_op(capsys, "prune", 4, 2, known=",".join(BUILTINS)) == {"ok": True}
+    assert names(old_root) == []
+
+
+@pytest.mark.parametrize("call", ["prepare", "prune", "remove-site"])
+@pytest.mark.parametrize("ids", [("ollama",), ("claude", "claude"), (), ("Claude",), ("user-DEADBEEF",),
+                                 BUILTINS + USER_IDS + ("user-ffffffff",)])
+def test_library_refuses_bad_ids_and_touches_nothing(data, mounted, call, ids):
+    with pytest.raises(ValueError):
+        if call == "prepare":
+            webdata.prepare("encrypted", 1, 0, sites=ids or ("",))
+        elif call == "prune":
+            webdata.prune("encrypted", 1, 0, ids)
+        else:
+            webdata.remove_site("encrypted", 1, 0, ",".join(ids))
+    assert not (mounted / "web").exists()
+
+
+def test_library_refuses_any_other_store_for_site_operations(data):
+    with pytest.raises(ValueError):
+        webdata.prune("folder", 1, 0, ("claude",))
+    with pytest.raises(ValueError):
+        webdata.remove_site("folder", 1, 0, "claude")
+    with pytest.raises(ValueError):
+        webdata.prepare("folder", 1, 0, sites=("claude",))
+    assert not data.exists()
+
+
+_SITE_BASE = ["--store", "encrypted", "--applet", "1", "--generation", "0"]
+_TOO_MANY = ",".join(BUILTINS + USER_IDS + ("user-ffffffff",))
+
+
+@pytest.mark.parametrize("operation, option", [("prepare", "--sites"), ("prune", "--known")])
+@pytest.mark.parametrize("value", [
+    "ollama", "claude,ollama", "Claude", "claude,claude", "claude,chatgpt,claude", "", ",", "claude,", ",claude",
+    " claude", "claude ,chatgpt", "claude;chatgpt", "user-deadbee", "user-deadbeef0", "user-DEADBEEF",
+    "user-deadbeeg", "site-claude", "../claude", "claude/x", "user-0000000a,user-0000000a", _TOO_MANY,
+])
+def test_bad_site_id_lists_are_usage_errors(data, capsys, operation, option, value):
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["--web-data", operation, *_SITE_BASE, option, value])
+    assert raised.value.code == 2
+    assert capsys.readouterr().out == ""
+    assert not data.exists()
+
+
+@pytest.mark.parametrize("value", ["ollama", "", "Claude", "claude,chatgpt", "user-deadbee", "site-claude", ".."])
+def test_bad_single_site_id_is_a_usage_error(data, capsys, value):
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["--web-data", "remove-site", *_SITE_BASE, "--site", value])
+    assert raised.value.code == 2
+    assert capsys.readouterr().out == ""
+    assert not data.exists()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--web-data", "prune", *_SITE_BASE],
+        ["--web-data", "prune", "--store", "encrypted", "--applet", "1", "--known", "claude"],
+        ["--web-data", "prune", "--store", "encrypted", "--generation", "0", "--known", "claude"],
+        ["--web-data", "prune", "--applet", "1", "--generation", "0", "--known", "claude"],
+        ["--web-data", "prune", *_SITE_BASE, "--known", "claude", "--keep", "0"],
+        ["--web-data", "prune", *_SITE_BASE, "--known", "claude", "--sites", "claude"],
+        ["--web-data", "prune", *_SITE_BASE, "--known", "claude", "--site", "claude"],
+        ["--web-data", "remove-site", *_SITE_BASE],
+        ["--web-data", "remove-site", "--store", "encrypted", "--applet", "1", "--site", "claude"],
+        ["--web-data", "remove-site", *_SITE_BASE, "--site", "claude", "--keep", "0"],
+        ["--web-data", "remove-site", *_SITE_BASE, "--site", "claude", "--known", "claude"],
+        ["--web-data", "remove-site", *_SITE_BASE, "--site", "claude", "--site", "x"],
+        ["--web-data", "prepare", *_SITE_BASE, "--known", "claude"],
+        ["--web-data", "prepare", *_SITE_BASE, "--site", "claude"],
+        ["--web-data", "prepare", "--store", "encrypted", "--applet", "1", "--sites", "claude"],
+        ["--web-data", "remove", "--store", "encrypted", "--applet", "1", "--sites", "claude"],
+        ["--web-data", "remove", "--store", "encrypted", "--applet", "1", "--known", "claude"],
+        ["--web-data", "remove", "--store", "encrypted", "--applet", "1", "--site", "claude"],
+        ["--web-data", "purge", "--sites", "claude"],
+        ["--web-data", "purge", "--known", "claude"],
+        ["--web-data", "purge", "--site", "claude"],
+        ["--sites", "claude"],
+        ["--known", "claude"],
+        ["--site", "claude"],
+        ["--catalog", "--site", "claude"],
+        ["--vault", "status", "--known", "claude"],
+        ["--prompts", "list", "--site", "claude"],
+        ["--usage-history", "read", "--applet", "1", "--sites", "claude"],
+        ["--web-data", "prune", "--store", "folder", *_SITE_BASE[2:], "--known", "claude"],
+        ["--web-data", "remove-site", *_SITE_BASE, "--site", "claude", "--json"],
+    ],
+)
+def test_bad_site_operation_arguments_exit_2_and_touch_nothing(data, capsys, argv):
+    with pytest.raises(SystemExit) as raised:
+        cli.main(argv)
+    assert raised.value.code == 2
+    assert capsys.readouterr().out == ""
+    assert not data.exists()
+
+
+def test_site_operation_output_never_contains_a_path(data, capsys, tmp_path, mounted, monkeypatch):
+    texts = []
+
+    def run(*argv):
+        cli.main(["--web-data", *argv])
+        captured = capsys.readouterr()
+        texts.append(captured.out + captured.err)
+
+    make_container(mounted, sites=("claude", "user-0000000e"))
+    run("prepare", *_SITE_BASE, "--sites", "claude,user-0000000e")
+    run("prune", *_SITE_BASE, "--known", "claude")
+    run("remove-site", *_SITE_BASE, "--site", "claude")
+    container = mounted / "web" / "applet-1-g0"
+    (container / "site-gemini").symlink_to(tmp_path)
+    run("prepare", *_SITE_BASE, "--sites", "gemini")
+    (container / "leftover").mkdir()
+    with monkeypatch.context() as patch:
+        fake_foreign_owner(patch, "leftover")
+        run("prune", *_SITE_BASE, "--known", "claude")
+    shutil.rmtree(container)
+    container.symlink_to(tmp_path)
+    run("prune", *_SITE_BASE, "--known", "claude")
+    run("remove-site", *_SITE_BASE, "--site", "claude")
+    (tmp_path / "mountinfo").write_text("")
+    run("prune", *_SITE_BASE, "--known", "claude")
+    text = "".join(texts)
+    for code in ('"ok":true', '"error":"symlink"', '"error":"not-owned"', '"error":"not-verified"'):
+        assert code in text
+    assert str(tmp_path) not in text
+    assert "/" not in text and "applet" not in text and "site" not in text
+    assert "claude" not in text and "user-" not in text and "Cookies" not in text
+
+
+def test_unexpected_exception_in_site_operations_is_a_bare_code(data, capsys, monkeypatch):
+    boom = lambda *a, **k: (_ for _ in ()).throw(RuntimeError(str(data)))  # noqa: E731
+    monkeypatch.setattr(webdata, "prune", boom)
+    monkeypatch.setattr(webdata, "remove_site", boom)
+    assert web_op(capsys, "prune", known="claude") == {"ok": False, "error": "os-error"}
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "os-error"}

@@ -121,10 +121,56 @@ function nextGeneration(generation) {
     return current < 0 || current >= MAX_INT ? 0 : current + 1
 }
 
+// The generation folder's name. Since every site has its own profile
+// (siteProfileName/siteProfilePath) it is only the container of the site
+// folders, never a profile's storage name.
 function profileName(applet, generation) {
     if (validInt(applet) < 0 || validInt(generation) < 0)
         return ""
     return "applet-" + applet + "-g" + generation
+}
+
+// Chat site ids with a profile of their own: exactly the built-in web sites
+// (ChatSites.js, the helper's BUILTIN_SITE_IDS) and added sites, user- plus
+// 8 lowercase hex digits. Matched whole, never by prefix; "ollama" is not a
+// web site and never has a profile.
+var BUILTIN_SITE_IDS = ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot", "local"]
+// The helper takes at most this many ids in one --sites or --known list.
+var MAX_SITE_IDS = 207
+
+function isSiteId(id) {
+    return typeof id === "string"
+        && (BUILTIN_SITE_IDS.indexOf(id) >= 0 || /^user-[0-9a-f]{8}$/.test(id))
+}
+
+// A site's profile: storage name applet-N-gG-<id> (only a label, the path
+// is explicit) and folder <runtime>/hearthwire/vault/web/applet-N-gG/site-<id>.
+// Both are built only from a checked id, so they always end in -<id> and
+// /site-<id> and never equal the container; "" for anything else.
+function siteProfileName(applet, generation, id) {
+    var container = profileName(applet, generation)
+    if (container === "" || !isSiteId(id))
+        return ""
+    return container + "-" + id
+}
+
+function siteProfilePath(runtimeDir, applet, generation, id) {
+    var container = profilePath(runtimeDir, applet, generation)
+    if (container === "" || !isSiteId(id))
+        return ""
+    return container + "/site-" + id
+}
+
+// A comma-separated id list for --sites or --known: 1 to MAX_SITE_IDS
+// checked ids, none twice; "" for anything else.
+function siteList(ids) {
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > MAX_SITE_IDS)
+        return ""
+    for (var index = 0; index < ids.length; index++) {
+        if (!isSiteId(ids[index]) || ids.indexOf(ids[index]) !== index)
+            return ""
+    }
+    return ids.join(",")
 }
 
 // First run number for a widget or settings page: the clock plus a random
@@ -149,19 +195,37 @@ function helperPrefix(run, applet) {
     return "env HEARTHWIRE_RUN=" + run + " HEARTHWIRE_APPLET=" + applet + " python3 -P -m hearthwire"
 }
 
-// op "prepare" needs a generation; op "remove" keeps generation `keep` when it
-// is a valid integer and removes every generation otherwise.
-function webDataCommand(op, store, applet, generation, keep, run) {
+// op "prepare" needs a generation and creates the site folders in `sites`
+// (an id list; none given, only the generation folder). "prune" needs a
+// generation and `sites`, the ids whose folders stay. "remove-site" needs a
+// generation and `sites`, the one id whose folder goes. "remove" keeps
+// generation `keep` when it is a valid integer and removes every generation
+// otherwise. Any bad id gives "".
+function webDataCommand(op, store, applet, generation, keep, run, sites) {
     var prefix = helperPrefix(run, applet)
     if (prefix === "" || store !== "encrypted" || validInt(applet) < 0)
         return ""
     var command = prefix + " --web-data " + op + " --store encrypted --applet " + applet
-    if (op === "prepare") {
-        if (validInt(generation) < 0)
+    if (op === "prepare" || op === "prune" || op === "remove-site") {
+        if (validInt(generation) < 0 || (keep !== undefined && keep !== null))
             return ""
-        return command + " --generation " + generation
+        command += " --generation " + generation
     }
+    if (op === "prepare") {
+        if (sites === undefined || sites === null || (Array.isArray(sites) && sites.length === 0))
+            return command
+        var created = siteList(sites)
+        return created === "" ? "" : command + " --sites " + created
+    }
+    if (op === "prune") {
+        var known = siteList(sites)
+        return known === "" ? "" : command + " --known " + known
+    }
+    if (op === "remove-site")
+        return isSiteId(sites) ? command + " --site " + sites : ""
     if (op === "remove") {
+        if (sites !== undefined && sites !== null)
+            return ""
         if (keep === undefined || keep === null)
             return command
         if (validInt(keep) < 0)
@@ -419,14 +483,16 @@ function autoLockStep(context) {
 //
 // Steps: "status", "create", "unlock" (passphrase), "unlock-wallet",
 // "auto-unlock" (Plasma start only), "add-key" (wallet set-up again from the
-// card), "lock", "prepare", "keep", "remove",
-// "wait", "destroy" (damaged folder only) while Stay signed in is on, and the leave-* steps queued when it is
-// turned off. Leave steps delete the encrypted folder, so they only ever run
-// while the mode is still off.
+// card), "lock", "prepare", "keep", "prune", "remove-site" (one site's
+// folder), "remove", "wait", "destroy" (damaged folder only) while Stay
+// signed in is on, and the leave-* steps queued when it is turned off. Leave
+// steps delete the encrypted folder, so they only ever run while the mode is
+// still off.
 
 var LEAVE_STEPS = ["leave-wait", "leave-remove", "leave-lock", "leave-status", "leave-destroy"]
 // Steps that only make sense while Stay signed in is on.
-var ENCRYPTED_STEPS = ["create", "unlock", "unlock-wallet", "auto-unlock", "add-key", "prepare", "keep"]
+var ENCRYPTED_STEPS = ["create", "unlock", "unlock-wallet", "auto-unlock", "add-key", "prepare", "keep",
+                       "prune", "remove-site"]
 
 function isLeaveStep(step) {
     return LEAVE_STEPS.indexOf(step) >= 0

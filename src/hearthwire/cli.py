@@ -50,6 +50,22 @@ def _hex_path(value: str) -> str:
     return value
 
 
+def _site_ids(value: str) -> tuple[str, ...]:
+    """1 to 207 comma-separated chat site ids, each checked, none twice."""
+    try:
+        return webdata.site_ids(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "expected 1 to 207 distinct site ids (built-in or user- plus 8 hex digits), comma-separated"
+        ) from None
+
+
+def _site_id(value: str) -> str:
+    if not webdata.valid_site_id(value):
+        raise argparse.ArgumentTypeError("expected a site id (built-in or user- plus 8 hex digits)")
+    return value
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="hearthwire",
@@ -73,14 +89,14 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--web-data",
-        choices=("prepare", "remove", "purge"),
-        help="Create or delete a Chat tab profile folder inside the unlocked encrypted folder; "
+        choices=(*webdata.OPERATIONS, "purge"),
+        help="Create, prune or delete Chat tab profile folders inside the unlocked encrypted folder; "
         "purge deletes the encrypted folder (no network, no credentials).",
     )
     result.add_argument(
         "--store",
         choices=webdata.STORES,
-        help="Profile store for --web-data prepare/remove (only 'encrypted').",
+        help="Profile store for --web-data prepare/prune/remove-site/remove (only 'encrypted').",
     )
     result.add_argument(
         "--applet",
@@ -88,8 +104,17 @@ def parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Applet id for --web-data, --usage-history and --settings-backup (1 or more for the last two).",
     )
-    result.add_argument("--generation", type=_bounded_int, metavar="G", help="Generation for --web-data prepare.")
+    result.add_argument(
+        "--generation", type=_bounded_int, metavar="G", help="Generation for --web-data prepare/prune/remove-site.",
+    )
     result.add_argument("--keep", type=_bounded_int, metavar="G", help="Generation --web-data remove keeps.")
+    result.add_argument(
+        "--sites", type=_site_ids, metavar="IDS", help="Site folders --web-data prepare creates (comma-separated).",
+    )
+    result.add_argument(
+        "--known", type=_site_ids, metavar="IDS", help="Site folders --web-data prune keeps (comma-separated).",
+    )
+    result.add_argument("--site", type=_site_id, metavar="ID", help="Site folder --web-data remove-site deletes.")
     result.add_argument(
         "--vault",
         choices=vault.OPERATIONS,
@@ -252,6 +277,9 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
             ("--applet", args.applet is not None),
             ("--generation", args.generation is not None),
             ("--keep", args.keep is not None),
+            ("--sites", args.sites is not None),
+            ("--known", args.known is not None),
+            ("--site", args.site is not None),
         ) if used
     ]
     if args.usage_history is not None or args.settings_backup is not None:
@@ -284,13 +312,23 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
         return
     if args.store is None or args.applet is None:
         argument_parser.error("--web-data needs --store and --applet")
-    if args.web_data == "prepare":
+    if args.web_data == "remove":
+        if args.generation is not None:
+            argument_parser.error("--generation is not for --web-data remove")
+    else:
         if args.generation is None:
-            argument_parser.error("--web-data prepare needs --generation")
+            argument_parser.error(f"--web-data {args.web_data} needs --generation")
         if args.keep is not None:
             argument_parser.error("--keep is only for --web-data remove")
-    elif args.generation is not None:
-        argument_parser.error("--generation is only for --web-data prepare")
+    for option, value, operation in (
+        ("--sites", args.sites, "prepare"), ("--known", args.known, "prune"), ("--site", args.site, "remove-site"),
+    ):
+        if value is not None and args.web_data != operation:
+            argument_parser.error(f"{option} is only for --web-data {operation}")
+    if args.web_data == "prune" and args.known is None:
+        argument_parser.error("--web-data prune needs --known")
+    if args.web_data == "remove-site" and args.site is None:
+        argument_parser.error("--web-data remove-site needs --site")
 
 
 def _provider_ids(value: str | None, argument_parser: argparse.ArgumentParser):
@@ -316,6 +354,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.web_data is not None:
         payload = _helper_reply(lambda: webdata.run(
             args.web_data, args.store, args.applet, generation=args.generation, keep=args.keep,
+            sites=args.sites, known=args.known, site=args.site,
         ))
     elif args.vault is not None:
         payload = _helper_reply(lambda: vault.run(args.vault, method=args.method))

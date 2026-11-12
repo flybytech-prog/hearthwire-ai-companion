@@ -41,6 +41,8 @@ KCM.ScrollViewKCM {
     // old value.
     property int cfg_chatProfileGeneration: 0
     property int cfg_chatProfileGenerationDefault: 0
+    property int cfg_chatProfileLayout: 0
+    property int cfg_chatProfileLayoutDefault: 0
     property int cfg_chatAutoLockMinutes: 0
     property int cfg_chatAutoLockMinutesDefault: 0
     property string cfg_chatVaultUnlock: "passphrase"
@@ -452,6 +454,8 @@ KCM.ScrollViewKCM {
         function onValueChanged(key, value) {
             if (key === "chatProfileGeneration")
                 page.cfg_chatProfileGeneration = value
+            else if (key === "chatProfileLayout")
+                page.cfg_chatProfileLayout = value
             else if (key === "chatSiteZoom")
                 page.cfg_chatSiteZoom = value
             else if (key === "usageHistoryClearOwed")

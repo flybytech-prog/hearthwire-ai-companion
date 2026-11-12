@@ -38,8 +38,9 @@ TestCase {
                 if (web)
                     testCase.builds.push({
                         staySignedIn: web.staySignedIn,
-                        storagePath: web.storagePath,
-                        profileName: web.profileName
+                        runtimeDir: web.runtimeDir,
+                        storageApplet: web.storageApplet,
+                        storageGeneration: web.storageGeneration
                     })
             }
         }
@@ -138,14 +139,19 @@ TestCase {
 
         view.storagePath = "/run/user/1/hearthwire/vault/web/applet-1-g0"
         view.profileName = "applet-1-g0"
+        view.runtimeDir = "/run/user/1"
+        view.storageApplet = 1
+        view.storageGeneration = 0
         view.storageReady = true
         view.card = {view: "web", message: ""}
         tryVerify(function () { return view.web !== null })
         compare(testCase.builds.length, 1)
+        // The parts each site's own folder and name are built from.
         compare(testCase.builds[0], {
             staySignedIn: true,
-            storagePath: "/run/user/1/hearthwire/vault/web/applet-1-g0",
-            profileName: "applet-1-g0"
+            runtimeDir: "/run/user/1",
+            storageApplet: 1,
+            storageGeneration: 0
         })
         verify(view.persistentActive)
         verify(!card.visible)
@@ -158,12 +164,16 @@ TestCase {
             storageReady: true,
             storagePath: "",
             profileName: "applet-1-g0",
+            runtimeDir: "/run/user/1",
+            storageApplet: 1,
+            storageGeneration: 0,
             card: {view: "web", message: ""}
         })
         tryVerify(function () { return view.web !== null })
         compare(testCase.builds[0].staySignedIn, false)
-        compare(testCase.builds[0].storagePath, "")
-        compare(testCase.builds[0].profileName, "")
+        compare(testCase.builds[0].runtimeDir, "")
+        compare(testCase.builds[0].storageApplet, -1)
+        compare(testCase.builds[0].storageGeneration, -1)
     }
 
     function test_memoryModeIgnoresReadyFlag() {

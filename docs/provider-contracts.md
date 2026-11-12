@@ -442,9 +442,16 @@ told apart. The helper ignores both.
   absolute, a real directory, owned by you and mode `0700`, else the reply is
   `no-runtime-dir`. The bare mountpoint is mode `0700` while mounting and
   `0500` while locked.
-- Profiles: `<mount>/web/applet-<N>-g<G>/`, one per widget id `N` and profile
-  generation `G` (`chatProfileGeneration`, raised by Clear chat data). Folders
-  are mode `0700`.
+- Profiles: `<mount>/web/applet-<N>-g<G>/` is the generation folder, one per
+  widget id `N` and profile generation `G` (`chatProfileGeneration`, raised by
+  Clear chat data). It is only a container: each chat site keeps its own
+  profile in `site-<id>/` inside it, so no two sites share cookies, storage,
+  cache or service workers. Folders are mode `0700`.
+- Site ids: exactly one of the built-in ids `claude`, `chatgpt`, `grok`,
+  `gemini`, `copilot`, `mscopilot`, `local`, or an added site's `user-`
+  followed by 8 lowercase hex digits (`user-[0-9a-f]{8}`). `ollama` is never a
+  site id. Ids are matched exactly, never trimmed or by prefix; the grammar is
+  prefix-free, so two ids never share a folder.
 - KDE Wallet key slot: `$XDG_DATA_HOME/hearthwire/vault-keys/wallet.conf`
   (folder `0700`, file `0400`, outside the cipher directory). It is a copy of
   `gocryptfs.conf` whose master key is wrapped with a random key
@@ -480,8 +487,10 @@ at a time without following symlinks.
 | `--vault lock` | `fusermount3 -u`; retried after 0.5 s and 1 s, never forced or lazy; already locked or a dead mount is success | `{"ok":true}` |
 | `--vault change-passphrase` | `gocryptfs -passwd`, only while locked (kdialog `--password`, then `--newpassword`) | `{"ok":true}` |
 | `--vault destroy` | Deletes the cipher directory, `vault-keys/` and the bare mountpoint, only while not unlocked, then the wallet entry when this folder had a wallet slot and the wallet holds it; nothing there is success | `{"ok":true}` |
-| `--web-data prepare --store encrypted --applet N --generation G` | Creates `web/applet-N-gG/` inside the verified mount | `{"ok":true}` |
-| `--web-data remove --store encrypted --applet N [--keep G]` | Deletes this widget's `applet-N-g*` folders, except generation `G` when given; nothing there is success | `{"ok":true}` |
+| `--web-data prepare --store encrypted --applet N --generation G [--sites IDS]` | Creates `web/applet-N-gG/` inside the verified mount and, for each id in `IDS`, `site-<id>/` inside it (all `0700`; an existing folder is reset to `0700` and keeps its contents). Without `--sites` only the generation folder is made. Run when a site is first opened | `{"ok":true}` |
+| `--web-data prune --store encrypted --applet N --generation G --known IDS` | Inside `applet-N-gG/` only, deletes every entry except a `site-<id>/` folder whose id is in `IDS`: Chromium files left at the container root (a shared profile from 1.0.1 or earlier), unknown or removed sites, and a symlink or file wearing a known name (it is unlinked, never followed). Never touches other generations, other applets or anything else in `web/`. A missing `web/` or generation folder is success and nothing is created. The widget runs it only when its site list reads as valid, after each unlock's prepare and after an added site is removed | `{"ok":true}` |
+| `--web-data remove-site --store encrypted --applet N --generation G --site ID` | Deletes `applet-N-gG/site-<ID>` only (a symlink there is unlinked, never followed); a missing folder is success. Used by "Clear <site> data" after the site's profile is gone | `{"ok":true}` |
+| `--web-data remove --store encrypted --applet N [--keep G]` | Deletes this widget's `applet-N-g*` folders, except generation `G` when given; nothing there is success. Unchanged by per-site folders: deleting a generation folder deletes its `site-*` folders with it | `{"ok":true}` |
 | `--web-data purge` | Deletes the encrypted folder and `vault-keys/` for `scripts/install.sh --uninstall-web-data`, then the wallet entry when `vault-keys/` held a wallet slot, kwallet-query and qdbus6 are there and the wallet holds it; refuses while anything is mounted at the mountpoint or from the cipher directory (also checks `/run/user/<uid>`); runs no other tool | `{"ok":true,"removed":[...]}` with any of `"vault"`, `"vault-keys"`, `"wallet-entry"` in that order (empty when nothing was there) |
 
 `absent` means there is no cipher directory or it is empty. `damaged` means the
@@ -597,10 +606,16 @@ Argument rules (argparse exits 2 with a usage message on stderr otherwise):
 - `--method passphrase|wallet` needs `--vault unlock`, `add-key`, or
   `remove-key`; `add-key` and `remove-key` need `--method wallet`; `unlock`
   defaults to `passphrase`.
-- `--store`, `--applet`, `--generation`, and `--keep` need `--web-data`
-  `prepare` or `remove`; `prepare` needs `--store`, `--applet`, and
-  `--generation` and refuses `--keep`; `remove` needs `--store` and
-  `--applet` and refuses `--generation`; `purge` takes none of them.
+- `--store`, `--applet`, `--generation`, `--keep`, `--sites`, `--known`, and
+  `--site` need `--web-data` `prepare`, `prune`, `remove-site`, or `remove`.
+  `prepare`, `prune`, and `remove-site` need `--store`, `--applet`, and
+  `--generation` and refuse `--keep`; `remove` needs `--store` and `--applet`
+  and refuses `--generation`; `purge` takes none of them.
+- `--sites` is only for `prepare` (optional), `--known` only for `prune`
+  (required), `--site` only for `remove-site` (required). `IDS` is 1 to 207
+  comma-separated site ids (see Layout) with no duplicates, no spaces and no
+  empty items; `ID` is one site id. Any other id, including `ollama`, is a
+  usage error and nothing is touched.
 - `N` and `G` are plain decimal integers from 0 to 2147483648 (at most 10
   digits; no sign, spaces, or underscores).
 - `--usage-history read|record|clear` need `--applet N` with N from 1 to
@@ -668,7 +683,7 @@ A failure is `{"ok":false,"error":"<code>"}`:
 | `stale-mount` | A dead mount could not be cleaned up |
 | `busy` | The lock file is held by another job, the folder is mounted elsewhere, or `lock` found it still in use |
 | `not-locked` | `change-passphrase`, `destroy`, `purge`: the folder is unlocked (for `purge`: anything is mounted there) |
-| `symlink`, `not-directory`, `not-owned` | Something in the way is a symlink, not a folder, or not yours; nothing is followed or deleted |
+| `symlink`, `not-directory`, `not-owned` | Something in the way is a symlink, not a folder, or not yours; nothing is followed and it is not deleted. `--web-data prune` and `remove` stop there; entries before it (in name order) may already be gone |
 | `not-set-up` | `unlock --method wallet`, `auto-unlock`: no usable wallet slot, or the wallet has no entry for it (gocryptfs exit 11 with `-config`, too) |
 | `wallet-disabled` | Wallet jobs: KWallet is disabled (`isEnabled` = false) |
 | `wallet-closed` | `auto-unlock`: the wallet is locked (or its state is unknown); nothing was run |

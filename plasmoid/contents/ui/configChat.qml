@@ -39,6 +39,8 @@ KCM.SimpleKCM {
     // old value.
     property int cfg_chatProfileGeneration: 0
     property int cfg_chatProfileGenerationDefault: 0
+    property int cfg_chatProfileLayout: 0
+    property int cfg_chatProfileLayoutDefault: 0
     property int cfg_chatAutoLockMinutes: 0
     property int cfg_chatAutoLockMinutesDefault: 0
     property string cfg_chatVaultUnlock: "passphrase"
@@ -99,13 +101,15 @@ KCM.SimpleKCM {
     // Page-local only; the advanced section always starts collapsed.
     property bool showAdvanced: false
 
-    // main.qml may move to a new generation or store a zoom while this page
-    // is open.
+    // main.qml may move to a new generation or layout, or store a zoom,
+    // while this page is open.
     Connections {
         target: Plasmoid.configuration
         function onValueChanged(key, value) {
             if (key === "chatProfileGeneration")
                 page.cfg_chatProfileGeneration = value
+            else if (key === "chatProfileLayout")
+                page.cfg_chatProfileLayout = value
             else if (key === "chatSiteZoom")
                 page.cfg_chatSiteZoom = value
             else if (key === "usageHistoryClearOwed")

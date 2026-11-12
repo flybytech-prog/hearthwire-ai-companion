@@ -6,16 +6,22 @@ import QtWebEngine
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.components as PlasmaComponents
 import "ChatSites.js" as ChatSites
+import "ChatStorage.js" as ChatStorage
 import "SettingsLogic.js" as SettingsLogic
 
-// The only file that touches Qt WebEngine. Everything lives in one profile.
-// By default it is off the record: cookies, cache and site storage stay in
-// memory and vanish when this item is destroyed (Clear chat data) or Plasma
-// restarts. Only with "Stay signed in" and a verified, unlocked encrypted
-// folder does ChatView create this item with staySignedIn set; then cookies
-// and site storage live in storagePath inside that folder (HTTP cache stays in
-// memory). Both are fixed for the item's lifetime: ChatView recreates it
-// instead of changing them (a live switch crashes Qt WebEngine).
+// The only file that touches Qt WebEngine. Every chat site has its own
+// profile (cookies, storage, cache, service workers, permissions), created
+// by ensureProfile right before the site's first view; no profile is shared
+// between sites. By default each is off the record: everything stays in
+// memory and vanishes when the profile or this item is destroyed (Clear
+// <site> data, Clear chat data) or Plasma restarts. Only with "Stay signed
+// in" and a verified, unlocked encrypted folder does ChatView create this
+// item with staySignedIn set; then a site's cookies and site storage live in
+// its own site-<id> folder inside that folder (HTTP cache stays in memory),
+// and only once main.qml has prepared that folder: until then the site's
+// view waits, it never opens privately instead. The profile kind is fixed
+// for the item's lifetime: ChatView recreates it instead of changing it (a
+// live switch crashes Qt WebEngine).
 // Pages are never read or scripted, and their console output is dropped.
 //
 // Local web UI pages on this computer load only after the helper said the
@@ -24,9 +30,9 @@ import "SettingsLogic.js" as SettingsLogic
 // this computer. Anything else loads nothing and shows a message instead.
 //
 // Split view: a second pane (b) shows siteIdB next to the first, with its
-// own pages, in the same profile (one set of sign-ins). Its pages exist
-// only while split is on and are destroyed when it is turned off. Every
-// rule below holds for both panes; the pages are never scripted.
+// own pages; the same site in both panes shares that site's profile. Its
+// pages exist only while split is on and are destroyed when it is turned
+// off. Every rule below holds for both panes; the pages are never scripted.
 //
 // A page never opens the system browser by itself: an address it hands over
 // (a clicked link off the site, a clicked window) only asks "Open <host> in
@@ -35,11 +41,24 @@ import "SettingsLogic.js" as SettingsLogic
 Item {
     id: chatWeb
 
-    // Set once through the Loader's initial properties, before the profile
-    // exists. Defaults are the private in-memory profile.
+    // Set once through the Loader's initial properties, before any profile
+    // exists. Defaults are private in-memory profiles. With staySignedIn,
+    // the parts every site's folder and name are built from
+    // (ChatStorage.siteProfilePath / siteProfileName).
     property bool staySignedIn: false
-    property string storagePath: ""
-    property string profileName: ""
+    property string runtimeDir: ""
+    property int storageApplet: -1
+    property int storageGeneration: -1
+    // Sites whose folder main.qml prepared in this generation; a saved
+    // profile is made only for these.
+    property var preparedSites: []
+
+    // {siteId: profile}, filled only by ensureProfile. Never reassigned, so
+    // a page's profile binding is evaluated once.
+    readonly property var profiles: ({})
+    // {siteId: true} while a dropped profile still waits to be destroyed;
+    // no new profile is made for that site until it is gone.
+    readonly property var retiring: ({})
 
     // Enabled site ids (catalog order) and the one being shown.
     property var siteIds: []
@@ -139,11 +158,14 @@ Item {
     property string pendingDownloadName: ""
     // The catalog name of the site whose page started it ("" if unknown).
     property string pendingDownloadSite: ""
+    // That site's id, so clearing the site drops its download too.
+    property string pendingDownloadSiteId: ""
     // The page a pending upload dialog belongs to.
     property var uploadView: null
 
-    // The profile's own user agent (QtWebEngine token stripped) and client
-    // hints, captured once; restored whenever no page is on Google sign-in.
+    // The first profile's own user agent (QtWebEngine token stripped) and
+    // client hints, captured once; every profile starts with them and gets
+    // them back whenever none of its pages is on Google sign-in.
     property string baseUserAgent: ""
     property bool baseClientHintsEnabled: true
     property var baseBrands: ({})
@@ -245,7 +267,7 @@ Item {
             Qt.callLater(chatWeb.syncViews)
         if (pending.create) {
             if (chatWeb.siteIds.indexOf("local") < 0 || chatWeb.viewFor("local", pending.pane) !== null
-                    || (pending.pane === "b" && !chatWeb.splitActive))
+                    || (pending.pane === "b" && !chatWeb.splitActive) || !chatWeb.ensureProfile("local"))
                 return
             chatWeb.localCreatePass = pending.url
             visitedSites.append({ site: "local", pane: pending.pane })
@@ -293,6 +315,14 @@ Item {
         }
     }
 
+    // With saved sign-ins, a pane's site still waits for main.qml to
+    // prepare its folder: no view, no profile, none allowed yet.
+    function siteWaits(siteId, pane) {
+        return chatWeb.staySignedIn && chatWeb.siteIds.indexOf(siteId) >= 0
+            && chatWeb.viewFor(siteId, pane) === null && !chatWeb.profileFor(siteId)
+            && !chatWeb.siteProfileSpec(siteId)
+    }
+
     // A pane that shows Local has no Local view yet.
     function localViewMissing() {
         return chatWeb.siteIds.indexOf("local") >= 0
@@ -326,8 +356,7 @@ Item {
         Qt.callLater(chatWeb.syncUserAgent)
     }
 
-    // Addresses of every page and the sign-in window; view's own address is
-    // replaced by pendingUrl (the one it is about to load).
+    // Every page and the sign-in window.
     function viewList() {
         var views = []
         for (var index = 0; index < pages.count; index++) {
@@ -339,11 +368,14 @@ Item {
         return views
     }
 
-    function viewUrls(view, pendingUrl) {
+    // Addresses of the pages (and sign-in window) of siteId, which share
+    // its profile; view's own address is replaced by pendingUrl (the one it
+    // is about to load).
+    function viewUrls(siteId, view, pendingUrl) {
         var views = chatWeb.viewList()
         var urls = []
         for (var index = 0; index < views.length; index++) {
-            if (views[index] !== view)
+            if (views[index] !== view && views[index].site === siteId)
                 urls.push(views[index].url.toString())
         }
         if (view)
@@ -351,40 +383,161 @@ Item {
         return urls
     }
 
-    function wantedUserAgent(view, pendingUrl) {
-        return ChatSites.userAgentFor(chatWeb.viewUrls(view, pendingUrl), chatWeb.baseUserAgent)
+    function wantedUserAgent(siteId, view, pendingUrl) {
+        return ChatSites.userAgentFor(chatWeb.viewUrls(siteId, view, pendingUrl), chatWeb.baseUserAgent)
     }
 
     // The user agent is profile-wide and only a plain property, but it must
     // never be set from inside a navigation request (that aborts Qt
     // WebEngine); callers defer this. On Google sign-in, client hints are
     // emptied too so they don't name Chromium behind the Firefox agent.
-    function applyUserAgent(userAgent) {
-        if (chatWeb.baseUserAgent === "" || chatProfile.httpUserAgent === userAgent)
+    function applyUserAgent(profile, userAgent) {
+        if (!profile || chatWeb.baseUserAgent === "" || profile.httpUserAgent === userAgent)
             return
         var firefox = userAgent === ChatSites.GOOGLE_SIGNIN_UA
-        chatProfile.clientHints.isAllClientHintsEnabled = firefox ? false : chatWeb.baseClientHintsEnabled
-        chatProfile.clientHints.fullVersionList = firefox ? ({}) : chatWeb.baseBrands
-        chatProfile.httpUserAgent = userAgent
+        profile.clientHints.isAllClientHintsEnabled = firefox ? false : chatWeb.baseClientHintsEnabled
+        profile.clientHints.fullVersionList = firefox ? ({}) : chatWeb.baseBrands
+        profile.httpUserAgent = userAgent
     }
 
-    // Settles the user agent from the loaded addresses, but only while no
-    // page is loading: a load in flight is handled by its own request and
-    // ends with another sync.
+    // Settles each profile's user agent from its own pages' addresses, but
+    // only while none of them is loading: a load in flight is handled by
+    // its own request and ends with another sync.
     function syncUserAgent() {
         var views = chatWeb.viewList()
-        for (var index = 0; index < views.length; index++) {
-            if (views[index].loading)
-                return
+        for (var siteId in chatWeb.profiles) {
+            var loading = false
+            for (var index = 0; index < views.length; index++) {
+                if (views[index].site === siteId && views[index].loading)
+                    loading = true
+            }
+            if (!loading)
+                chatWeb.applyUserAgent(chatWeb.profiles[siteId], chatWeb.wantedUserAgent(siteId, null, ""))
         }
-        chatWeb.applyUserAgent(chatWeb.wantedUserAgent(null, ""))
+    }
+
+    // What a new profile for siteId is made with, or null when it may not
+    // have one now: not a web site id, its old profile is still being
+    // destroyed, or (saved sign-ins) its folder isn't prepared or the name
+    // and path can't be built. Name and path come only from ChatStorage,
+    // with this same id.
+    function siteProfileSpec(siteId) {
+        if (!ChatStorage.isSiteId(siteId) || chatWeb.retiring[siteId] === true)
+            return null
+        if (!chatWeb.staySignedIn)
+            return { saved: false, sitePath: "", siteName: "" }
+        if (!Array.isArray(chatWeb.preparedSites) || chatWeb.preparedSites.indexOf(siteId) < 0)
+            return null
+        var name = ChatStorage.siteProfileName(chatWeb.storageApplet, chatWeb.storageGeneration, siteId)
+        var path = ChatStorage.siteProfilePath(chatWeb.runtimeDir, chatWeb.storageApplet,
+            chatWeb.storageGeneration, siteId)
+        if (name === "" || path === "")
+            return null
+        return { saved: true, sitePath: path, siteName: name }
+    }
+
+    // siteId's profile, made now if it has none; called only right before a
+    // view of that site is created. null: no view may be created.
+    function ensureProfile(siteId) {
+        var existing = chatWeb.profileFor(siteId)
+        if (existing)
+            return existing
+        var spec = chatWeb.siteProfileSpec(siteId)
+        if (!spec)
+            return null
+        var profile = siteProfileComponent.createObject(chatWeb, spec)
+        if (!profile)
+            return null
+        if (chatWeb.baseUserAgent === "") {
+            chatWeb.baseUserAgent = ChatSites.userAgent(profile.httpUserAgent)
+            chatWeb.baseClientHintsEnabled = profile.clientHints.isAllClientHintsEnabled
+            chatWeb.baseBrands = profile.clientHints.fullVersionList
+        }
+        profile.httpUserAgent = chatWeb.baseUserAgent
+        chatWeb.profiles[siteId] = profile
+        return profile
+    }
+
+    // Only a lookup: null for a site without a profile.
+    function profileFor(siteId) {
+        return typeof siteId === "string" && Object.prototype.hasOwnProperty.call(chatWeb.profiles, siteId)
+            ? chatWeb.profiles[siteId] : null
+    }
+
+    // Clear <site> data: every page and the sign-in window of siteId go,
+    // then its profile (with an off-the-record profile, all its data). The
+    // profile is destroyed only once its views are gone; a shown site gets
+    // a new profile after that (with saved sign-ins only once main.qml has
+    // prepared its folder again).
+    function clearSite(siteId) {
+        if (!ChatStorage.isSiteId(siteId))
+            return
+        if (chatWeb.overlayView && chatWeb.overlayView.site === siteId)
+            chatWeb.closeOverlay()
+        if (chatWeb.pendingDownload && chatWeb.pendingDownloadSiteId === siteId)
+            chatWeb.cancelDownload()
+        if (uploadDialog.request && chatWeb.uploadView && chatWeb.uploadView.site === siteId) {
+            uploadDialog.close()
+            chatWeb.finishUpload(false)
+        }
+        if (siteId === "local" && chatWeb.ownerPending) {
+            localOwner.cancel()
+            chatWeb.ownerPending = null
+        }
+        for (var index = visitedSites.count - 1; index >= 0; index--) {
+            if (visitedSites.get(index).site === siteId)
+                visitedSites.remove(index)
+        }
+        chatWeb.syncCurrentViews()
+        var profile = chatWeb.profileFor(siteId)
+        if (!profile)
+            return
+        delete chatWeb.profiles[siteId]
+        chatWeb.retiring[siteId] = true
+        // The views' own deletion was posted first; the profile's follows.
+        Qt.callLater(function () { chatWeb.releaseProfile(siteId, profile) })
+    }
+
+    function releaseProfile(siteId, profile) {
+        var views = chatWeb.viewList()
+        for (var index = 0; index < views.length; index++) {
+            if (views[index].profile === profile) {
+                Qt.callLater(function () { chatWeb.releaseProfile(siteId, profile) })
+                return
+            }
+        }
+        profile.destroy()
+        Qt.callLater(function () {
+            delete chatWeb.retiring[siteId]
+            chatWeb.syncViews()
+        })
+    }
+
+    // Every profile's downloads: only one waits at a time.
+    function handleDownload(download) {
+        if (download.isSavePageDownload || chatWeb.pendingDownload !== null) {
+            download.cancel()
+            return
+        }
+        // Deferred: the request stays pending until Save, Cancel or timeout.
+        chatWeb.pendingDownload = download
+        chatWeb.pendingDownloadName = download.downloadFileName
+        var siteId = download.view && typeof download.view.site === "string" ? download.view.site : ""
+        var source = siteId !== "" ? ChatSites.byId(siteId) : null
+        chatWeb.pendingDownloadSite = source ? source.name : ""
+        chatWeb.pendingDownloadSiteId = source ? siteId : ""
+        downloadTimeout.restart()
     }
 
     // openerUrl: the address of the page that asked for the window; its host
     // names a window that is still blank.
     // overlayPane (set by the opener's page) says which pane it covers.
+    // The window gets its opener's profile (request.openIn needs it); a
+    // site without one opens nothing.
     function openOverlay(request, siteId, openerUrl) {
         chatWeb.closeOverlay()
+        if (!chatWeb.profileFor(siteId))
+            return
         var view = pageComponent.createObject(overlayContent, {
             site: siteId,
             pane: chatWeb.overlayPane,
@@ -421,6 +574,7 @@ Item {
         chatWeb.pendingDownload = null
         chatWeb.pendingDownloadName = ""
         chatWeb.pendingDownloadSite = ""
+        chatWeb.pendingDownloadSiteId = ""
     }
 
     function openUploadDialog(request, view) {
@@ -512,16 +666,21 @@ Item {
             chatWeb.focusedPane = "a"
         // Append only: existing views keep their page and are never reloaded.
         // A Local view on this computer is created only after the owner check.
+        // A site that may not have a profile yet (its folder isn't prepared)
+        // waits; this runs again when the prepared sites change.
         var panes = chatWeb.splitActive ? ["a", "b"] : ["a"]
         for (var at = 0; at < panes.length; at++) {
             var pane = panes[at]
             var wanted = pane === "b" ? chatWeb.siteIdB : chatWeb.siteId
-            if (chatWeb.siteIds.indexOf(wanted) < 0 || chatWeb.viewFor(wanted, pane) !== null)
+            if (chatWeb.siteIds.indexOf(wanted) < 0 || chatWeb.viewFor(wanted, pane) !== null
+                    || (!chatWeb.profileFor(wanted) && !chatWeb.siteProfileSpec(wanted)))
                 continue
             var home = ChatSites.homeUrl(wanted, chatWeb.customUrls)
             if (ChatSites.localOwnerPort({ siteId: wanted, customUrls: chatWeb.customUrls,
-                                           url: home }) === 0)
-                visitedSites.append({ site: wanted, pane: pane })
+                                           url: home }) === 0) {
+                if (chatWeb.ensureProfile(wanted))
+                    visitedSites.append({ site: wanted, pane: pane })
+            }
             // One check at a time: a check running for the other pane (a
             // navigation or a create) re-runs this when it ends.
             else if (!chatWeb.ownerPending)
@@ -549,6 +708,7 @@ Item {
     }
 
     onSiteIdsChanged: chatWeb.syncViews()
+    onPreparedSitesChanged: chatWeb.syncViews()
     onCustomUrlsChanged: chatWeb.applyCustomUrls()
     onSiteIdChanged: {
         if (chatWeb.overlayPane === "a")
@@ -591,13 +751,7 @@ Item {
         }
     }
 
-    Component.onCompleted: {
-        chatWeb.baseUserAgent = ChatSites.userAgent(chatProfile.httpUserAgent)
-        chatWeb.baseClientHintsEnabled = chatProfile.clientHints.isAllClientHintsEnabled
-        chatWeb.baseBrands = chatProfile.clientHints.fullVersionList
-        chatProfile.httpUserAgent = chatWeb.baseUserAgent
-        chatWeb.syncViews()
-    }
+    Component.onCompleted: chatWeb.syncViews()
 
     Component.onDestruction: {
         localOwner.cancel()
@@ -606,33 +760,31 @@ Item {
             chatWeb.finishUpload(false)
     }
 
-    // Order matters: the paths come before storageName and offTheRecord is
-    // last, or Qt creates a stray profile folder under Plasma's own data
-    // directory before it sees the paths.
-    WebEngineProfile {
-        id: chatProfile
-        persistentStoragePath: chatWeb.staySignedIn ? chatWeb.storagePath : ""
-        cachePath: chatWeb.staySignedIn ? chatWeb.storagePath : ""
-        storageName: chatWeb.staySignedIn ? chatWeb.profileName : ""
-        httpCacheType: WebEngineProfile.MemoryHttpCache
-        persistentCookiesPolicy: chatWeb.staySignedIn
-            ? WebEngineProfile.AllowPersistentCookies : WebEngineProfile.NoPersistentCookies
-        persistentPermissionsPolicy: WebEngineProfile.PersistentPermissionsPolicy.AskEveryTime
-        spellCheckEnabled: false
-        offTheRecord: !chatWeb.staySignedIn
+    // The only profile there is: one instance per site, made by
+    // ensureProfile alone, which sets saved, sitePath and siteName once at
+    // creation. Order matters: the paths come before storageName and
+    // offTheRecord is last, or Qt creates a stray profile folder under
+    // Plasma's own data directory before it sees the paths.
+    Component {
+        id: siteProfileComponent
 
-        onDownloadRequested: (download) => {
-            if (download.isSavePageDownload || chatWeb.pendingDownload !== null) {
-                download.cancel()
-                return
-            }
-            // Deferred: the request stays pending until Save, Cancel or timeout.
-            chatWeb.pendingDownload = download
-            chatWeb.pendingDownloadName = download.downloadFileName
-            var source = download.view && typeof download.view.site === "string"
-                ? ChatSites.byId(download.view.site) : null
-            chatWeb.pendingDownloadSite = source ? source.name : ""
-            downloadTimeout.restart()
+        WebEngineProfile {
+            id: siteProfile
+            property bool saved: false
+            property string sitePath: ""
+            property string siteName: ""
+
+            persistentStoragePath: siteProfile.saved ? siteProfile.sitePath : ""
+            cachePath: siteProfile.saved ? siteProfile.sitePath : ""
+            storageName: siteProfile.saved ? siteProfile.siteName : ""
+            httpCacheType: WebEngineProfile.MemoryHttpCache
+            persistentCookiesPolicy: siteProfile.saved
+                ? WebEngineProfile.AllowPersistentCookies : WebEngineProfile.NoPersistentCookies
+            persistentPermissionsPolicy: WebEngineProfile.PersistentPermissionsPolicy.AskEveryTime
+            spellCheckEnabled: false
+            offTheRecord: !siteProfile.saved
+
+            onDownloadRequested: (download) => chatWeb.handleDownload(download)
         }
     }
 
@@ -700,7 +852,9 @@ Item {
             visible: page.isOverlay || (page.pane === "b"
                 ? chatWeb.splitShown && page.site === chatWeb.siteIdB
                 : page.site === chatWeb.siteId)
-            profile: chatProfile
+            // Its site's own profile, made right before this view; fixed
+            // for the view's lifetime (profiles is never reassigned).
+            profile: chatWeb.profileFor(page.site)
             backgroundColor: Kirigami.Theme.backgroundColor
 
             settings.screenCaptureEnabled: false
@@ -825,7 +979,7 @@ Item {
                 var url = request.url.toString()
                 var retried = page.userAgentRetry === url
                 page.userAgentRetry = ""
-                if (retried || chatWeb.wantedUserAgent(page, url) === chatProfile.httpUserAgent)
+                if (retried || chatWeb.wantedUserAgent(page.site, page, url) === page.profile.httpUserAgent)
                     return
                 if (request.navigationType === WebEngineNavigationRequest.FormSubmittedNavigation)
                     return
@@ -835,7 +989,7 @@ Item {
                     // Closed meanwhile (sign-in window, disabled site).
                     if (chatWeb.viewList().indexOf(page) < 0)
                         return
-                    chatWeb.applyUserAgent(chatWeb.wantedUserAgent(page, url))
+                    chatWeb.applyUserAgent(page.profile, chatWeb.wantedUserAgent(page.site, page, url))
                     page.url = url
                 })
             }
@@ -885,7 +1039,8 @@ Item {
             }
 
             Component.onCompleted: {
-                if (page.isOverlay)
+                // Never without its site's profile (the default one is not ours).
+                if (page.isOverlay || !page.profile || page.profile !== chatWeb.profileFor(page.site))
                     return
                 if (page.site === "local") {
                     page.ownerPass = chatWeb.localCreatePass
@@ -908,6 +1063,13 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         width: chatWeb.splitShown ? Math.floor((parent.width - paneSeparator.width) / 2) : parent.width
+
+        PlasmaComponents.BusyIndicator {
+            objectName: "siteWaitA"
+            anchors.centerIn: parent
+            visible: chatWeb.siteWaits(chatWeb.siteId, "a")
+            running: visible
+        }
     }
     Kirigami.Separator {
         id: paneSeparator
@@ -924,6 +1086,13 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         visible: chatWeb.splitShown
+
+        PlasmaComponents.BusyIndicator {
+            objectName: "siteWaitB"
+            anchors.centerIn: parent
+            visible: chatWeb.splitActive && chatWeb.siteWaits(chatWeb.siteIdB, "b")
+            running: visible
+        }
     }
 
     Repeater {

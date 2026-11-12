@@ -37,6 +37,9 @@ TestCase {
     readonly property url mainFile: Qt.resolvedUrl("../../plasmoid/contents/ui/main.qml")
     readonly property url usagePageFile: Qt.resolvedUrl("../../plasmoid/contents/ui/configUsage.qml")
     readonly property url generalPageFile: Qt.resolvedUrl("../../plasmoid/contents/ui/configGeneral.qml")
+    readonly property url chatPageFile: Qt.resolvedUrl("../../plasmoid/contents/ui/configChat.qml")
+    // ChatView's web view in the real popup: the stub, no Qt WebEngine.
+    readonly property url chatWebStub: Qt.resolvedUrl("../qml/ChatWebStub.qml")
     readonly property string normalPick: "#00aa00"
     readonly property string warningPick: "#aa0000"
     readonly property string criticalPick: "#0000aa"
@@ -2298,5 +2301,357 @@ TestCase {
         answerInstall(other.owner, "{\"ok\":false,\"error\":\"os-error\"}")
         compare(installCommands(other.owner).length, 1, "exit 0 is never retried")
         compare(other.owner.installInfo.known, false)
+    }
+
+    // --- one profile per site: migration, prepare/prune/keep, per-site clear --
+
+    readonly property var builtIns: ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot", "local"]
+    readonly property string unlockedReply: JSON.stringify({ok: true, state: "unlocked", wallet: "off"})
+    readonly property string okReply: JSON.stringify({ok: true})
+
+    // The Stay signed in helper commands, without the run prefix (checked
+    // here: this widget, nothing else in front).
+    function storageCommands(owner) {
+        wait(0)
+        var prefix = new RegExp("^env HEARTHWIRE_RUN=[0-9]+ HEARTHWIRE_APPLET=" + Plasmoid.id
+                                + " python3 -P -m hearthwire ")
+        return everyCommand(owner).filter(function (command) {
+            return / --(web-data|vault) /.test(command)
+        }).map(function (command) {
+            verify(prefix.test(command), command)
+            return command.replace(prefix, "")
+        })
+    }
+
+    function lastStorageCommand(owner) {
+        var commands = storageCommands(owner)
+        return commands.length > 0 ? commands[commands.length - 1] : ""
+    }
+
+    function answerStorage(owner, reply) {
+        wait(0)
+        var running = null
+        sourcesOf(owner).forEach(function (source) {
+            source.connectedSources.forEach(function (command) {
+                if (/ --(web-data|vault) /.test(command))
+                    running = {source: source, command: command}
+            })
+        })
+        verify(running, "a storage step is running")
+        running.source.newData(running.command, {"exit code": 0, "stdout": reply})
+        wait(0)
+    }
+
+    // Answers the running step after checking it is `expected`.
+    function expectStorage(owner, expected, reply) {
+        tryVerify(function () { return lastStorageCommand(owner) === expected }, 3000,
+                  "expected `" + expected + "`, last was `" + lastStorageCommand(owner) + "`")
+        answerStorage(owner, reply === undefined ? testCase.okReply : reply)
+    }
+
+    function webData(op, rest) {
+        return "--web-data " + op + " --store encrypted --applet " + Plasmoid.id + rest
+    }
+
+    // Unlocked and prepared for the shown site (claude), keep and prune
+    // done; with popup, through the real Chat tab's start.
+    function unlockedMain(settings, popup) {
+        var main = loadMain(Object.assign({chatSignInStorage: "encrypted"}, settings || {}))
+        compare(main.chatWebSiteId, "claude")
+        var generation = main.chatGeneration
+        if (popup)
+            testCase.chatOpened = chatPopup(main)
+        else
+            main.chatStorageRequest("open")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
+        expectStorage(main, webData("remove", " --keep " + generation))
+        expectStorage(main, webData("prune", " --generation " + generation + " --known " + builtIns.join(",")))
+        verify(main.chatStorageReady)
+        compare(main.chatReadySites, ["claude"])
+        return main
+    }
+
+    function test_profileLayoutMigration_data() {
+        return [
+            {tag: "old shared, encrypted", layout: 0, setup: true, mode: "encrypted", generation: 5, next: 1},
+            {tag: "old shared, memory", layout: 0, setup: true, mode: "memory", generation: 5, next: 2},
+            {tag: "new install, encrypted", layout: 0, setup: false, mode: "encrypted", generation: 5, next: 2},
+            {tag: "odd value", layout: 7, setup: true, mode: "encrypted", generation: 5, next: 1},
+            {tag: "negative value", layout: -1, setup: true, mode: "memory", generation: 5, next: 2},
+            {tag: "notice pending", layout: 1, setup: true, mode: "encrypted", generation: 4, next: 1},
+            {tag: "done", layout: 2, setup: true, mode: "encrypted", generation: 4, next: 2},
+            {tag: "done, memory", layout: 2, setup: true, mode: "memory", generation: 4, next: 2}
+        ]
+    }
+
+    // Layout 0 (or anything odd) moves to a new generation once; the
+    // notice is owed only for saved sign-ins of a widget set up before.
+    function test_profileLayoutMigration(data) {
+        var main = loadMain({chatProfileLayout: data.layout, initialSetupComplete: data.setup,
+                             chatSignInStorage: data.mode, chatProfileGeneration: 4})
+        compare(Plasmoid.configuration.chatProfileLayout, data.next)
+        compare(main.chatProfileLayout, data.next)
+        compare(main.chatGeneration, data.generation)
+        compare(Plasmoid.configuration.chatProfileGeneration, data.generation)
+        // Nothing runs the helper for it.
+        compare(storageCommands(main), [])
+    }
+
+    // A second start (Plasma restart) never moves again.
+    function test_profileLayoutMigratesOnce() {
+        var first = loadMain({chatSignInStorage: "encrypted", chatProfileGeneration: 4})
+        compare(first.chatGeneration, 5)
+        compare(Plasmoid.configuration.chatProfileLayout, 1)
+        var component = Qt.createComponent(testCase.mainFile)
+        var second = createTemporaryObject(component, testCase)
+        verify(second)
+        compare(second.chatGeneration, 5)
+        compare(Plasmoid.configuration.chatProfileGeneration, 5)
+        compare(Plasmoid.configuration.chatProfileLayout, 1)
+    }
+
+    // After an update, the first unlock's prepare is followed by keep (it
+    // deletes the old shared generation folder) and prune.
+    function test_unlockPreparesThenKeepsThenPrunes() {
+        var main = unlockedMain({chatProfileGeneration: 4})
+        compare(main.chatGeneration, 5)
+        var commands = storageCommands(main)
+        compare(commands, [
+            "--vault status",
+            webData("prepare", " --generation 5 --sites claude"),
+            webData("remove", " --keep 5"),
+            webData("prune", " --generation 5 --known claude,chatgpt,grok,gemini,copilot,mscopilot,local")
+        ])
+        // The prepared generation is never 4 (the old shared folder).
+        verify(commands.every(function (command) { return command.indexOf("--generation 4") < 0 }))
+        // Lock and unlock again: the same sequence once more.
+        main.chatStorageRequest("lock")
+        tryVerify(function () { return lastStorageCommand(main) === "--vault lock" }, 3000)
+        answerStorage(main, testCase.okReply)
+        expectStorage(main, "--vault status", JSON.stringify({ok: true, state: "locked", wallet: "off"}))
+        verify(!main.chatStorageReady)
+        compare(main.chatReadySites, [])
+        main.chatStorageRequest("unlock")
+        expectStorage(main, "--vault unlock")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        expectStorage(main, webData("prepare", " --generation 5 --sites claude"))
+        expectStorage(main, webData("remove", " --keep 5"))
+        expectStorage(main, webData("prune", " --generation 5 --known " + builtIns.join(",")))
+        compare(main.chatReadySites, ["claude"])
+    }
+
+    // A site shown later gets its folder then; split view needs both.
+    function test_prepareFollowsTheShownSites() {
+        var main = unlockedMain()
+        var generation = main.chatGeneration
+        main.chatSiteId = "gemini"
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites gemini"))
+        compare(main.chatReadySites, ["claude", "gemini"])
+        // Back to a prepared site: nothing runs.
+        var count = storageCommands(main).length
+        main.chatSiteId = "claude"
+        wait(20)
+        compare(storageCommands(main).length, count)
+        // Split view on chatgpt next to claude: only chatgpt is new.
+        main.chatSiteIdB = "chatgpt"
+        main.setChatSplit(true)
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude,chatgpt"))
+        compare(main.chatReadySites, ["claude", "gemini", "chatgpt"])
+        // No more keep or prune after these.
+        compare(storageCommands(main).filter(function (command) {
+            return command.indexOf("--web-data prune") >= 0 || command.indexOf("--web-data remove ") >= 0
+        }).length, 2)
+        // Ollama never gets a folder.
+        main.chatSiteId = "ollama"
+        wait(20)
+        verify(storageCommands(main).every(function (command) { return command.indexOf("ollama") < 0 }))
+    }
+
+    // Memory mode never prepares, keeps or prunes.
+    function test_memoryModeRunsNoWebData() {
+        var main = loadMain({})
+        main.chatStorageRequest("open")
+        main.chatSiteId = "gemini"
+        main.chatClearSite("gemini")
+        wait(50)
+        compare(storageCommands(main), ["--vault status"])
+        compare(main.chatReadySites, [])
+    }
+
+    property var chatFull: null
+    property var chatOpened: null
+
+    function chatPopup(main) {
+        var full = createTemporaryObject(main.fullRepresentation, main, {width: 900, height: 800})
+        verify(full, "the real popup")
+        testCase.chatFull = full
+        var views = allNamed(full, "chatView")
+        compare(views.length, 1, "the real ChatView")
+        var chat = views[0]
+        chat.webSource = testCase.chatWebStub
+        main.popupTab = "chat"
+        main.expanded = true
+        tryVerify(function () { return chat.started }, 3000)
+        return chat
+    }
+
+    // Encrypted: the site's views and profile go, then the wait, then only
+    // its folder is deleted, and made again for the site still shown.
+    function test_clearSiteWithSavedSignIns() {
+        var main = unlockedMain({}, true)
+        var generation = main.chatGeneration
+        var chat = testCase.chatOpened
+        tryVerify(function () { return chat.persistentActive }, 3000)
+        compare(chat.web.preparedSites, ["claude"])
+        compare(chat.web.runtimeDir !== "", true)
+        compare(chat.web.storageApplet, Plasmoid.id)
+        compare(chat.web.storageGeneration, generation)
+        // The toolbar names the site of the pane in use.
+        var button = allNamed(testCase.chatFull, "clearSiteButton")
+        compare(button.length, 1)
+        verify(chat.canClearSite)
+        verify(button[0].visible)
+        compare(button[0].text, "Clear Claude data…")
+        button[0].clicked()
+        compare(chat.confirmingClearSite, "claude")
+        var text = allNamed(chat, "clearSiteText")[0]
+        compare(text.textFormat, Text.PlainText)
+        compare(text.text, "Clear Claude data? This signs you out of this site and deletes its saved sign-in. Other sites stay signed in.")
+        var count = storageCommands(main).length
+        allNamed(chat, "clearSiteConfirm")[0].clicked()
+        compare(chat.web.clearedSites, ["claude"])
+        compare(chat.confirmingClearSite, "")
+        compare(main.chatReadySites, [], "claude's folder no longer counts")
+        compare(chat.web.preparedSites, [])
+        // Nothing is deleted before the wait (the profile closes its files).
+        compare(storageCommands(main).length, count)
+        compare(main.chatOp, "wait")
+        compare(main.chatProfileCloseWait, 1000)
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"))
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
+        compare(main.chatReadySites, ["claude"])
+        compare(chat.web.preparedSites, ["claude"])
+        // Only that one folder: no remove of the generation, no prune.
+        var after = storageCommands(main).slice(count)
+        compare(after.length, 2)
+    }
+
+    // A failed delete keeps the site closed (never re-prepared with its old
+    // sign-in) and says so; the next unlock tries again.
+    function test_clearSiteFailureKeepsTheSiteClosed() {
+        var main = unlockedMain()
+        var generation = main.chatGeneration
+        main.chatClearSite("claude")
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"),
+                      JSON.stringify({ok: false, error: "os-error"}))
+        wait(50)
+        compare(main.chatStorageNotice, "site-remove-failed")
+        compare(main.chatReadySites, [])
+        verify(storageCommands(main).every(function (command, index, all) {
+            return index < all.length - 1 || command.indexOf("--sites claude") < 0
+        }))
+        compare(main.chatOp, "")
+        // Lock and unlock: prepare leaves claude out, then the delete again.
+        main.chatStorageRequest("lock")
+        tryVerify(function () { return lastStorageCommand(main) === "--vault lock" }, 3000)
+        answerStorage(main, testCase.okReply)
+        expectStorage(main, "--vault status", JSON.stringify({ok: true, state: "locked", wallet: "off"}))
+        main.chatStorageRequest("unlock")
+        expectStorage(main, "--vault unlock")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        expectStorage(main, webData("prepare", " --generation " + generation))
+        expectStorage(main, webData("remove", " --keep " + generation))
+        expectStorage(main, webData("prune", " --generation " + generation + " --known " + builtIns.join(",")))
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"))
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
+        compare(main.chatReadySites, ["claude"])
+    }
+
+    // Memory mode: only the site's views and profile go; no helper.
+    function test_clearSiteInMemoryMode() {
+        var main = loadMain({})
+        var chat = chatPopup(main)
+        tryVerify(function () { return chat.web !== null }, 3000)
+        compare(chat.web.staySignedIn, false)
+        verify(chat.canClearSite)
+        chat.askClearSite()
+        var text = allNamed(chat, "clearSiteText")[0]
+        compare(text.text, "Clear Claude data? This signs you out of this site. Other sites stay signed in.")
+        allNamed(chat, "clearSiteConfirm")[0].clicked()
+        compare(chat.web.clearedSites, ["claude"])
+        wait(50)
+        // Only the Chat tab's own start (status); no web data at all.
+        compare(storageCommands(main), ["--vault status"])
+        // Cancel clears nothing.
+        chat.askClearSite()
+        allNamed(chat, "clearSiteCancel")[0].clicked()
+        compare(chat.web.clearedSites, ["claude"])
+    }
+
+    // Encrypted but not open (private session, locked): not offered.
+    function test_clearSiteNotOfferedWhileLocked() {
+        var main = loadMain({chatSignInStorage: "encrypted"})
+        var chat = chatPopup(main)
+        expectStorage(main, "--vault status", JSON.stringify({ok: true, state: "locked", wallet: "off"}))
+        main.chatStorageRequest("private")
+        tryVerify(function () { return chat.web !== null }, 3000)
+        compare(chat.web.staySignedIn, false)
+        verify(!chat.canClearSite)
+        verify(!allNamed(testCase.chatFull, "clearSiteButton")[0].visible)
+        chat.askClearSite()
+        compare(chat.confirmingClearSite, "")
+        chat.confirmingClearSite = "claude"
+        chat.clearSiteData()
+        compare(chat.web.clearedSites, [])
+        main.chatClearSite("claude")
+        wait(50)
+        compare(storageCommands(main), ["--vault status"])
+    }
+
+    // The one-time notice: plain text, exact words, gone for good after
+    // Got it.
+    function test_profileLayoutNoticeAndGotIt() {
+        var main = loadMain({chatSignInStorage: "encrypted"})
+        compare(Plasmoid.configuration.chatProfileLayout, 1)
+        var chat = chatPopup(main)
+        var notice = allNamed(chat, "layoutNotice")[0]
+        verify(notice.visible)
+        var text = allNamed(chat, "layoutNoticeText")[0]
+        compare(text.textFormat, Text.PlainText)
+        compare(text.text, "Each chat site now keeps its own sign-in, so one site can't use another's. "
+                + "Sign in once more to each site. Signing in to Google in Gemini no longer signs you in on "
+                + "other sites, and 'Sign in with Google' on Claude, ChatGPT, Grok or Copilot asks for your "
+                + "Google account separately.")
+        allNamed(chat, "layoutNoticeDone")[0].clicked()
+        compare(Plasmoid.configuration.chatProfileLayout, 2)
+        verify(!notice.visible)
+        // Got it again changes nothing.
+        main.chatStorageRequest("layout-notice-done")
+        compare(Plasmoid.configuration.chatProfileLayout, 2)
+    }
+
+    function test_profileLayoutNoticeOnlyWithSavedSignIns() {
+        var main = loadMain({chatProfileLayout: 1})
+        var chat = chatPopup(main)
+        verify(!allNamed(chat, "layoutNotice")[0].visible)
+        // Got it in memory mode never writes 1 → 2 behind its back either way.
+        compare(Plasmoid.configuration.chatProfileLayout, 1)
+    }
+
+    // Every settings page keeps chatProfileLayout in step, so Apply never
+    // writes an old value back.
+    function test_pagesKeepTheProfileLayoutInStep_data() {
+        return [{tag: "usage", file: testCase.usagePageFile}, {tag: "general", file: testCase.generalPageFile},
+                {tag: "chat", file: testCase.chatPageFile}]
+    }
+
+    function test_pagesKeepTheProfileLayoutInStep(data) {
+        var page = load(data.file, {chatProfileLayout: 1})
+        verify("cfg_chatProfileLayout" in page)
+        compare(page.cfg_chatProfileLayoutDefault, 0)
+        page.cfg_chatProfileLayout = 1
+        Plasmoid.configuration.chatProfileLayout = 2
+        compare(page.cfg_chatProfileLayout, 2)
     }
 }

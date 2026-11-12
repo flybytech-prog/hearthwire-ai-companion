@@ -158,8 +158,9 @@ PlasmoidItem {
     property var alertState: ({})
 
     // Stay signed in. Runtime state only; nothing here reaches the config
-    // except chatProfileGeneration. The helper reports short codes and the
-    // profile path is derived here, never received or shown.
+    // except chatProfileGeneration and chatProfileLayout. The helper reports
+    // short codes and the profile paths are derived here, never received or
+    // shown.
     readonly property string chatStorageMode:
         ChatStorage.normalizeMode(Plasmoid.configuration.chatSignInStorage)
     readonly property int chatConfiguredGeneration:
@@ -171,9 +172,15 @@ PlasmoidItem {
     readonly property string chatProfileName:
         ChatStorage.profileName(root.chatAppletId, root.chatGeneration)
     // Same rule as the helper: $XDG_RUNTIME_DIR, else nothing (memory only).
+    readonly property string chatRuntimeDir: StandardPaths.writableLocation(StandardPaths.RuntimeLocation)
+    // The generation folder; each site's profile is a site-<id> folder in it.
     readonly property string chatProfilePath: ChatStorage.profilePath(
-        StandardPaths.writableLocation(StandardPaths.RuntimeLocation),
-        root.chatAppletId, root.chatGeneration)
+        root.chatRuntimeDir, root.chatAppletId, root.chatGeneration)
+    // 0: the old shared profile (or a new install), 1: moved to one profile
+    // per site, the Chat tab's notice still to show, 2: done. Anything else
+    // counts as 0 and moves once more (harmless: a new, empty generation).
+    readonly property int chatProfileLayout: Plasmoid.configuration.chatProfileLayout === 1
+        || Plasmoid.configuration.chatProfileLayout === 2 ? Plasmoid.configuration.chatProfileLayout : 0
     // "", absent, locked, unlocked, unavailable, error
     property string chatVaultState: ""
     property var chatVaultMissing: []
@@ -189,6 +196,34 @@ PlasmoidItem {
         ChatStorage.effectiveUnlockMethod(root.chatUnlockSetting, root.chatVaultWallet)
     // Generation the helper prepared inside the verified mount; -1 = none.
     property int chatPreparedGeneration: -1
+    // Sites whose folder that prepare (and later ones) created; they count
+    // only while chatPreparedGeneration is the current generation.
+    property var chatPreparedSites: []
+    // The sites the shown panes need a folder for (split view: both).
+    readonly property var chatNeededSites: {
+        var wanted = [root.chatWebSiteId].concat(root.chatSplit ? [root.chatSiteIdB] : [])
+        var ids = []
+        for (var index = 0; index < wanted.length; index++) {
+            var id = wanted[index]
+            if (ChatStorage.isSiteId(id) && root.chatWebSiteIds.indexOf(id) >= 0 && ids.indexOf(id) < 0)
+                ids.push(id)
+        }
+        return ids
+    }
+    // What the Chat tab may open a saved profile for.
+    readonly property var chatReadySites: root.chatStorageReady ? root.chatPreparedSites : []
+    // Every site id whose folder prune keeps: the built-ins (added sites
+    // join in a later version).
+    readonly property var chatKnownSites: ChatStorage.BUILTIN_SITE_IDS
+    // Clear <site> data with saved sign-ins: [{site, generation}] still to
+    // delete. Such a site's folder is never prepared again before that.
+    property var chatSiteRemovals: []
+    // Sites the running prepare creates.
+    property var chatOpSites: []
+    // How long a destroyed profile gets to write and close its files before
+    // the folder is unmounted or a site's folder deleted (ms). Measured:
+    // done within 0.2 s for one profile; the lab measures several.
+    readonly property int chatProfileCloseWait: 1000
     // The user locked or cleared: don't reopen saved sign-ins by itself.
     property bool chatVaultHold: false
     property bool chatPrivateSession: false
@@ -222,7 +257,7 @@ PlasmoidItem {
         state: root.chatVaultState,
         // Quiet re-checks while the saved profile is open don't show a card.
         // Wallet steps keep their own name, for their own busy text.
-        op: root.chatOp === "keep" ? ""
+        op: root.chatOp === "keep" || root.chatOp === "prune" || root.chatOp === "remove-site" ? ""
             : root.chatOp === "unlock-wallet" || root.chatOp === "auto-unlock" || root.chatOp === "add-key"
             ? root.chatOp : ChatStorage.stepOperation(root.chatOp),
         error: root.chatVaultError,
@@ -723,10 +758,18 @@ PlasmoidItem {
         switch (step) {
         case "prepare":
             return ChatStorage.webDataCommand("prepare", "encrypted",
-                root.chatAppletId, root.chatGeneration, null, run)
+                root.chatAppletId, root.chatGeneration, null, run, root.chatOpSites)
         case "keep":
             return ChatStorage.webDataCommand("remove", "encrypted",
                 root.chatAppletId, null, root.chatGeneration, run)
+        case "prune":
+            return ChatStorage.webDataCommand("prune", "encrypted",
+                root.chatAppletId, root.chatGeneration, null, run, root.chatKnownSites)
+        case "remove-site":
+            var removal = root.chatSiteRemovals.length > 0 ? root.chatSiteRemovals[0] : null
+            return removal && removal.generation === root.chatGeneration
+                ? ChatStorage.webDataCommand("remove-site", "encrypted",
+                    root.chatAppletId, root.chatGeneration, null, run, removal.site) : ""
         case "remove":
         case "leave-remove":
             return ChatStorage.webDataCommand("remove", "encrypted",
@@ -763,6 +806,11 @@ PlasmoidItem {
             return
         }
         root.chatOpRun = ChatStorage.nextRun(root.chatOpRun)
+        // The sites shown now, but never one whose folder still waits to be
+        // deleted (Clear <site> data).
+        root.chatOpSites = step === "prepare" ? root.chatNeededSites.filter(function (id) {
+            return !root.chatRemovalPending(id)
+        }) : []
         var command = root.chatCommand(step, root.chatOpRun)
         if (command === "") {
             root.chatFinish(step, {ok: false, error: "failed"})
@@ -772,6 +820,38 @@ PlasmoidItem {
         root.chatOpGeneration = root.chatGeneration
         root.chatOpSource = command
         storageSource.connectSource(command)
+    }
+
+    function chatRemovalPending(siteId) {
+        return root.chatSiteRemovals.some(function (removal) {
+            return removal.site === siteId && removal.generation === root.chatGeneration
+        })
+    }
+
+    // A shown site has no folder yet while the generation is prepared:
+    // prepare again (once at a time; a running one checks when it ends).
+    function chatPrepareMissing() {
+        if (!root.chatStorageReady || !root.chatWantsSaved() || root.chatOp === "prepare"
+                || root.chatQueue.indexOf("prepare") >= 0)
+            return
+        var missing = root.chatNeededSites.some(function (id) {
+            return root.chatPreparedSites.indexOf(id) < 0 && !root.chatRemovalPending(id)
+        })
+        if (missing)
+            root.chatEnqueue(["prepare"])
+    }
+
+    // Clear <site> data with saved sign-ins: ChatView already dropped the
+    // site's views and profile. Its folder no longer counts as prepared;
+    // after the wait it is deleted, then made again if the site is shown.
+    function chatClearSite(siteId) {
+        if (!ChatStorage.isSiteId(siteId) || !root.chatStorageReady)
+            return
+        root.chatPreparedSites = root.chatPreparedSites.filter(function (id) { return id !== siteId })
+        if (!root.chatRemovalPending(siteId))
+            root.chatSiteRemovals = root.chatSiteRemovals.concat([{site: siteId, generation: root.chatGeneration}])
+        root.chatEnqueue(["wait", "remove-site"])
+        root.chatPrepareMissing()
     }
 
     function chatWantsSaved() {
@@ -806,12 +886,24 @@ PlasmoidItem {
             break
         case "prepare":
             if (reply.ok && root.chatOpGeneration === root.chatGeneration && root.chatWantsSaved()) {
+                // The first prepare of this generation since it was unlocked.
+                var first = root.chatPreparedGeneration !== root.chatGeneration
+                var created = root.chatOpSites.filter(function (id) { return !root.chatRemovalPending(id) })
                 root.chatVaultError = ""
                 root.chatPreparedGeneration = root.chatGeneration
-                // Old generations of this widget (e.g. after Clear) go away.
-                root.chatEnqueue(["keep"])
-                // Another widget may lock the folder while the view opens it.
-                chatRecheckTimer.restart()
+                root.chatPreparedSites = first ? created : root.chatPreparedSites.concat(
+                    created.filter(function (id) { return root.chatPreparedSites.indexOf(id) < 0 }))
+                if (first) {
+                    // Old generations of this widget (e.g. after Clear, or the
+                    // old shared profile after the update) go away, then
+                    // everything in this generation but the known sites'
+                    // folders; a site cleared earlier still owes its delete.
+                    root.chatEnqueue(["keep", "prune"])
+                    root.chatSiteRemovals.forEach(function () { root.chatEnqueue(["remove-site"]) })
+                    // Another widget may lock the folder while the view opens it.
+                    chatRecheckTimer.restart()
+                }
+                root.chatPrepareMissing()
             } else if (!reply.ok) {
                 root.chatPreparedGeneration = -1
                 root.chatVaultError = reply.error === "not-verified" || reply.error === "stale-mount"
@@ -820,6 +912,16 @@ PlasmoidItem {
             }
             break
         case "keep":
+        case "prune":
+            break
+        case "remove-site":
+            // Kept on failure: the site stays closed until a later unlock's
+            // delete works.
+            if (reply.ok && root.chatSiteRemovals.length > 0)
+                root.chatSiteRemovals = root.chatSiteRemovals.slice(1)
+            else if (!reply.ok)
+                root.chatStorageNotice = "site-remove-failed"
+            root.chatPrepareMissing()
             break
         case "remove":
             if (!reply.ok && root.chatStorageMode === "encrypted")
@@ -967,6 +1069,8 @@ PlasmoidItem {
         case "clear-saved":
             root.chatVaultHold = true
             root.chatPreparedGeneration = -1
+            // remove deletes every generation, these sites' folders too.
+            root.chatSiteRemovals = []
             root.chatSetGeneration(ChatStorage.nextGeneration(root.chatGeneration))
             root.chatVaultError = "cleared"
             root.chatEnqueue(["wait", "remove", "lock"])
@@ -980,6 +1084,10 @@ PlasmoidItem {
         case "dismiss-notice":
             root.chatStorageNotice = ""
             break
+        case "layout-notice-done":
+            if (root.chatProfileLayout === 1)
+                Plasmoid.configuration.chatProfileLayout = 2
+            break
         }
     }
 
@@ -987,6 +1095,19 @@ PlasmoidItem {
         root.chatGeneration = generation
         if (Plasmoid.configuration.chatProfileGeneration !== generation)
             Plasmoid.configuration.chatProfileGeneration = generation
+    }
+
+    // Once, from the old shared profile to one profile per site: a new
+    // generation starts empty, so nothing of the shared profile is opened
+    // again, and the keep step after the next unlock's prepare deletes its
+    // folder. setupDone: initialSetupComplete as it was before this start.
+    // Only saved sign-ins (Encrypted) on a widget set up earlier get the
+    // notice.
+    function chatMigrateLayout(setupDone) {
+        if (root.chatProfileLayout !== 0)
+            return
+        root.chatSetGeneration(ChatStorage.nextGeneration(root.chatGeneration))
+        Plasmoid.configuration.chatProfileLayout = setupDone === true && root.chatStorageMode === "encrypted" ? 1 : 2
     }
 
     function chatModeChanged() {
@@ -1001,6 +1122,7 @@ PlasmoidItem {
         root.chatAutoLocking = false
         root.chatVaultError = ""
         root.chatPreparedGeneration = -1
+        root.chatSiteRemovals = []
         chatRecheckTimer.stop()
         root.chatQueue = ChatStorage.queueForMode(root.chatQueue, root.chatStorageMode)
         if (root.chatStorageMode === "encrypted") {
@@ -1423,7 +1545,7 @@ PlasmoidItem {
 
     Timer {
         id: chatWaitTimer
-        interval: 1000
+        interval: root.chatProfileCloseWait
         repeat: false
         onTriggered: {
             root.chatOp = ""
@@ -1503,6 +1625,8 @@ PlasmoidItem {
     }
 
     Component.onCompleted: {
+        // Read before the first-run write below.
+        var setupDone = Plasmoid.configuration.initialSetupComplete === true
         if (Plasmoid.configuration.refreshInterval !== root.refreshInterval)
             Plasmoid.configuration.refreshInterval = root.refreshInterval
         // A fresh widget has nothing to migrate.
@@ -1517,6 +1641,7 @@ PlasmoidItem {
         root.syncChatSite()
         root.popupTab = SettingsLogic.normalizeDefaultTab(Plasmoid.configuration.popupDefaultTab)
         root.chatGeneration = root.chatConfiguredGeneration
+        root.chatMigrateLayout(setupDone)
         root.chatModeSeen = root.chatStorageMode
         root.chatOpRun = ChatStorage.firstRun(Date.now(), Math.random())
         root.libraryRun = ChatStorage.firstRun(Date.now(), Math.random())
@@ -1551,6 +1676,7 @@ PlasmoidItem {
     }
 
     onChatStorageModeChanged: root.chatModeChanged()
+    onChatNeededSitesChanged: root.chatPrepareMissing()
     // A settings dialog opened earlier may write back an old generation.
     onChatConfiguredGenerationChanged: {
         if (root.chatGeneration >= 0 && root.chatConfiguredGeneration !== root.chatGeneration)

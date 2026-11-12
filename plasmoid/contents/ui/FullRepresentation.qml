@@ -497,6 +497,17 @@ PlasmaExtras.Representation {
                     QQC2.ToolTip.text: i18n("Lock saved sign-ins")
                     QQC2.ToolTip.visible: hovered
                 }
+                // Only the site of the pane in use; asked inline first.
+                PlasmaComponents.ToolButton {
+                    objectName: "clearSiteButton"
+                    icon.name: "edit-clear"
+                    display: QQC2.AbstractButton.IconOnly
+                    visible: !full.onOllama && chatView.canClearSite
+                    text: i18n("Clear %1 data…", chatView.zoomSiteName)
+                    onClicked: chatView.askClearSite()
+                    QQC2.ToolTip.text: text
+                    QQC2.ToolTip.visible: hovered
+                }
                 PlasmaComponents.ToolButton {
                     icon.name: "edit-clear-history"
                     display: QQC2.AbstractButton.IconOnly
@@ -560,6 +571,7 @@ PlasmaExtras.Representation {
 
                 ChatView {
                     id: chatView
+                    objectName: "chatView"
                     siteIds: root.chatWebSiteIds
                     siteId: root.chatWebSiteId
                     customUrls: root.chatCustomUrls
@@ -571,6 +583,12 @@ PlasmaExtras.Representation {
                     storageReady: root.chatStorageReady
                     storagePath: root.chatProfilePath
                     profileName: root.chatProfileName
+                    runtimeDir: root.chatRuntimeDir
+                    storageApplet: root.chatAppletId
+                    storageGeneration: root.chatGeneration
+                    preparedSites: root.chatReadySites
+                    profileLayout: root.chatProfileLayout
+                    onSiteDataClearRequested: (siteId) => root.chatClearSite(siteId)
                     card: root.chatCard
                     missingTools: root.chatVaultMissing
                     installDistro: root.installDistro

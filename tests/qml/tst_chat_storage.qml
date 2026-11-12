@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest
+import "../../plasmoid/contents/ui/ChatSites.js" as ChatSites
 import "../../plasmoid/contents/ui/ChatStorage.js" as ChatStorage
 
 TestCase {
@@ -671,5 +672,145 @@ TestCase {
         compare(ChatStorage.walletChoice("passphrase", "off"), { shown: "passphrase", notApplied: false })
         compare(ChatStorage.walletChoice("wallet", "unavailable"), { shown: "passphrase", notApplied: false })
         compare(ChatStorage.walletChoice("wallet", ""), { shown: "passphrase", notApplied: false })
+    }
+
+    // --- one profile per site (policy 3c) ----------------------------------
+
+    readonly property string run: "/run/user/1000"
+    readonly property var validIds: ChatStorage.BUILTIN_SITE_IDS.concat(
+        ["user-00000000", "user-0123abcd", "user-ffffffff", "user-deadbeef"])
+    readonly property var invalidIds: [
+        "", "ollama", "Claude", "claude ", " claude", "claude,chatgpt", "claude2", "local/..",
+        "user-", "user-1234567", "user-123456789", "user-ABCDEF12", "user-0123abcg", "user_01234567",
+        "xuser-01234567", "user-01234567\n", "site-claude", "../claude", "toString", "__proto__",
+        "constructor", null, undefined, 7, ["claude"], {id: "claude"}
+    ]
+
+    // The grammar is exactly the built-in web sites of ChatSites.js
+    // (Ollama is not one) plus user- and 8 lowercase hex digits.
+    function test_siteIdGrammar() {
+        compare(ChatStorage.BUILTIN_SITE_IDS, ChatSites.siteIds())
+        compare(ChatStorage.BUILTIN_SITE_IDS, ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot", "local"])
+        validIds.forEach(function (id) { verify(ChatStorage.isSiteId(id), String(id)) })
+        invalidIds.forEach(function (id) { verify(!ChatStorage.isSiteId(id), String(id)) })
+    }
+
+    function test_siteProfileNamesAndPaths() {
+        compare(ChatStorage.siteProfileName(7, 3, "claude"), "applet-7-g3-claude")
+        compare(ChatStorage.siteProfilePath("file:///run/user/1000", 7, 3, "claude"),
+                "/run/user/1000/hearthwire/vault/web/applet-7-g3/site-claude")
+        compare(ChatStorage.siteProfileName(7, 3, "user-0123abcd"), "applet-7-g3-user-0123abcd")
+        compare(ChatStorage.siteProfilePath(run, 7, 3, "user-0123abcd"),
+                "/run/user/1000/hearthwire/vault/web/applet-7-g3/site-user-0123abcd")
+        // Bad parts other than the id give "" too.
+        compare(ChatStorage.siteProfileName(-1, 3, "claude"), "")
+        compare(ChatStorage.siteProfileName(7, "3", "claude"), "")
+        compare(ChatStorage.siteProfilePath("", 7, 3, "claude"), "")
+        compare(ChatStorage.siteProfilePath("run/user", 7, 3, "claude"), "")
+        compare(ChatStorage.siteProfilePath(run, 7, -1, "claude"), "")
+    }
+
+    // Every pair of distinct valid ids: different names and paths. None
+    // is the old shared name or the container; every path ends in
+    // /site-<id>, every name in -<id>.
+    function test_siteProfilesNeverShareStorage_data() {
+        var rows = []
+        for (var a = 0; a < validIds.length; a++) {
+            for (var b = 0; b < validIds.length; b++) {
+                if (a !== b)
+                    rows.push({tag: validIds[a] + "/" + validIds[b], first: validIds[a], second: validIds[b]})
+            }
+        }
+        return rows
+    }
+
+    function test_siteProfilesNeverShareStorage(data) {
+        var shared = ChatStorage.profileName(7, 3)
+        var container = ChatStorage.profilePath(run, 7, 3)
+        var names = [data.first, data.second].map(function (id) { return ChatStorage.siteProfileName(7, 3, id) })
+        var paths = [data.first, data.second].map(function (id) { return ChatStorage.siteProfilePath(run, 7, 3, id) })
+        verify(names[0] !== names[1], names.join(" = "))
+        verify(paths[0] !== paths[1], paths.join(" = "))
+        ;[data.first, data.second].forEach(function (id, index) {
+            verify(names[index] !== "" && paths[index] !== "")
+            verify(names[index] !== shared, names[index])
+            verify(paths[index] !== container, paths[index])
+            verify(paths[index] !== ChatStorage.profilePath(run, 7, 3) + "/", paths[index])
+            compare(paths[index].slice(-("/site-" + id).length), "/site-" + id)
+            compare(paths[index], container + "/site-" + id)
+            compare(names[index].slice(-("-" + id).length), "-" + id)
+            // One folder level below the container, nothing else.
+            compare(paths[index].split("/").length, container.split("/").length + 1)
+        })
+        // Other applets and generations never meet either.
+        verify(ChatStorage.siteProfilePath(run, 7, 4, data.first) !== paths[0])
+        verify(ChatStorage.siteProfilePath(run, 8, 3, data.first) !== paths[0])
+        verify(ChatStorage.siteProfileName(7, 4, data.first) !== names[0])
+    }
+
+    function test_invalidSiteIdsHaveNoProfile_data() {
+        return invalidIds.map(function (id, index) { return {tag: index + ": " + JSON.stringify(id), id: id} })
+    }
+
+    function test_invalidSiteIdsHaveNoProfile(data) {
+        compare(ChatStorage.siteProfileName(7, 3, data.id), "")
+        compare(ChatStorage.siteProfilePath(run, 7, 3, data.id), "")
+        compare(ChatStorage.webDataCommand("remove-site", "encrypted", 7, 3, null, 1, data.id), "")
+        compare(ChatStorage.webDataCommand("prepare", "encrypted", 7, 3, null, 1, ["claude", data.id]), "")
+        compare(ChatStorage.webDataCommand("prune", "encrypted", 7, 3, null, 1, [data.id]), "")
+    }
+
+    readonly property string prefix: "env HEARTHWIRE_RUN=9 HEARTHWIRE_APPLET=5 python3 -P -m hearthwire --web-data "
+
+    function test_siteWebDataCommands() {
+        compare(ChatStorage.webDataCommand("prepare", "encrypted", 5, 2, null, 9, ["claude", "user-0123abcd"]),
+                prefix + "prepare --store encrypted --applet 5 --generation 2 --sites claude,user-0123abcd")
+        // No sites: only the generation folder.
+        compare(ChatStorage.webDataCommand("prepare", "encrypted", 5, 2, null, 9, []),
+                prefix + "prepare --store encrypted --applet 5 --generation 2")
+        compare(ChatStorage.webDataCommand("prune", "encrypted", 5, 2, null, 9, ChatStorage.BUILTIN_SITE_IDS),
+                prefix + "prune --store encrypted --applet 5 --generation 2 "
+                + "--known claude,chatgpt,grok,gemini,copilot,mscopilot,local")
+        compare(ChatStorage.webDataCommand("remove-site", "encrypted", 5, 2, null, 9, "gemini"),
+                prefix + "remove-site --store encrypted --applet 5 --generation 2 --site gemini")
+        var many = []
+        for (var index = 0; index < 207; index++)
+            many.push("user-" + ("0000000" + index.toString(16)).slice(-8))
+        verify(ChatStorage.webDataCommand("prune", "encrypted", 5, 2, null, 9, many) !== "")
+    }
+
+    function test_siteWebDataCommandsRejectAnythingElse() {
+        // prune never runs without a list: it would delete every site.
+        compare(ChatStorage.webDataCommand("prune", "encrypted", 5, 2, null, 9, []), "")
+        compare(ChatStorage.webDataCommand("prune", "encrypted", 5, 2, null, 9), "")
+        compare(ChatStorage.webDataCommand("prune", "encrypted", 5, 2, null, 9, "claude"), "")
+        compare(ChatStorage.webDataCommand("prune", "encrypted", 5, null, null, 9, ["claude"]), "")
+        compare(ChatStorage.webDataCommand("prune", "encrypted", 5, 2, 1, 9, ["claude"]), "")
+        compare(ChatStorage.webDataCommand("prune", "folder", 5, 2, null, 9, ["claude"]), "")
+        // Twice the same id, or too many.
+        compare(ChatStorage.webDataCommand("prepare", "encrypted", 5, 2, null, 9, ["claude", "claude"]), "")
+        compare(ChatStorage.webDataCommand("prune", "encrypted", 5, 2, null, 9, ["local", "local"]), "")
+        var many = []
+        for (var index = 0; index < 208; index++)
+            many.push("user-" + ("0000000" + index.toString(16)).slice(-8))
+        compare(ChatStorage.webDataCommand("prune", "encrypted", 5, 2, null, 9, many), "")
+        compare(ChatStorage.webDataCommand("prepare", "encrypted", 5, 2, null, 9, many), "")
+        compare(ChatStorage.webDataCommand("prepare", "encrypted", 5, 2, null, 9, "claude"), "")
+        // remove-site: exactly one checked id and a generation.
+        compare(ChatStorage.webDataCommand("remove-site", "encrypted", 5, 2, null, 9, ["claude"]), "")
+        compare(ChatStorage.webDataCommand("remove-site", "encrypted", 5, 2, null, 9), "")
+        compare(ChatStorage.webDataCommand("remove-site", "encrypted", 5, null, null, 9, "claude"), "")
+        compare(ChatStorage.webDataCommand("remove-site", "encrypted", 5, 2, null, -1, "claude"), "")
+        // remove takes no sites.
+        compare(ChatStorage.webDataCommand("remove", "encrypted", 5, null, 2, 9, ["claude"]), "")
+    }
+
+    function test_siteStepsOnlyWhileEncrypted() {
+        ["prune", "remove-site"].forEach(function (step) {
+            verify(ChatStorage.dropStep(step, {mode: "memory"}), step)
+            verify(!ChatStorage.dropStep(step, {mode: "encrypted", state: "unlocked"}), step)
+            compare(ChatStorage.queueForMode(["wait", step], "memory"), ["wait"])
+            compare(ChatStorage.stepOperation(step), step)
+        })
     }
 }

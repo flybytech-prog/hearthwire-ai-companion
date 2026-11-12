@@ -263,8 +263,8 @@ TestCase {
     // --- sign-in window title (N5) --------------------------------------------
 
     function test_blankSignInWindowNamesItsOpener() {
-        var web = createTemporaryObject(webComponent, testCase, {})
-        verify(web !== null)
+        // The window needs its opener's profile: the Local page comes first.
+        var web = localView({})
         var title = findChild(web, "overlayTitle")
         verify(title !== null)
         compare(title.textFormat, Text.PlainText)
@@ -385,8 +385,10 @@ TestCase {
         // Side by side: b in the right half.
         verify(b.mapToItem(web, 0, 0).x >= web.width / 2 - 1)
         verify(a.width < web.width && b.width < web.width)
-        // Both pages share the one profile.
+        // The same site in both panes shares that site's one profile.
+        verify(a.profile !== null)
         verify(a.profile === b.profile)
+        verify(a.profile === web.profileFor("local"))
         // Split off: pane b's page is destroyed, a keeps its page.
         web.splitActive = false
         compare(web.currentViewB, null)
@@ -496,5 +498,176 @@ TestCase {
         verify(!web.passkeyNotice)
         // Back to Local before anything loads from the network.
         web.splitActive = false
+    }
+
+    // --- one profile per site -------------------------------------------------
+
+    // Built-ins may not use this computer; .invalid never resolves, so
+    // nothing is loaded from anywhere.
+    readonly property var nowhere: ({ claude: "https://claude.invalid/", chatgpt: "https://chatgpt.invalid/" })
+
+    function twoSites() {
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        web.customUrls = testCase.nowhere
+        web.siteIds = ["claude", "chatgpt", "gemini"]
+        web.siteId = "claude"
+        verify(web.currentView !== null)
+        web.siteId = "chatgpt"
+        verify(web.currentView !== null)
+        return web
+    }
+
+    function test_eachSiteGetsItsOwnProfile() {
+        var web = twoSites()
+        var claude = web.viewFor("claude", "a")
+        var chatgpt = web.viewFor("chatgpt", "a")
+        verify(claude !== null && chatgpt !== null)
+        var first = web.profileFor("claude")
+        var second = web.profileFor("chatgpt")
+        verify(first !== null && second !== null)
+        verify(first !== second, "two sites, two profiles")
+        compare(claude.profile, first)
+        compare(chatgpt.profile, second)
+        // Memory mode: each one off the record, with no storage name.
+        verify(first.offTheRecord && second.offTheRecord)
+        compare(first.storageName, "")
+        // Only the sites opened have one; never Ollama or an unknown id.
+        compare(web.profileFor("gemini"), null)
+        compare(web.profileFor("ollama"), null)
+        compare(web.profileFor("toString"), null)
+        compare(web.profileFor(""), null)
+        compare(Object.keys(web.profiles).sort(), ["chatgpt", "claude"])
+        // Switching back keeps the site's view and profile.
+        web.siteId = "claude"
+        compare(web.currentView, claude)
+        compare(web.profileFor("claude"), first)
+    }
+
+    function test_noProfileForOllamaOrUnknownIds() {
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        compare(web.ensureProfile("ollama"), null)
+        compare(web.ensureProfile("user-1234567"), null)
+        compare(web.ensureProfile("claude2"), null)
+        compare(web.ensureProfile(undefined), null)
+        compare(Object.keys(web.profiles), [])
+        // A site without a profile gets no view either.
+        web.siteIds = ["ollama"]
+        web.siteId = "ollama"
+        compare(web.currentView, null)
+    }
+
+    // Google sign-in's user agent is per profile: one site's switch leaves
+    // the others alone.
+    function test_userAgentSwitchStaysWithItsProfile() {
+        var web = twoSites()
+        var first = web.profileFor("claude")
+        var second = web.profileFor("chatgpt")
+        verify(web.baseUserAgent !== "")
+        compare(first.httpUserAgent, web.baseUserAgent)
+        compare(second.httpUserAgent, web.baseUserAgent)
+        // Each profile's choice looks only at its own site's pages.
+        var claudeUrl = web.viewFor("claude", "a").url.toString()
+        compare(web.viewUrls("claude", null, ""), [claudeUrl])
+        compare(web.viewUrls("chatgpt", null, ""), [web.viewFor("chatgpt", "a").url.toString()])
+        compare(web.viewUrls("claude", web.viewFor("claude", "a"), "https://accounts.google.com/x"),
+                ["https://accounts.google.com/x"])
+        compare(web.viewUrls("gemini", null, ""), [])
+        web.applyUserAgent(first, "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0")
+        verify(first.httpUserAgent !== web.baseUserAgent)
+        compare(second.httpUserAgent, web.baseUserAgent)
+        // No page of claude is on Google sign-in: the sync puts it back.
+        tryVerify(function () {
+            web.syncUserAgent()
+            return first.httpUserAgent === web.baseUserAgent
+        }, 5000)
+        compare(second.httpUserAgent, web.baseUserAgent)
+    }
+
+    // The sign-in window uses its opener's profile; a site without one
+    // opens nothing.
+    function test_signInWindowUsesItsOpenersProfile() {
+        var web = twoSites()
+        web.openOverlay({ openIn: function (view) {} }, "claude", "https://claude.invalid/")
+        verify(web.overlayOpen)
+        compare(web.overlayView.profile, web.profileFor("claude"))
+        verify(web.overlayView.profile !== web.profileFor("chatgpt"))
+        web.closeOverlay()
+        web.openOverlay({ openIn: function (view) {} }, "gemini", "https://gemini.google.com/")
+        verify(!web.overlayOpen)
+        compare(web.profileFor("gemini"), null)
+    }
+
+    // Clear <site> data: only that site's views and profile go; the
+    // profile only once its views are gone, and a new one comes after.
+    function test_clearSiteDropsOnlyThatSite() {
+        var web = twoSites()
+        var claude = web.profileFor("claude")
+        var chatgpt = web.profileFor("chatgpt")
+        web.openOverlay({ openIn: function (view) {} }, "chatgpt", "https://chatgpt.invalid/")
+        verify(web.overlayOpen)
+        web.clearSite("chatgpt")
+        compare(web.viewFor("chatgpt", "a"), null)
+        verify(!web.overlayOpen)
+        compare(web.profileFor("chatgpt"), null)
+        // Not yet: a new one waits until the old one is destroyed.
+        compare(web.ensureProfile("chatgpt"), null)
+        compare(web.profileFor("claude"), claude)
+        verify(web.viewFor("claude", "a") !== null)
+        // chatgpt is shown: it comes back with a new, empty profile.
+        tryVerify(function () { return web.currentView !== null }, 3000)
+        verify(web.profileFor("chatgpt") !== null)
+        verify(web.profileFor("chatgpt") !== chatgpt)
+        compare(web.currentView.profile, web.profileFor("chatgpt"))
+        compare(web.profileFor("claude"), claude)
+        // Odd ids change nothing.
+        web.clearSite("ollama")
+        web.clearSite("")
+        compare(web.profileFor("claude"), claude)
+    }
+
+    // Saved sign-ins: a site's view waits for its prepared folder, never
+    // opens privately; the name and path come only from ChatStorage with
+    // the site's own id. (No saved profile is created here: that is
+    // checked in the lab.)
+    function test_savedProfileWaitsForThePreparedFolder() {
+        var web = createTemporaryObject(webComponent, testCase, {
+            staySignedIn: true,
+            runtimeDir: "/nonexistent/run",
+            storageApplet: 3,
+            storageGeneration: 4
+        })
+        verify(web !== null)
+        web.customUrls = testCase.nowhere
+        web.siteIds = ["claude", "chatgpt"]
+        web.siteId = "claude"
+        compare(web.currentView, null)
+        compare(web.profileFor("claude"), null)
+        compare(web.siteProfileSpec("claude"), null)
+        verify(web.siteWaits("claude", "a"))
+        var wait = findChild(web, "siteWaitA")
+        verify(wait !== null && wait.visible)
+        // Nothing shown, then prepared: only the spec is looked at.
+        web.siteIds = []
+        web.preparedSites = ["claude", "ollama"]
+        compare(web.siteProfileSpec("claude"), {
+            saved: true,
+            sitePath: "/nonexistent/run/hearthwire/vault/web/applet-3-g4/site-claude",
+            siteName: "applet-3-g4-claude"
+        })
+        compare(web.siteProfileSpec("chatgpt"), null)
+        compare(web.siteProfileSpec("ollama"), null)
+        compare(Object.keys(web.profiles), [])
+    }
+
+    function test_memoryProfileSpecIsPrivate() {
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        web.preparedSites = ["claude"]
+        compare(web.siteProfileSpec("claude"), { saved: false, sitePath: "", siteName: "" })
+        compare(web.siteProfileSpec("gemini"), { saved: false, sitePath: "", siteName: "" })
+        compare(web.siteProfileSpec("ollama"), null)
+        verify(!web.siteWaits("claude", "a"))
     }
 }

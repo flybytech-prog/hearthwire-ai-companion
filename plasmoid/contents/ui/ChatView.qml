@@ -4,6 +4,7 @@ import QtQuick.Controls as QQC2
 import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.extras as PlasmaExtras
 import org.kde.kirigami as Kirigami
+import "ChatSites.js" as ChatSites
 import "ChatStorage.js" as ChatStorage
 import "OllamaChat.js" as OllamaChat
 
@@ -13,8 +14,9 @@ import "OllamaChat.js" as OllamaChat
 //
 // With "Stay signed in" the web view waits behind a card until main.qml has
 // verified the encrypted folder is unlocked and prepared this widget's
-// profile folder. The profile kind is fixed when the view is created; any
-// change destroys the view and builds a new one.
+// generation folder; each site's own folder in it is prepared when the site
+// is first shown (preparedSites). The profile kind is fixed when the view is
+// created; any change destroys the view and builds a new one.
 ColumnLayout {
     id: chatView
 
@@ -33,6 +35,15 @@ ColumnLayout {
     property bool storageReady: false
     property string storagePath: ""
     property string profileName: ""
+    // What the web view builds each site's folder and name from, and the
+    // sites whose folder is prepared (main.qml).
+    property string runtimeDir: ""
+    property int storageApplet: -1
+    property int storageGeneration: -1
+    property var preparedSites: []
+    // chatProfileLayout: 1 = the one-time "own sign-in per site" notice is
+    // still to show (main.qml writes it).
+    property int profileLayout: 2
     property var card: ({view: "web", message: ""})
     property var missingTools: []
     // The install hint's distro family (ChatStorage.installDistro).
@@ -60,8 +71,11 @@ ColumnLayout {
     property string siteIdB: ""
 
     // create, unlock, private, lock, auto-lock, retry, held-open, clear-saved,
-    // open, recheck, dismiss-notice, saved-session
+    // open, recheck, dismiss-notice, saved-session, layout-notice-done
     signal storageRequest(string action)
+    // Clear <site> data with saved sign-ins: the site's views and profile
+    // are gone; main.qml waits, then deletes its folder.
+    signal siteDataClearRequested(string siteId)
     // Ctrl+= / Ctrl+- / Ctrl+0 on the site shown: +1, -1 or 0 (reset).
     signal zoomRequested(int direction)
     // Ctrl+wheel in a page: store factor (a ZOOM_STEPS value) for siteId.
@@ -70,6 +84,8 @@ ColumnLayout {
     property bool started: false
     property bool clearing: false
     property bool confirmingClear: false
+    // The site Clear <site> data asks about; "" when not asking.
+    property string confirmingClearSite: ""
     // Inline confirmation on the damaged-folder card.
     property bool confirmingDelete: false
     // Profile the current web view was built with; "" when there is none.
@@ -93,6 +109,18 @@ ColumnLayout {
     // The site of the pane the user works in (the zoom keys act on it).
     readonly property string zoomSiteId: chatView.web && typeof chatView.web.activeSiteId === "string"
         ? chatView.web.activeSiteId : chatView.siteId
+    // Clear <site> data for the pane in use: in memory mode, or with saved
+    // sign-ins open in an unlocked, prepared folder (never a private session
+    // while saved sign-ins exist, whose folder would stay).
+    readonly property bool canClearSite: chatView.canClearSiteFor(chatView.zoomSiteId)
+    readonly property string zoomSiteName: {
+        var site = ChatSites.byId(chatView.zoomSiteId)
+        return site ? site.name : ""
+    }
+    readonly property string clearSiteName: {
+        var site = ChatSites.byId(chatView.confirmingClearSite)
+        return site ? site.name : ""
+    }
     // Local web UI is shown in either pane: its owner problems and load
     // failures are said whichever pane has the focus.
     readonly property bool localSite: chatView.siteId === "local"
@@ -144,6 +172,7 @@ ColumnLayout {
     // With saved sign-ins main.qml also deletes the profile folder and locks.
     function clearChatData() {
         chatView.confirmingClear = false
+        chatView.confirmingClearSite = ""
         var saved = chatView.persistentActive
         if (chatView.web) {
             chatView.web.cancelDownload()
@@ -155,6 +184,31 @@ ColumnLayout {
             chatView.storageRequest("clear-saved")
         gc()
         Qt.callLater(chatView.finishClear)
+    }
+
+    function canClearSiteFor(siteId) {
+        return chatView.available && ChatStorage.isSiteId(siteId) && ChatSites.byId(siteId) !== null
+            && (!chatView.encrypted || (chatView.persistentActive && chatView.storageReady))
+    }
+
+    // The toolbar's Clear <site> data…: asks first, for the pane in use.
+    function askClearSite() {
+        if (chatView.canClearSite)
+            chatView.confirmingClearSite = chatView.zoomSiteId
+    }
+
+    // The site's views and profile go (in memory mode that is all its
+    // data); with saved sign-ins main.qml then deletes its folder.
+    function clearSiteData() {
+        var siteId = chatView.confirmingClearSite
+        chatView.confirmingClearSite = ""
+        if (!chatView.canClearSiteFor(siteId))
+            return
+        var saved = chatView.persistentActive
+        chatView.web.clearSite(siteId)
+        if (saved)
+            chatView.siteDataClearRequested(siteId)
+        chatView.focusLater()
     }
 
     function lockSaved() {
@@ -181,6 +235,7 @@ ColumnLayout {
             chatView.storageRequest("lock")
         chatView.started = false
         chatView.confirmingClear = false
+        chatView.confirmingClearSite = ""
         chatView.confirmingDelete = false
         chatView.syncLoader()
         gc()
@@ -240,8 +295,9 @@ ColumnLayout {
         chatView.builtProfile = chatView.profileKey
         webLoader.setSource(chatView.webSource, {
             staySignedIn: chatView.persistentReady,
-            storagePath: chatView.persistentReady ? chatView.storagePath : "",
-            profileName: chatView.persistentReady ? chatView.profileName : ""
+            runtimeDir: chatView.persistentReady ? chatView.runtimeDir : "",
+            storageApplet: chatView.persistentReady ? chatView.storageApplet : -1,
+            storageGeneration: chatView.persistentReady ? chatView.storageGeneration : -1
         })
         webLoader.active = true
     }
@@ -301,10 +357,14 @@ ColumnLayout {
             return i18n("Locking the encrypted folder…")
         case "prepare":
         case "keep":
+        case "prune":
             return i18n("Opening your saved sign-ins…")
         case "remove":
+        case "remove-site":
         case "destroy":
             return i18n("Deleting saved sign-ins…")
+        case "site-remove-failed":
+            return i18n("Couldn't delete the site's saved sign-in. It stays closed until the encrypted folder is unlocked again.")
         case "wrong-passphrase":
             return i18n("Wrong passphrase. Try again.")
         case "busy":
@@ -431,6 +491,104 @@ ColumnLayout {
         from: 0
         to: 1
         value: chatView.web ? chatView.web.loadProgress : 0
+    }
+
+    // Once after the update to one profile per site, with saved sign-ins:
+    // why every site asks to sign in again. Got it ends it for good.
+    Rectangle {
+        id: layoutNotice
+        objectName: "layoutNotice"
+        Layout.fillWidth: true
+        visible: chatView.started && chatView.encrypted && chatView.profileLayout === 1
+        implicitHeight: layoutRow.implicitHeight + Kirigami.Units.smallSpacing * 2
+        color: Kirigami.Theme.backgroundColor
+        border.color: Kirigami.Theme.highlightColor
+        border.width: 1
+        radius: Kirigami.Units.cornerRadius
+
+        RowLayout {
+            id: layoutRow
+            anchors {
+                left: parent.left
+                right: parent.right
+                verticalCenter: parent.verticalCenter
+                leftMargin: Kirigami.Units.largeSpacing
+                rightMargin: Kirigami.Units.smallSpacing
+            }
+            spacing: Kirigami.Units.smallSpacing
+
+            Kirigami.Icon {
+                source: "dialog-information"
+                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+            }
+            PlasmaComponents.Label {
+                objectName: "layoutNoticeText"
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
+                text: i18n("Each chat site now keeps its own sign-in, so one site can't use another's. Sign in once more to each site.")
+                    + " " + i18n("Signing in to Google in Gemini no longer signs you in on other sites, and 'Sign in with Google' on Claude, ChatGPT, Grok or Copilot asks for your Google account separately.")
+            }
+            PlasmaComponents.ToolButton {
+                objectName: "layoutNoticeDone"
+                icon.name: "dialog-ok"
+                text: i18n("Got it")
+                onClicked: chatView.storageRequest("layout-notice-done")
+            }
+        }
+    }
+
+    // Clear <site> data…, asked inline. The site name is plain text.
+    Rectangle {
+        id: clearSitePrompt
+        objectName: "clearSitePrompt"
+        Layout.fillWidth: true
+        visible: chatView.confirmingClearSite !== "" && chatView.clearSiteName !== ""
+        implicitHeight: clearSiteRow.implicitHeight + Kirigami.Units.smallSpacing * 2
+        color: Kirigami.Theme.neutralBackgroundColor
+        border.color: Kirigami.Theme.neutralTextColor
+        border.width: 1
+        radius: Kirigami.Units.cornerRadius
+
+        RowLayout {
+            id: clearSiteRow
+            anchors {
+                left: parent.left
+                right: parent.right
+                verticalCenter: parent.verticalCenter
+                leftMargin: Kirigami.Units.largeSpacing
+                rightMargin: Kirigami.Units.smallSpacing
+            }
+            spacing: Kirigami.Units.smallSpacing
+
+            Kirigami.Icon {
+                source: "dialog-warning"
+                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+            }
+            PlasmaComponents.Label {
+                objectName: "clearSiteText"
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
+                text: chatView.persistentActive
+                    ? i18n("Clear %1 data? This signs you out of this site and deletes its saved sign-in. Other sites stay signed in.", chatView.clearSiteName)
+                    : i18n("Clear %1 data? This signs you out of this site. Other sites stay signed in.", chatView.clearSiteName)
+            }
+            PlasmaComponents.ToolButton {
+                objectName: "clearSiteConfirm"
+                icon.name: "edit-clear-history"
+                text: i18n("Clear")
+                onClicked: chatView.clearSiteData()
+            }
+            PlasmaComponents.ToolButton {
+                objectName: "clearSiteCancel"
+                icon.name: "dialog-cancel"
+                text: i18n("Cancel")
+                onClicked: chatView.confirmingClearSite = ""
+            }
+        }
     }
 
     Kirigami.InlineMessage {
@@ -705,8 +863,10 @@ ColumnLayout {
             anchors.fill: parent
             active: false
             onLoaded: {
-                // customUrls first: the first page load must already use them.
+                // preparedSites and customUrls first: the first page load
+                // must already use them.
                 webLoader.item.appletId = Qt.binding(function () { return chatView.appletId })
+                webLoader.item.preparedSites = Qt.binding(function () { return chatView.preparedSites })
                 webLoader.item.customUrls = Qt.binding(function () { return chatView.customUrls })
                 webLoader.item.zoomMap = Qt.binding(function () { return chatView.zoomMap })
                 webLoader.item.siteIds = Qt.binding(function () { return chatView.siteIds })

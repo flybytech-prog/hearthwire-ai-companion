@@ -4,8 +4,10 @@ import QtQuick
 // reads, no Qt WebEngine.
 Item {
     property bool staySignedIn: false
-    property string storagePath: ""
-    property string profileName: ""
+    property string runtimeDir: ""
+    property int storageApplet: -1
+    property int storageGeneration: -1
+    property var preparedSites: []
     property var siteIds: []
     property string siteId: ""
     property string siteIdB: ""
@@ -37,6 +39,8 @@ Item {
     property int dismissals: 0
     property int opened: 0
     property int cancelled: 0
+    // Every clearSite(siteId) call, in order.
+    property var clearedSites: []
 
     function goBack() {}
     function reload() {}
@@ -50,4 +54,5 @@ Item {
     function cancelDownload() {}
     function closeOverlay() {}
     function saveDownload() {}
+    function clearSite(siteId) { clearedSites = clearedSites.concat([siteId]) }
 }
