@@ -210,22 +210,39 @@ starts with Plasma while it remains on a panel.
     is the first letter of its name. You can add up to 200 sites. For now an
     added site must have a public name: `http://`, this computer and IP
     addresses (`https://192.168.1.10/`) are refused until local sites arrive
-    in a later version. Names are 1 to 40 characters, unique (also against
-    the built-in names), without `<`, `>`, `&` or invisible formatting
-    characters.
+    in a later version. Names are 1 to 40 characters with at least one
+    letter or digit, unique in any case (also against the built-in names),
+    without `<`, `>`, `&`, control characters or any invisible character
+    (Unicode's default-ignorable characters such as zero-width spaces,
+    variation selectors, tag characters and Hangul fillers, and the blank
+    Braille pattern). Look-alike letters from other scripts are not
+    detected: the letter badge and the address shown next to each site tell
+    them apart.
   - Each added site gets its own sign-in, as the built-in ones do (see
     [docs/privacy.md](docs/privacy.md#one-profile-per-chat-site)): no site
     sees another site's cookies or storage.
   - **Edit** changes a name or address. A new address on the same host keeps
     the site's sign-in. An address on **another host** makes it another
     site: the editor warns you, and on Apply the old site is signed out and
-    its data deleted, so no sign-in moves to a different host.
+    its data deleted, so no sign-in moves to a different host. The same
+    applies when a backup import gives an added site an address on another
+    host: it gets a new id and shows as a remove plus an add, and the old
+    site's data is deleted on Apply. A hand edit of the settings file that
+    moves a site to another host is caught the same way while the widget is
+    running (the site is signed out, its data deleted, and it opens again
+    signed out); an edit made while Plasma isn't running can't be noticed,
+    because the old address isn't stored anywhere.
+  - **A damaged list is locked.** If the stored list of added sites can't be
+    read whole (for example after a hand edit), Settings → Chat says so and
+    doesn't let you add, edit, remove or reorder added sites; built-in sites
+    and Ollama can still be changed. Nothing is deleted because of it.
   - **Removing an added site deletes its data.** The page warns you before
     Apply ("When you apply, N removed sites are signed out and their site
     data is deleted"); **Cancel** keeps everything. With **Stay signed in**
     its saved sign-in is deleted on Apply, or at the next unlock while the
-    encrypted folder is locked. **Defaults** on this page also removes every
-    added site, with the same warning.
+    encrypted folder is locked. If your Plasma version shows a **Defaults**
+    button on this page, it also removes every added site, with the same
+    warning.
 - **GitHub Copilot** opens GitHub's sign-in page and goes on to
   `github.com/copilot` once you are signed in (signed-out visitors to
   `/copilot` only get a landing page). Google and Apple sign-in may be
@@ -345,7 +362,9 @@ starts with Plasma while it remains on a panel.
   added (names and addresses) with their order; the file is at most 512 KiB.
   The confirmation also lists the sites an import adds or removes: a site the
   backup doesn't have is removed when you apply, and its data is deleted
-  (the red warning says so first). It never holds
+  (the red warning says so first). An added site whose address in the backup
+  is on another host is listed as removed and added: its old data is deleted
+  and it starts signed out. It never holds
   sign-ins or anything about the encrypted folder (Stay signed in, Lock
   automatically, Unlock with), the zoom of each site, or the Usage history
   choice. See [docs/privacy.md](docs/privacy.md#settings-backup).

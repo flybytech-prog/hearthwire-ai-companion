@@ -9137,7 +9137,13 @@ def test_proof_backup_message_rule_catches(path, old, new):
 ADDRESS_CHANGE_PAGE_PINS = (
     "page.backupAddressChanges = SettingsBackup.addressChanges(",
     "shownText: UsageLogic.shownText",
-    "list.slice(0, SettingsBackup.MAX_SHOWN_CHANGES).forEach(function (change) {",
+    # Round 2 (SEC I-4): every removed, then every added site first and never
+    # hidden; only the address changes after them are capped.
+    'list.filter(function (change) { return change.kind === "remove" }).forEach(function (change) {',
+    'list.filter(function (change) { return change.kind === "add" }).forEach(function (change) {',
+    'var addresses = list.filter(function (change) { return change.kind !== "add" && change.kind !== "remove" })',
+    "addresses.slice(0, SettingsBackup.MAX_SHOWN_CHANGES).forEach(function (change) {",
+    "if (addresses.length > SettingsBackup.MAX_SHOWN_CHANGES)",
     "var site = change.id === SettingsBackup.OLLAMA_ID ? null : ChatSites.byId(change.id)",
     # Task 005: an added site's own (shownText) name, else the built-in's or Ollama.
     'var name = typeof change.name === "string" ? change.name : site ? site.name : i18n("Ollama")',
@@ -9176,9 +9182,12 @@ def _address_change_problems(general, library):
     changes = _function_body(library, "addressChanges")
     if None in (text, changes):
         return problems + ["exactly one addressChangeText() and addressChanges() expected"]
-    # Bare `return`s end the add and remove lines inside the forEach.
+    # Besides "" and the lines, only the three kind filters return.
     returns = [value.strip() for value in re.findall(r"\breturn\b[ \t]*([^\n]*)", text)]
-    if set(returns) != {'""', 'lines.join("\\n")', ""} or returns.count("") != 2:
+    if sorted(returns) != sorted(['""', 'lines.join("\\n")',
+                                  'change.kind === "remove" }).forEach(function (change) {',
+                                  'change.kind === "add" }).forEach(function (change) {',
+                                  'change.kind !== "add" && change.kind !== "remove" })']):
         problems.append(f"addressChangeText may return only \"\" or the joined lines, found {returns}")
     extra = set(re.findall(r"\bchange\s*\.\s*(\w+)", text)) - {"id", "from", "to", "kind", "name", "host"}
     if extra:
@@ -9204,13 +9213,15 @@ def test_import_address_changes_are_plain_and_capped():
 
 @pytest.mark.parametrize(("path", "old", "new"), [
     (CONFIG_GENERAL, "shownText: UsageLogic.shownText", "shownText: function (text) { return text }"),
-    (CONFIG_GENERAL, "list.slice(0, SettingsBackup.MAX_SHOWN_CHANGES)", "list"),
+    (CONFIG_GENERAL, "addresses.slice(0, SettingsBackup.MAX_SHOWN_CHANGES)", "addresses"),
+    (CONFIG_GENERAL, 'return change.kind !== "add" && change.kind !== "remove"', "return true"),
+    (CONFIG_GENERAL, 'list.filter(function (change) { return change.kind === "add" })',
+     'list.filter(function (change) { return change.kind === "add" }).slice(0, 1)'),
     (CONFIG_GENERAL, "name, change.from, change.to))", "name, change.raw, change.to))"),
     (CONFIG_GENERAL, 'var name = typeof change.name === "string" ? change.name : site ? site.name : i18n("Ollama")',
      'var name = change.raw'),
     (CONFIG_GENERAL, '"Adds %1 (%2)", change.name, change.host))', '"Adds %1 (%2)", change.name, change.url))'),
-    (CONFIG_GENERAL, '                return\n            }\n            if (change.kind === "remove") {',
-     '            }\n            if (change.kind === "remove") {'),
+    (CONFIG_GENERAL, 'return change.kind === "remove" })', 'return change.kind === "remove" || true })'),
     (SETTINGS_BACKUP_JS, 'result.push({kind: "add", id: site.id, name: tools.shownText(site.name), host: host(site.url)})',
      'result.push({kind: "add", id: site.id, name: site.name, host: host(site.url)})'),
     (SETTINGS_BACKUP_JS, 'result.push({kind: "remove", id: site.id, name: tools.shownText(site.name)})',
@@ -9966,13 +9977,25 @@ CHAT_REMOVE_USER_SITES_BODY = (
     "kept.concat([OllamaChat.ENTRY.id])) "
     "if (JSON.stringify(zoom) !== JSON.stringify(root.chatZoom)) { root.chatZoom = zoom zoomWriteTimer.restart() } }"
 )
-# Only an ok read counts; the first ok read only seeds.
+# An absent id is removed only on an ok read after an ok seed. Round 2 (SEC
+# L-2): an id whose exact host changed is removed on any read, but only when
+# it is a valid entry of both the previous and this read (userSiteHosts keeps
+# only validUserSites entries); an unreadable or missing id is never "moved".
 CHAT_SYNC_USER_SITES_BODY = (
-    "{ var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites) if (!read.ok) return "
-    "var now = read.sites.map(function (site) { return site.id }) "
-    "var seen = root.chatUserSiteIdsSeen root.chatUserSiteIdsSeen = now if (seen === null) return "
-    "var removed = seen.filter(function (id) { return now.indexOf(id) < 0 }) "
-    "if (removed.length > 0) root.chatRemoveUserSites(removed) }"
+    "{ var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites) "
+    "var hostsBefore = root.chatUserSiteHostsSeen var hostsNow = ChatSites.userSiteHosts(read.sites) "
+    "root.chatUserSiteHostsSeen = hostsNow "
+    "var moved = Object.keys(hostsNow).filter(function (id) { "
+    "return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id] }) "
+    "var removed = [] if (read.ok) { var now = read.sites.map(function (site) { return site.id }) "
+    "var seen = root.chatUserSiteIdsSeen root.chatUserSiteIdsSeen = now "
+    "if (seen !== null) removed = seen.filter(function (id) { return now.indexOf(id) < 0 }) } "
+    "removed = removed.concat(moved) if (removed.length > 0) root.chatRemoveUserSites(removed) }"
+)
+# The host map: only entries validUserSites keeps, each by its parsed host.
+USER_SITE_HOSTS_BODY = (
+    "{ var hosts = {} validUserSites(userSites).forEach(function (entry) { "
+    "hosts[entry.id] = normalizeHost(parseUrl(entry.url).host) }) return hosts }"
 )
 DROP_SITES_BODY = (
     '{ var list = ids !== null && typeof ids === "object" && typeof ids.length === "number" '
@@ -9987,6 +10010,8 @@ MAIN_USER_SITE_PINS = (
     "readonly property var chatUserSites: root.chatUserSitesRead.sites",
     "readonly property bool chatUserSitesOk: root.chatUserSitesRead.ok",
     "property var chatUserSiteIdsSeen: null",
+    "property var chatUserSiteHostsSeen: ({})",
+    "root.chatUserSiteHostsSeen = ChatSites.userSiteHosts(root.chatUserSites)",
     "signal chatUserSitesRemoved(var ids)",
     "property bool chatWebLoaded: false",
     "readonly property var chatKnownSites: root.chatUserSitesOk "
@@ -10058,6 +10083,16 @@ def _user_site_removal_problems(main, full_representation, view, chat_sites):
             problems.append(f"main.qml: {word} must appear {count} times (declared and its reviewed uses), found {found}")
     if len(_hits(r"\bchatUserSiteIdsSeen\s*=(?!=)", main)) != 2:
         problems.append("chatUserSiteIdsSeen is set only by the ok seed at start and in chatSyncUserSites")
+    if len(_hits(r"\bchatUserSiteHostsSeen\s*=(?!=)", main)) != 2 or len(_hits(r"\bchatUserSiteHostsSeen\b", main)) != 4:
+        problems.append("chatUserSiteHostsSeen is set only at start and in chatSyncUserSites, read only there")
+    # (a) A removal on a damaged read: only ids valid in both reads with another host.
+    sync = _squashed(_function_body(main, "chatSyncUserSites") or "")
+    if "if (read.ok) {" not in sync or not 0 <= sync.find("if (read.ok) {") < sync.find("seen.filter(") \
+            or not sync.endswith("removed = removed.concat(moved) if (removed.length > 0) root.chatRemoveUserSites(removed) }"):
+        problems.append("chatSyncUserSites: absent ids only inside `if (read.ok)`; on any read only `moved`")
+    hosts = _function_body(chat_sites, "userSiteHosts")
+    if hosts is None or _squashed(hosts) != USER_SITE_HOSTS_BODY:
+        problems.append(f"ChatSites.userSiteHosts must be exactly `{USER_SITE_HOSTS_BODY}`")
     if _hits(r"\bchatWebLoaded\s*=(?!=)", main):
         problems.append("main.qml never sets chatWebLoaded; only FullRepresentation reports it")
     problems += _pin_problems(full_representation, FULL_USER_SITE_PINS, "FullRepresentation.qml")
@@ -10102,10 +10137,24 @@ USER_SITE_REMOVAL_MUTATIONS = {
     "zoom written directly": (MAIN_QML, "            root.chatZoom = zoom\n            zoomWriteTimer.restart()\n",
                               "            Plasmoid.configuration.chatSiteZoom = JSON.stringify(zoom)\n"),
     # Rule 4 and the ok-read rule.
-    "lenient read removes": (MAIN_QML, "        var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)\n"
-                                       "        if (!read.ok)\n            return\n",
-                             "        var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)\n"),
-    "first read removes": (MAIN_QML, "        if (seen === null)\n            return\n", "        if (seen === null)\n            seen = []\n"),
+    "lenient read removes": (MAIN_QML, "        if (read.ok) {\n", "        if (true) {\n"),
+    "first read removes": (MAIN_QML, "            if (seen !== null)\n                removed = seen.filter(",
+                           "            removed = (seen || []).filter("),
+    # (a) What a damaged read may remove: only ids valid before and now, on another host.
+    "moved from the old map": (MAIN_QML, "        var moved = Object.keys(hostsNow).filter(function (id) {\n"
+                               "            return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id]",
+                               "        var moved = Object.keys(hostsBefore).filter(function (id) {\n"
+                               "            return hostsBefore[id] !== hostsNow[id]"),
+    "moved without the old entry": (MAIN_QML, "            return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id]",
+                                    "            return hostsBefore[id] !== hostsNow[id]"),
+    "moved on the same host": (MAIN_QML, " && hostsBefore[id] !== hostsNow[id]\n", "\n"),
+    "moved from raw ids": (MAIN_QML, "        var hostsNow = ChatSites.userSiteHosts(read.sites)\n",
+                           "        var hostsNow = ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites)\n"),
+    "old map never updated": (MAIN_QML, "        root.chatUserSiteHostsSeen = hostsNow\n", ""),
+    "start map from nothing": (MAIN_QML, "        root.chatUserSiteHostsSeen = ChatSites.userSiteHosts(root.chatUserSites)\n", ""),
+    "moved never removed": (MAIN_QML, "        removed = removed.concat(moved)\n", ""),
+    "host map of unchecked entries": (CHAT_SITES_JS, "    validUserSites(userSites).forEach(function (entry) {\n        hosts[entry.id]",
+                                      "    (userSites || []).forEach(function (entry) {\n        hosts[entry.id]"),
     "prune lenient when not ok": (MAIN_QML, "    readonly property var chatKnownSites: root.chatUserSitesOk\n"
                                             "        ? ChatStorage.BUILTIN_SITE_IDS.concat(root.chatUserSites.map(function (site) { return site.id }))\n"
                                             "        : []\n",
@@ -10258,6 +10307,27 @@ SYNC_HOME_GUARD = (
     'var home = ChatSites.homeUrl(wanted, chatWeb.customUrls, chatWeb.userSites) if (home === "") continue '
     "if (!chatWeb.profileFor(wanted) && !chatWeb.siteProfileSpec(wanted)) {"
 )
+# Round 2 (SEC L-2): an added site's view never goes to another host. The
+# guard only refuses (return, or about:blank and next view); which profile a
+# site gets stays with profileFor/ensureProfile (rules 3b, 3e, 3f).
+WEB_HOME_BODY = (
+    "{ if (chatWeb.overlayActive) chatWeb.closeOverlay() "
+    "var url = ChatSites.homeUrl(chatWeb.activeSiteId, chatWeb.customUrls, chatWeb.userSites) "
+    'if (!chatWeb.paneView || url === "") return '
+    "if (ChatSites.isUserSiteId(chatWeb.paneView.site) && chatWeb.hostOf(url) !== chatWeb.hostOf(chatWeb.paneView.homeUrl)) "
+    "return chatWeb.paneView.url = url }"
+)
+APPLY_CUSTOM_URLS_BODY = (
+    "{ for (var index = 0; index < pages.count; index++) { var view = pages.itemAt(index) "
+    "if (!view || view.isOverlay) continue "
+    "var url = ChatSites.homeUrl(view.site, chatWeb.customUrls, chatWeb.userSites) "
+    'if (url === "" || url === view.homeUrl) continue '
+    "if (chatWeb.overlayView && chatWeb.overlayView.site === view.site) chatWeb.closeOverlay() "
+    "if (ChatSites.isUserSiteId(view.site) && chatWeb.hostOf(url) !== chatWeb.hostOf(view.homeUrl)) { "
+    'view.url = "about:blank" continue } '
+    "view.homeUrl = url view.failed = false view.crashed = false view.url = url } }"
+)
+HOST_OF_BODY = '{ var parsed = ChatSites.parseUrl(url) return parsed && parsed.host !== "" ? ChatSites.normalizeHost(parsed.host) : "" }'
 REQUEST_CALLS = r"\bChatSites\s*\.\s*(classifyNavigation|classifySubframe|classifyNewWindow|offSiteHost|localOwnerPort|localOwnerGate)\s*\("
 
 
@@ -10266,8 +10336,18 @@ def _added_site_web_problems(web, view):
     if len(_hits(r"(?m)^\s*property\s+var\s+userSites\s*:\s*\[\s*\]\s*$", web)) != 1 \
             or _hits(r"\buserSites\s*=(?!=)", web):
         problems.append("ChatWebView: `property var userSites: []` once, never assigned inside")
-    if re.search(r"\bisUserSiteId\b|[\"']user-|\.\s*user\b", web):
+    if re.search(r"[\"']user-|\.\s*user\b", web):
         problems.append("ChatWebView has no added-site special case: profiles and views treat every id alike")
+    for name, expected in (("home", WEB_HOME_BODY), ("applyCustomUrls", APPLY_CUSTOM_URLS_BODY), ("hostOf", HOST_OF_BODY)):
+        body = _function_body(web, name)
+        if body is None or _squashed(body) != expected:
+            problems.append(f"ChatWebView.{name} must be exactly `{expected}`")
+    guards = [match.start() for match in re.finditer(r"\bisUserSiteId\b", web)]
+    allowed = _block_spans(web, r"\bfunction\s+(?:home|applyCustomUrls)\s*\([^)]*\)\s*\{")
+    if len(guards) != 2 or not all(any(lo <= at < hi for lo, hi in allowed) for at in guards):
+        problems.append("ChatWebView: the only added-site case is the host guard in home() and applyCustomUrls()")
+    if len(_hits(r"\bhostOf\s*\(", web)) != 5:
+        problems.append("ChatWebView: hostOf is used only by the two host guards")
     if _squashed(SYNC_HOME_GUARD) not in _squashed(_function_body(web, "syncViews") or ""):
         problems.append(f"syncViews skips an id without an address before any profile or request: `{SYNC_HOME_GUARD}`")
     calls = list(re.finditer(REQUEST_CALLS, web))
@@ -10328,6 +10408,17 @@ ADDED_SITE_WEB_MUTATIONS = {
     # Rule 6: an added id mapped to another site's profile.
     "added ids share a profile": (CHAT_WEB_VIEW, "            ? chatWeb.profiles[siteId] : null",
                                   "            ? chatWeb.profiles[ChatSites.isUserSiteId(siteId) ? \"claude\" : siteId] : null"),
+    # Round 2 (SEC L-2): a moved added site loads its new host in its old profile.
+    "moved view loads the new host": (CHAT_WEB_VIEW, '                view.url = "about:blank"\n                continue\n',
+                                      "                view.homeUrl = url\n                view.url = url\n                continue\n"),
+    "moved view kept on the old host": (CHAT_WEB_VIEW, '                view.url = "about:blank"\n                continue\n',
+                                        "                continue\n"),
+    "home ignores the host": (CHAT_WEB_VIEW, "        if (ChatSites.isUserSiteId(chatWeb.paneView.site)\n"
+                              "                && chatWeb.hostOf(url) !== chatWeb.hostOf(chatWeb.paneView.homeUrl))\n            return\n", ""),
+    "host never differs": (CHAT_WEB_VIEW, '        return parsed && parsed.host !== "" ? ChatSites.normalizeHost(parsed.host) : ""',
+                           '        return ""'),
+    "guard picks a profile": (CHAT_WEB_VIEW, "        var existing = chatWeb.profileFor(siteId)\n",
+                              "        var existing = chatWeb.profileFor(ChatSites.isUserSiteId(siteId) ? siteId : siteId)\n"),
     "list replaced inside": (CHAT_WEB_VIEW, "    function home() {\n", "    function f() { chatWeb.userSites = [] }\n    function home() {\n"),
 }
 
@@ -10571,3 +10662,75 @@ def test_proof_golden_table_rule_catches(which, old, new):
         assert old in golden
         golden = golden.replace(old, new, 1)
     assert _golden_table_problems(test_code, golden)
+
+
+# Round 2 (SEC L-2), import side: a backup entry whose id the page has on
+# another exact host gets a fresh id (never the page's, the backup's, the
+# applied value's or an owed delete's), so Replace shows Removes plus Adds and
+# Apply deletes the old data through the normal removal path.
+RENEW_MOVED_SITES_BODY = (
+    '{ if (!has(plan.settings, "chatUserSites") || typeof tools.userSiteHosts !== "function" || '
+    'typeof tools.newUserSiteId !== "function") return var list = '
+    'JSON.parse(plan.settings.chatUserSites) var before = tools.userSiteHosts(tools.currentUserSites) '
+    'var after = tools.userSiteHosts(list) var excluded = '
+    'Object.keys(before).concat(Object.keys(after), Array.isArray(tools.excludedIds) ? '
+    'tools.excludedIds : []) var renamed = {} var count = 0 for (var index = 0; index < list.length; '
+    'index++) { var id = list[index].id if (!has(before, id) || before[id] === after[id]) continue '
+    'var fresh = tools.newUserSiteId(excluded) if (typeof fresh !== "string" || '
+    '!/^user-[0-9a-f]{8}$/.test(fresh) || excluded.indexOf(fresh) >= 0) { delete '
+    'plan.settings.chatUserSites plan.applied -= 1 plan.dropped += 1 return } excluded.push(fresh) '
+    'renamed[id] = fresh list[index] = {id: fresh, name: list[index].name, url: list[index].url} '
+    'count += 1 } if (count === 0) return plan.settings.chatUserSites = '
+    'tools.serializeUserSites(list) var rename = function (id) { return has(renamed, id) ? '
+    'renamed[id] : id } ;["chatSites", "chatSiteOrder"].forEach(function (key) { if '
+    '(has(plan.settings, key) && plan.settings[key] !== "") plan.settings[key] = '
+    'JSON.stringify(JSON.parse(plan.settings[key]).map(rename)) }) ;["chatDefaultSite", '
+    '"middleClickOpens"].forEach(function (key) { if (has(plan.settings, key)) plan.settings[key] = '
+    'rename(plan.settings[key]) }) }'
+)
+GENERAL_RENEW_TOOL_PINS = (
+    "currentUserSites: page.userSites",
+    "userSiteHosts: ChatSites.userSiteHosts",
+    "newUserSiteId: function (excluded) { return ChatSites.newUserSiteId(excluded, Math.random) }",
+    "excludedIds: ChatStorage.parsePendingClears(page.cfg_chatPendingSiteClears).concat("
+    "ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites))",
+)
+
+
+def _moved_import_problems(library, general):
+    problems = []
+    body = _function_body(library, "renewMovedSites")
+    if body is None or _squashed(body) != RENEW_MOVED_SITES_BODY:
+        problems.append(f"SettingsBackup.renewMovedSites must be exactly `{RENEW_MOVED_SITES_BODY}`")
+    plan = _squashed(_function_body(library, "importPlan") or "")
+    if len(_hits(r"\brenewMovedSites\s*\(", library)) != 2 or "}) renewMovedSites(plan, tools) dropPair(" not in plan:
+        problems.append("importPlan renews moved sites once, after every value is checked and before the pair drops")
+    problems += _pin_problems(general, GENERAL_RENEW_TOOL_PINS, "configGeneral.qml")
+    return problems
+
+
+def test_import_renews_a_moved_site_with_a_fresh_id():
+    problems = _moved_import_problems(_read_code(SETTINGS_BACKUP_JS), _read_code(CONFIG_GENERAL))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (SETTINGS_BACKUP_JS, "        if (!has(before, id) || before[id] === after[id])\n            continue\n", "        continue\n"),
+    (SETTINGS_BACKUP_JS, " || excluded.indexOf(fresh) >= 0) {", ") {"),
+    (SETTINGS_BACKUP_JS, "        excluded.push(fresh)\n", ""),
+    (SETTINGS_BACKUP_JS, "    var excluded = Object.keys(before).concat(Object.keys(after),",
+     "    var excluded = Object.keys(after).concat("),
+    (SETTINGS_BACKUP_JS, '    ;["chatDefaultSite", "middleClickOpens"].forEach(function (key) {',
+     '    ;["middleClickOpens"].forEach(function (key) {'),
+    (SETTINGS_BACKUP_JS, "    renewMovedSites(plan, tools)\n", ""),
+    (SETTINGS_BACKUP_JS, "        list[index] = {id: fresh, name: list[index].name, url: list[index].url}\n",
+     "        list[index] = {id: id, name: list[index].name, url: list[index].url}\n"),
+    (CONFIG_GENERAL, "            excludedIds: ChatStorage.parsePendingClears(page.cfg_chatPendingSiteClears).concat(\n"
+                     "                ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites))",
+     "            excludedIds: []"),
+    (CONFIG_GENERAL, "            currentUserSites: page.userSites,\n", "            currentUserSites: [],\n"),
+])
+def test_proof_moved_import_rule_catches(path, old, new):
+    library = _mutated(path, old, new) if path == SETTINGS_BACKUP_JS else _read_code(SETTINGS_BACKUP_JS)
+    general = _mutated(path, old, new) if path == CONFIG_GENERAL else _read_code(CONFIG_GENERAL)
+    assert _moved_import_problems(library, general)

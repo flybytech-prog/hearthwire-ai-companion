@@ -7,6 +7,7 @@ import re
 import shutil
 import stat
 import subprocess
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -425,7 +426,7 @@ def test_the_port_gives_the_same_codes_as_chat_sites_js(tmp_path):
 NAME_CASES = [
     ("Le Chat", (), ""), ("A", (), ""), ("Le Chat (beta) #1", (), ""), ("Claude2", (), ""), ("Mistral", ("Other",), ""),
     ("a" * 40, (), ""), ("a" * 41, (), "name-too-long"),
-    ("\U0001f600" * 20, (), ""), ("\U0001f600" * 20 + "a", (), "name-too-long"), ("a" + "\U0001f600" * 20, (), "name-too-long"),
+    ("\U0001f600" * 20, (), "name-chars"), ("a" + "\U0001f600" * 19, (), ""), ("\U0001f600" * 20 + "a", (), "name-too-long"), ("a" + "\U0001f600" * 20, (), "name-too-long"),
     ("\u00e9" * 40, (), ""), ("e\u0301" * 20, (), ""), ("e\u0301" * 20 + "x", (), "name-too-long"),
     ("\u4e2d" * 40, (), ""), ("\u4e2d" * 41, (), "name-too-long"),
     ("", (), "name-empty"), (" ", (), "name-empty"), ("\t\n", (), "name-empty"), ("\u3000\ufeff\u00a0", (), "name-empty"),
@@ -436,6 +437,8 @@ NAME_CASES = [
     ("Le\u3000Chat", (), ""), ("Le\u00a0Chat", (), ""), ("Le\tChat", (), "name-chars"),
     ("Le\x00Chat", (), "name-chars"), ("Le\x1bChat", (), "name-chars"), ("Le\x7fChat", (), "name-chars"),
     ("Le\x85Chat", (), "name-chars"), ("Le\x9fChat", (), "name-chars"),
+    # Qt's trim also strips U+0085 (review I-3): alone it is empty, at an end untrimmed.
+    ("\x85", (), "name-empty"), ("Le Chat\x85", (), "name-chars"),
     ("Le\ud800Chat", (), "name-chars"), ("Le\udc00Chat", (), "name-chars"), ("Le Chat\ud83d", (), "name-chars"),
     ("<b>x</b>", (), "name-chars"), ("a&b", (), "name-chars"), ("a>b", (), "name-chars"), ("a<b", (), "name-chars"),
     ("a\"b'c", (), ""), ("a/b\\c", (), ""),
@@ -443,7 +446,25 @@ NAME_CASES = [
     *[("Le" + chr(point) + "Chat", (), "name-chars") for point in (
         0x00AD, 0x061C, 0x180E, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2028, 0x2029, 0x202A, 0x202B, 0x202C,
         0x202D, 0x202E, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0x2066, 0x2067, 0x2068, 0x2069, 0xFEFF)],
-    ("Le\u200aChat", (), ""), ("Le\u2030Chat", (), ""), ("Le\u2065Chat", (), ""), ("Le\u206aChat", (), ""),
+    ("Le\u200aChat", (), ""), ("Le\u2030Chat", (), ""),
+    # Round 2 (SEC M-1): every Default_Ignorable_Code_Point, U+FFF9-FFFB and U+2800, each range end.
+    *[("Le" + chr(point) + "Chat", (), "name-chars") for point in (
+        0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180F, 0x2065, 0x206A, 0x206F, 0x2800, 0x3164,
+        0xFE00, 0xFE0F, 0xFFA0, 0xFFF0, 0xFFF8, 0xFFF9, 0xFFFB, 0x1BCA0, 0x1BCA3, 0x1D173, 0x1D17A,
+        0xE0000, 0xE0001, 0xE0020, 0xE007F, 0xE0100, 0xE01EF, 0xE0FFF)],
+    ("Le\u180aChat", (), ""), ("Le\u2070Chat", (), ""), ("Le\u27ffChat", (), ""), ("Le\u2801Chat", (), ""),
+    ("Le\ufdffChat", (), ""), ("Le\ufe10Chat", (), ""), ("Le\ufffcChat", (), ""), ("Le\U0001d172Chat", (), ""),
+    ("Le\U0001d17bChat", (), ""), ("Le\U000e1000Chat", (), ""),
+    # The SEC M-1 look-alikes: a built-in name plus an invisible character.
+    *[("Claude" + chr(point), (), "name-chars") for point in (0x034F, 0xE0020, 0xFE0F, 0x17B4, 0x180B, 0x3164,
+                                                              0x115F, 0x1160, 0x2800, 0xE0001, 0xFFF9)],
+    ("\u3164", (), "name-chars"), ("\u2800\u2800", (), "name-chars"), ("\u115f\u1160", (), "name-chars"),
+    ("\U000e0041\U000e0042", (), "name-chars"), ("\u200b", (), "name-chars"),
+    # At least one letter or digit (Unicode L* or N*).
+    ("!!!", (), "name-chars"), ("-", (), "name-chars"), ("\U0001f916", (), "name-chars"), ("\u2603 \u2604", (), "name-chars"),
+    ("1", (), ""), ("\u0661", (), ""), ("\u2460", (), ""), ("\u216b", (), ""), ("\u00e9", (), ""), ("\u4e2d", (), ""),
+    ("\U0001d400", (), ""), ("!\u05d0", (), ""), ("\U0001f916 Bot", (), ""), ("#1", (), ""),
+    ("\u0301", (), "name-chars"), ("e\u0301", (), ""),
     # Taken: a built-in name, Ollama or another added site, in any case.
     ("Claude", (), "name-taken"), ("claude", (), "name-taken"), ("CHATGPT", (), "name-taken"),
     ("grok", (), "name-taken"), ("Gemini", (), "name-taken"), ("github copilot", (), "name-taken"),
@@ -560,6 +581,57 @@ def test_the_user_site_port_gives_the_same_codes_as_chat_sites_js(tmp_path):
     assert results == expected
 
 
+NAME_FUZZ_QML = """import QtQuick
+import QtTest
+import "ChatSites.js" as ChatSites
+
+TestCase {
+    name: "NameFuzz"
+    function test_dump() {
+        var points = %s
+        var letters = { "": "o", "name-empty": "e", "name-too-long": "l", "name-chars": "c", "name-taken": "t" }
+        var code = function (result) {
+            var text = typeof result === "string" ? result : result.error
+            return Object.prototype.hasOwnProperty.call(letters, text) ? letters[text] : "?"
+        }
+        var out = []
+        for (var index = 0; index < points.length; index++) {
+            var character = String.fromCodePoint(points[index])
+            out.push(code(ChatSites.userSiteNameError(character, [])))
+            out.push(code(ChatSites.userSiteNameError("Le" + character + "Chat", [])))
+        }
+        console.log("PARITY " + JSON.stringify([out.join("")]))
+    }
+}
+"""
+# The BMP (surrogates included, as lone ones), the astral Default_Ignorable
+# ranges and astral letters, digits, symbols and emoji around them.
+NAME_FUZZ_POINTS = (list(range(0x10000)) + list(range(0x10000, 0x10200)) + list(range(0x1BC90, 0x1BCB0))
+                    + list(range(0x1D100, 0x1D800)) + list(range(0x1F300, 0x1F700)) + list(range(0x20000, 0x20100))
+                    + list(range(0xDFF00, 0xE1100)))
+NAME_FUZZ_LETTERS = {"": "o", "name-empty": "e", "name-too-long": "l", "name-chars": "c", "name-taken": "t"}
+
+
+def test_the_name_rule_agrees_with_chat_sites_js_on_every_code_point(tmp_path):
+    """Each code point alone and inside "Le…Chat": the same code from both ports.
+
+    A code point unassigned in this Python's Unicode data is compared only
+    inside "Le…Chat" (alone, Qt's newer tables may know it as a letter).
+    """
+    results = chat_sites_js_results(tmp_path, NAME_FUZZ_QML % json.dumps(NAME_FUZZ_POINTS))[0]
+    assert len(results) == 2 * len(NAME_FUZZ_POINTS)
+    differences = []
+    for index, point in enumerate(NAME_FUZZ_POINTS):
+        character = chr(point)
+        for offset, name in ((0, character), (1, "Le" + character + "Chat")):
+            if offset == 0 and unicodedata.category(character) == "Cn":
+                continue
+            expected = NAME_FUZZ_LETTERS[backup.user_site_name_error(name)]
+            if results[2 * index + offset] != expected:
+                differences.append((hex(point), offset, results[2 * index + offset], expected))
+    assert differences == [], differences[:40]
+
+
 SITE_A = {"id": "user-3fa9c01b", "name": "Le Chat", "url": "https://chat.example.org/chat"}
 SITE_B = {"id": "user-00ff00aa", "name": "\u00dcn\u00efcode \U0001f600", "url": "https://b.example.net/x?y=1"}
 
@@ -622,7 +694,7 @@ def test_200_user_sites_are_kept_and_201_dropped():
 
 def test_the_user_sites_char_cap_counts_utf16_units():
     assert backup.MAX_USER_SITES_CHARS == 458752
-    emoji = entry_with(name="\U0001f600" * 20)
+    emoji = entry_with(name="a" + "\U0001f600" * 19)
     compact = user_sites(emoji)
     room = backup.MAX_USER_SITES_CHARS - len(compact.encode("utf-16-le")) // 2
     at_cap = "[" + " " * room + compact[1:]
@@ -1249,7 +1321,7 @@ def test_the_module_imports_only_the_standard_library_and_no_network():
             # legacy: only legacy-data; appletconfig: the applied settings; jsondepth: the depth limit.
             assert node.module in ("appletconfig", "catalog", "jsondepth", "webdata", "legacy"), node.module
     assert imported <= {"__future__", "collections", "datetime", "errno", "json", "math", "os", "pathlib", "re",
-                        "stat", "time", "typing"}, imported
+                        "stat", "time", "typing", "unicodedata"}, imported
     for banned in ("socket", "http", "urllib", "ssl", "subprocess"):
         assert banned not in imported
 

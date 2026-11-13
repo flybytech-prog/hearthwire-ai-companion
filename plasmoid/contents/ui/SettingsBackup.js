@@ -321,8 +321,9 @@ function customUrls(value, tools) {
 // settings holds only BACKUP_KEYS that pass the widget's check; dropped adds
 // up what the helper dropped, what this check dropped and any other key.
 // tools: {providers, webSiteIds, ringPairs, validateCustomUrl, ollamaAddress,
-// userSiteIds, validateUserSite, serializeUserSites}; userSiteIds(text)
-// gives the ids of a checked chatUserSites value. The added ids other keys
+// userSiteIds, validateUserSite, serializeUserSites, and for renewing moved
+// sites currentUserSites, userSiteHosts, newUserSiteId, excludedIds};
+// userSiteIds(text) gives the ids of a checked chatUserSites value. The added ids other keys
 // may name come only from this import's own chatUserSites, never the page.
 function importPlan(settings, helperDropped, tools) {
     var source = isObject(settings) ? settings : {}
@@ -342,10 +343,59 @@ function importPlan(settings, helperDropped, tools) {
         plan.settings[name] = value
         plan.applied += 1
     })
+    renewMovedSites(plan, tools)
     // Pairs the settings pages themselves never store.
     dropPair(plan, "usageWarnPercent", "usageCriticalPercent", function (warn, critical) { return warn < critical })
     dropPair(plan, "showUsageTab", "showChatTab", function (usage, chat) { return usage || chat })
     return plan
+}
+
+// An added site of the backup whose id the page has with another host is
+// another site (M1): it gets a new id, so applying removes the old one
+// (its data is deleted) and adds the new one with a profile of its own,
+// and the confirmation lists it as Removes and Adds. The other keys that
+// name it follow. tools: currentUserSites (the page's), userSiteHosts,
+// newUserSiteId(excluded), excludedIds (ids still owing a delete); without
+// them nothing is renewed, and an id that can't be renewed drops the list.
+function renewMovedSites(plan, tools) {
+    if (!has(plan.settings, "chatUserSites") || typeof tools.userSiteHosts !== "function"
+            || typeof tools.newUserSiteId !== "function")
+        return
+    var list = JSON.parse(plan.settings.chatUserSites)
+    var before = tools.userSiteHosts(tools.currentUserSites)
+    var after = tools.userSiteHosts(list)
+    var excluded = Object.keys(before).concat(Object.keys(after),
+        Array.isArray(tools.excludedIds) ? tools.excludedIds : [])
+    var renamed = {}
+    var count = 0
+    for (var index = 0; index < list.length; index++) {
+        var id = list[index].id
+        if (!has(before, id) || before[id] === after[id])
+            continue
+        var fresh = tools.newUserSiteId(excluded)
+        if (typeof fresh !== "string" || !/^user-[0-9a-f]{8}$/.test(fresh) || excluded.indexOf(fresh) >= 0) {
+            delete plan.settings.chatUserSites
+            plan.applied -= 1
+            plan.dropped += 1
+            return
+        }
+        excluded.push(fresh)
+        renamed[id] = fresh
+        list[index] = {id: fresh, name: list[index].name, url: list[index].url}
+        count += 1
+    }
+    if (count === 0)
+        return
+    plan.settings.chatUserSites = tools.serializeUserSites(list)
+    var rename = function (id) { return has(renamed, id) ? renamed[id] : id }
+    ;["chatSites", "chatSiteOrder"].forEach(function (key) {
+        if (has(plan.settings, key) && plan.settings[key] !== "")
+            plan.settings[key] = JSON.stringify(JSON.parse(plan.settings[key]).map(rename))
+    })
+    ;["chatDefaultSite", "middleClickOpens"].forEach(function (key) {
+        if (has(plan.settings, key))
+            plan.settings[key] = rename(plan.settings[key])
+    })
 }
 
 function dropPair(plan, first, second, allowed) {

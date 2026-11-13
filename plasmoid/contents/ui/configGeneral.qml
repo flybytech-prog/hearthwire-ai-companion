@@ -148,10 +148,10 @@ KCM.SimpleKCM {
     }))
     // Added sites the applied settings have and this page no longer does (a
     // backup Replace): applying signs them out and deletes their site data.
-    readonly property var removedUserSiteIds: ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)
-        .sites.map(function (site) { return site.id }).filter(function (id) {
-            return page.userSites.every(function (site) { return site.id !== id })
-        })
+    // Every id in the applied text counts, also of entries this version
+    // can't read.
+    readonly property var removedUserSiteIds: ChatSites.removedUserSiteIds(
+        Plasmoid.configuration.chatUserSites, page.cfg_chatUserSites)
     readonly property var alertChoices: SettingsLogic.ALERT_PERCENTS.map(function (percent) {
         return { value: percent, text: i18n("%1%", percent) }
     })
@@ -465,7 +465,14 @@ KCM.SimpleKCM {
                 return ChatSites.parseUserSites(text).sites.map(function (site) { return site.id })
             },
             validateUserSite: ChatSites.validateUserSite,
-            serializeUserSites: ChatSites.serializeUserSites
+            serializeUserSites: ChatSites.serializeUserSites,
+            // A backup site on another host than the page's same id is
+            // renewed (M1): listed as Removes and Adds.
+            currentUserSites: page.userSites,
+            userSiteHosts: ChatSites.userSiteHosts,
+            newUserSiteId: function (excluded) { return ChatSites.newUserSiteId(excluded, Math.random) },
+            excludedIds: ChatStorage.parsePendingClears(page.cfg_chatPendingSiteClears).concat(
+                ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites))
         })
         page.backupDropped = plan.dropped
         if (plan.applied === 0) {
@@ -487,30 +494,32 @@ KCM.SimpleKCM {
         page.confirmingImport = true
     }
 
-    // The address changes as plain lines, "name: old → new", the first
+    // The changes as plain lines: every added and removed site first, all of
+    // them (applying a removal deletes that site's data, so none is ever
+    // hidden), then the address changes, "name: old → new", the first
     // SettingsBackup.MAX_SHOWN_CHANGES of them and a count of the rest.
     function addressChangeText(changes) {
         var list = Array.isArray(changes) ? changes : []
         if (list.length === 0)
             return ""
-        var lines = [i18np("This changes %1 chat address:", "This changes %1 chat addresses:", list.length)]
-        list.slice(0, SettingsBackup.MAX_SHOWN_CHANGES).forEach(function (change) {
-            if (change.kind === "add") {
-                lines.push(i18nc("an added chat site: name, host", "Adds %1 (%2)", change.name, change.host))
-                return
-            }
-            if (change.kind === "remove") {
-                lines.push(i18nc("a removed chat site: name", "Removes %1 and deletes its site data when you apply",
-                                 change.name))
-                return
-            }
+        var lines = [i18np("This changes %1 chat site or address:", "This changes %1 chat sites or addresses:",
+                           list.length)]
+        list.filter(function (change) { return change.kind === "remove" }).forEach(function (change) {
+            lines.push(i18nc("a removed chat site: name", "Removes %1 and deletes its site data when you apply",
+                             change.name))
+        })
+        list.filter(function (change) { return change.kind === "add" }).forEach(function (change) {
+            lines.push(i18nc("an added chat site: name, host", "Adds %1 (%2)", change.name, change.host))
+        })
+        var addresses = list.filter(function (change) { return change.kind !== "add" && change.kind !== "remove" })
+        addresses.slice(0, SettingsBackup.MAX_SHOWN_CHANGES).forEach(function (change) {
             var site = change.id === SettingsBackup.OLLAMA_ID ? null : ChatSites.byId(change.id)
             var name = typeof change.name === "string" ? change.name : site ? site.name : i18n("Ollama")
             lines.push(i18nc("a chat address: site, old address, new address", "%1: %2 → %3",
                              name, change.from, change.to))
         })
-        if (list.length > SettingsBackup.MAX_SHOWN_CHANGES)
-            lines.push(i18np("…and %1 more.", "…and %1 more.", list.length - SettingsBackup.MAX_SHOWN_CHANGES))
+        if (addresses.length > SettingsBackup.MAX_SHOWN_CHANGES)
+            lines.push(i18np("…and %1 more.", "…and %1 more.", addresses.length - SettingsBackup.MAX_SHOWN_CHANGES))
         return lines.join("\n")
     }
 
@@ -886,20 +895,26 @@ KCM.SimpleKCM {
                     highlighted: ListView.isCurrentItem
                     contentItem: RowLayout {
                         spacing: Kirigami.Units.smallSpacing
-                        Kirigami.Icon {
-                            visible: middleDelegate.modelData.icon !== ""
-                            source: middleDelegate.modelData.icon !== ""
-                                ? Qt.resolvedUrl("../images/" + middleDelegate.modelData.icon) : ""
+                        // Rows without an icon keep its room, so every text lines up.
+                        Item {
+                            objectName: "middleClickIcon"
                             Layout.preferredWidth: Kirigami.Units.iconSizes.small
                             Layout.preferredHeight: Kirigami.Units.iconSizes.small
-                            isMask: true
-                            color: Kirigami.Theme.textColor
-                        }
-                        // An added site: the first letter of its name.
-                        LetterBadge {
-                            visible: middleDelegate.modelData.user === true
-                            name: middleDelegate.modelData.user === true ? middleDelegate.modelData.text : ""
-                            size: Kirigami.Units.iconSizes.small
+                            Kirigami.Icon {
+                                anchors.fill: parent
+                                visible: middleDelegate.modelData.icon !== ""
+                                source: middleDelegate.modelData.icon !== ""
+                                    ? Qt.resolvedUrl("../images/" + middleDelegate.modelData.icon) : ""
+                                isMask: true
+                                color: Kirigami.Theme.textColor
+                            }
+                            // An added site: the first letter of its name.
+                            LetterBadge {
+                                anchors.centerIn: parent
+                                visible: middleDelegate.modelData.user === true
+                                name: middleDelegate.modelData.user === true ? middleDelegate.modelData.text : ""
+                                size: Kirigami.Units.iconSizes.small
+                            }
                         }
                         QQC2.Label {
                             Layout.fillWidth: true

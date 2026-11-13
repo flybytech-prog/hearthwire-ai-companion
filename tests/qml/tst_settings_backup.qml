@@ -348,6 +348,78 @@ TestCase {
         compare(SettingsBackup.importPlan(settings, 0, tools).dropped, 1)
     }
 
+    // Round 2 (SEC L-2): a backup site whose id the page has on another host
+    // is another site; it gets a new id, the other keys follow it, and the
+    // confirmation lists Removes and Adds.
+    function renewTools(current, ids) {
+        var tools = testCase.tools()
+        var next = (ids || ["user-0000aaaa", "user-0000bbbb"]).slice()
+        tools.currentUserSites = current
+        tools.userSiteHosts = ChatSites.userSiteHosts
+        tools.newUserSiteId = function (excluded) {
+            var id = next.shift() || ""
+            tools.asked = (tools.asked || []).concat([excluded.slice()])
+            return id
+        }
+        tools.excludedIds = ["user-00c0ffee"]
+        return tools
+    }
+
+    function test_planRenewsAMovedSite() {
+        var moved = site(mistral.id, "Le Chat", "https://other.example.org/chat")
+        var settings = {chatUserSites: sitesText([moved, deepseek]),
+                        chatSites: JSON.stringify(["claude", mistral.id, deepseek.id]),
+                        chatSiteOrder: JSON.stringify([mistral.id, "claude"]),
+                        chatDefaultSite: mistral.id, middleClickOpens: mistral.id}
+        var tools = renewTools([mistral, deepseek])
+        var result = SettingsBackup.importPlan(settings, 0, tools)
+        compare(result.settings.chatUserSites,
+                sitesText([site("user-0000aaaa", "Le Chat", "https://other.example.org/chat"), deepseek]))
+        compare(result.settings.chatSites, JSON.stringify(["claude", "user-0000aaaa", deepseek.id]))
+        compare(result.settings.chatSiteOrder, JSON.stringify(["user-0000aaaa", "claude"]))
+        compare(result.settings.chatDefaultSite, "user-0000aaaa")
+        compare(result.settings.middleClickOpens, "user-0000aaaa")
+        compare(result.applied, 5)
+        compare(result.dropped, 0)
+        // Never an id the page, the backup or an owed delete has.
+        var excluded = tools.asked[0]
+        ;[mistral.id, deepseek.id, "user-00c0ffee"].forEach(function (id) { verify(excluded.indexOf(id) >= 0, id) })
+        // The page sees the old site removed and the new one added.
+        var listed = SettingsBackup.addressChanges({chatUserSites: sitesText([mistral, deepseek])}, result,
+                                                   addressTools())
+        compare(listed, [{kind: "add", id: "user-0000aaaa", name: "Le Chat", host: "other.example.org"},
+                         {kind: "remove", id: mistral.id, name: "Le Chat"}])
+    }
+
+    function test_planKeepsTheIdOnTheSameHost() {
+        var moved = site(mistral.id, "Mistral", "https://chat.mistral.ai/other")
+        var result = SettingsBackup.importPlan({chatUserSites: sitesText([moved])}, 0, renewTools([mistral]))
+        compare(result.settings.chatUserSites, sitesText([moved]))
+        // A site the page doesn't have keeps its id too.
+        result = SettingsBackup.importPlan({chatUserSites: sitesText([pi()])}, 0, renewTools([mistral]))
+        compare(result.settings.chatUserSites, sitesText([pi()]))
+    }
+
+    function pi() {
+        return site("user-0000beef", "Pi", "https://pi.ai/talk")
+    }
+
+    // No usable new id: the list is dropped (the page keeps its own).
+    function test_planDropsAMovedSiteWithoutANewId() {
+        var moved = site(mistral.id, "Le Chat", "https://other.example.org/")
+        var bad = [[""], ["claude"], ["user-00c0ffee"], [mistral.id]]
+        bad.forEach(function (ids) {
+            var result = SettingsBackup.importPlan({chatUserSites: sitesText([moved]), popupSize: "large"}, 0,
+                                                   renewTools([mistral], ids))
+            verify(result.settings.chatUserSites === undefined, JSON.stringify(ids))
+            compare(result.applied, 1)
+            compare(result.dropped, 1)
+        })
+        // Without the renewal tools nothing is renewed (older callers).
+        var plain = plan({chatUserSites: sitesText([moved])})
+        compare(plain.settings.chatUserSites, sitesText([moved]))
+    }
+
     function test_planWithoutUserSiteToolsDropsThem() {
         var result = SettingsBackup.importPlan({chatUserSites: sitesText([mistral])}, 0, {
             providers: Catalog.providers, webSiteIds: ChatSites.siteIds(), ringPairs: [],

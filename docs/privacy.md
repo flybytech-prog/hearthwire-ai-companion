@@ -225,8 +225,9 @@ there is no file dialog.
   name only the added sites the same file keeps. Before **Replace**, the
   confirmation lists each chat address the import would change, each site it
   adds, and each added site it removes, as plain text and shortened when
-  long. **A site the backup doesn't have is removed when you apply, and its
-  data is deleted** (as for Remove, see
+  long. An added site the backup moves to another host is listed as removed
+  and added. **A site the backup doesn't have, or moves to another host, is
+  removed when you apply, and its data is deleted** (as for Remove, see
   [One profile per chat site](#one-profile-per-chat-site)); a red warning
   says so before you apply. After
   **Replace** the values fill in the settings pages; nothing is saved until
@@ -336,9 +337,27 @@ Sites you add:
   deleted at the next unlock, also after a Plasma restart. The first prepare
   after each unlock also deletes the folder of any site that no longer
   exists. A value of
-  `chatUserSites` the widget can't read whole never deletes anything. Ids of
-  removed sites are never reused while their delete is owed. Defaults on the
-  Chat page and a backup import without a site remove it in the same way.
+  `chatUserSites` the widget can't read whole never deletes an entry it
+  can't read or that is missing from it: no site is removed and nothing is
+  pruned, and Settings → Chat refuses to add, edit, remove or reorder added
+  sites until the list is readable again (its warning counts every site id
+  in the applied value, readable or not). The one exception is the host
+  change below: an entry that is readable both before and after and now
+  points at another host is removed even when other entries are damaged. Ids of
+  removed sites are never reused while their delete is owed. A backup import
+  without a site, and a **Defaults** button on the Chat page if your Plasma
+  version shows one, remove it in the same way.
+- **A host change is a new site, however it arrives.** A backup import that
+  gives an added site an address on another host gives it a new id, so the
+  import confirmation lists it as removed and added, and on Apply the old
+  site's data is deleted as above. A hand edit of the settings file (or any
+  other writer) that keeps the id but changes the host is caught while the
+  widget runs: the site is removed the same way, its page never loads the
+  new host with the old profile (Home refuses too), and it opens again on a
+  new, signed-out profile. Limit: an edit made while the widget isn't
+  running can't be noticed, because the old host isn't stored; the site's
+  saved sign-in folder then stays with it. Don't edit added sites' addresses
+  by hand.
 
 ### Off: private in-memory profiles
 

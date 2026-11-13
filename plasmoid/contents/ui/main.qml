@@ -72,6 +72,9 @@ PlasmoidItem {
     readonly property bool chatUserSitesOk: root.chatUserSitesRead.ok
     // The added ids of the last ok read, runtime only; null until one.
     property var chatUserSiteIdsSeen: null
+    // {id: exact host} of the last read's readable entries (ok or not),
+    // runtime only: an id whose host changes is another site (M1).
+    property var chatUserSiteHostsSeen: ({})
     // Added sites that were removed in the settings: the Chat tab drops
     // their views and profiles (FullRepresentation → ChatView.dropSites).
     signal chatUserSitesRemoved(var ids)
@@ -1033,18 +1036,29 @@ PlasmoidItem {
         root.chatRemoveRewanted = root.chatRemoveRewanted.filter(function (id) { return id !== siteId })
     }
 
-    // chatUserSites changed. Only an ok read counts: the ids it no longer
-    // has since the last ok read are removed (chatRemoveUserSites).
+    // chatUserSites changed. An id it no longer has since the last ok read
+    // is removed (chatRemoveUserSites), but only on an ok read: a value that
+    // can't be read whole removes nothing. An id readable before and now
+    // whose host changed (a hand edit, another writer) is another site
+    // (M1): it is removed too, on any read, so its old sign-in is deleted
+    // and it opens again with a new profile.
     function chatSyncUserSites() {
         var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)
-        if (!read.ok)
-            return
-        var now = read.sites.map(function (site) { return site.id })
-        var seen = root.chatUserSiteIdsSeen
-        root.chatUserSiteIdsSeen = now
-        if (seen === null)
-            return
-        var removed = seen.filter(function (id) { return now.indexOf(id) < 0 })
+        var hostsBefore = root.chatUserSiteHostsSeen
+        var hostsNow = ChatSites.userSiteHosts(read.sites)
+        root.chatUserSiteHostsSeen = hostsNow
+        var moved = Object.keys(hostsNow).filter(function (id) {
+            return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id]
+        })
+        var removed = []
+        if (read.ok) {
+            var now = read.sites.map(function (site) { return site.id })
+            var seen = root.chatUserSiteIdsSeen
+            root.chatUserSiteIdsSeen = now
+            if (seen !== null)
+                removed = seen.filter(function (id) { return now.indexOf(id) < 0 })
+        }
+        removed = removed.concat(moved)
         if (removed.length > 0)
             root.chatRemoveUserSites(removed)
     }
@@ -1950,6 +1964,7 @@ PlasmoidItem {
         root.chatZoom = SettingsLogic.parseZoomMap(Plasmoid.configuration.chatSiteZoom, root.chatZoomIds)
         if (root.chatUserSitesOk)
             root.chatUserSiteIdsSeen = root.chatUserSites.map(function (site) { return site.id })
+        root.chatUserSiteHostsSeen = ChatSites.userSiteHosts(root.chatUserSites)
         // Plasma start, Unlock with KDE Wallet: open the folder silently when
         // the wallet is already open (the helper never prompts here). The
         // step is dropped unless status says locked with a wallet slot.

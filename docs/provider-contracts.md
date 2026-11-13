@@ -216,9 +216,14 @@ Replace; task 005):
 - `id`: `user-` and 8 lower-case hex digits, random (`ChatSites.newUserSiteId`),
   unique, never reused while its delete is owed.
 - `name`: stored trimmed, 1 to 40 UTF-16 units, no C0/C1 controls, lone
-  surrogates, `<`, `>`, `&` or invisible/bidi characters (U+00AD, U+061C,
-  U+180E, U+200B–200F, U+2028–202E, U+2060–2064, U+2066–2069, U+FEFF), and
-  not a built-in name, `Ollama` or another added site's name in any case.
+  surrogates, `<`, `>`, `&`, Default_Ignorable_Code_Point characters
+  (U+00AD, U+034F, U+061C, U+115F–1160, U+17B4–17B5, U+180B–180F,
+  U+200B–200F, U+202A–202E, U+2060–206F, U+3164, U+FE00–FE0F, U+FEFF,
+  U+FFA0, U+FFF0–FFF8, U+1BCA0–1BCA3, U+1D173–1D17A, U+E0000–E0FFF),
+  U+FFF9–FFFB, U+2800 or U+2028–2029; at least one letter or digit (Unicode
+  general category L* or N*); and not a built-in name, `Ollama` or another
+  added site's name in any case (code-point lower case, no confusable
+  matching).
   Codes, first failure wins: `name-empty`, `name-too-long`, `name-chars`,
   `name-taken`.
 - `url`, in order: `url-empty`, `too-long` (2048), `whitespace`,
@@ -243,7 +248,22 @@ Replace; task 005):
   `https:` goes to the browser. The built-in rules are unchanged (a recorded
   golden table, `tests/qml/ChatSitesGolden.js`).
 - An address on another host gives the site a new id; the old id is removed.
-- Removal (main.qml `chatRemoveUserSites`, after Apply, on an ok read): with
+  On import, `SettingsBackup.importPlan` (`renewMovedSites`) gives a backup
+  entry whose id the page has on another exact host a fresh id (never one of
+  the page's, the backup's, the applied value's or an owed delete's) and
+  follows it in `chatSites`, `chatSiteOrder`, `chatDefaultSite` and
+  `middleClickOpens`; the confirmation shows Removes plus Adds. At runtime
+  main.qml (`chatUserSiteHostsSeen`) removes an id that is a valid entry of
+  both the previous and the current read with another exact host, on any
+  read (ok or not); ChatWebView's `applyCustomUrls` blanks such a view and
+  `home()` refuses the new host, so the old profile never loads it. Not
+  caught: an edit made while the widget isn't running (the old host isn't
+  stored).
+- A damaged `chatUserSites` (not ok): Settings → Chat disables add, edit,
+  remove and reorder for added sites, and its removal warning counts every
+  `user-[0-9a-f]{8}` id in the raw applied text the page lacks.
+- Removal (main.qml `chatRemoveUserSites`, after Apply; absent ids only on an
+  ok read, moved ids as above): with
   Stay signed in the ids join `chatPendingSiteClears` first, then the Chat tab
   drops their views and profiles, and each folder goes through the same
   `wait` and `remove-site --site <id>` path as Clear <site> data (with its

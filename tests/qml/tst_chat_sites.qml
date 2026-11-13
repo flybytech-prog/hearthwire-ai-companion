@@ -130,17 +130,20 @@ TestCase {
 
     function test_userSiteNameError() {
         var err = function (name, others) { return ChatSites.userSiteNameError(name, others) }
+        var hex = function (text) {
+            return text.split("").map(function (unit) { return unit.charCodeAt(0).toString(16) }).join(" ")
+        }
         compare(err("Le Chat"), "")
         compare(err(""), "name-empty")
         compare(err("   "), "name-empty")
-        compare(err("　"), "name-empty")
+        compare(err("\u3000"), "name-empty")
         compare(err(undefined), "name-empty")
         compare(err(7), "name-empty")
         compare(err(new Array(41).join("a")), "")
         compare(err(new Array(42).join("a")), "name-too-long")
         // UTF-16 units: an emoji is two.
-        compare(err(new Array(21).join("😀")), "")
-        compare(err(new Array(21).join("😀") + "a"), "name-too-long")
+        compare(err(new Array(20).join("\ud83d\ude00") + "ab"), "")
+        compare(err(new Array(21).join("\ud83d\ude00") + "a"), "name-too-long")
         compare(err("é" + new Array(40).join("x")), "")
         compare(err(" A"), "name-chars", "stored trimmed")
         compare(err("A "), "name-chars")
@@ -152,12 +155,41 @@ TestCase {
         compare(err("A&B"), "name-chars")
         compare(err("A\ud800B"), "name-chars", "lone surrogate")
         compare(err("A\udc00"), "name-chars")
-        ;["­", "؜", "᠎", "​", "‏", " ", "‮", "⁠",
-          "⁤", "⁦", "⁩", "﻿"].forEach(function (mark) {
-            compare(err("A" + mark + "B"), "name-chars", mark.charCodeAt(0).toString(16))
+        // Every Default_Ignorable_Code_Point and the other invisible marks
+        // (round 2, SEC M-1), at both ends of each range: inside a name,
+        // after a built-in's name, and alone.
+        ;["\u00ad", "\u034f", "\u061c", "ᅟ", "ᅠ", "\u17b4", "\u17b5", "\u180b", "\u180e", "\u180f",
+          "\u200b", "\u200f", "\u2028", "\u2029", "\u202a", "\u202e", "\u2060", "\u2065", "\u206f",
+          "⠀", "ㅤ", "\ufe00", "\ufe0f", "\ufeff", "ﾠ", "\ufff0", "\ufff8", "\ufff9", "\ufffb",
+          "\ud82f\udca0", "\ud82f\udca3", "\ud834\udd73", "\ud834\udd7a", "\udb40\udc00", "\udb40\udc01",
+          "\udb40\udc20", "\udb43\udfff"].forEach(function (mark) {
+            compare(err("A" + mark + "B"), "name-chars", hex(mark))
+            compare(err("Claude" + mark), "name-chars", "Claude + " + hex(mark))
+            // Alone, the ones that are JS whitespace trim to nothing.
+            compare(err(mark), mark.trim() === "" ? "name-empty" : "name-chars", "alone " + hex(mark))
         })
+        // Their neighbours are allowed.
+        ;["¬", "\u034e", "\u0350", "ឳ", "\u17b6", "‧", "⁰", "⟿", "⠁", "ㅣ",
+          "ㅥ", "﷿", "︐", "ﾟ", "ﾡ", "\uffef", "￼", "\ud82f\udc9f", "\ud82f\udca4",
+          "\ud834\udd72", "\ud834\udd7b", "\udb3f\udfff", "\udb44\udc00"].forEach(function (mark) {
+            compare(err("A" + mark + "B"), "", hex(mark))
+        })
+        // At least one letter or digit.
+        compare(err("..."), "name-chars")
+        compare(err("-"), "name-chars")
+        compare(err("\ud83d\ude00"), "name-chars", "an emoji alone")
+        compare(err("\u0301"), "name-chars", "a combining mark alone")
+        compare(err("7"), "")
+        compare(err("١"), "", "Nd")
+        compare(err("½"), "", "No")
+        compare(err("Ⅰ"), "", "Nl")
+        compare(err("日"), "", "Lo")
+        compare(err("\ud840\udc00"), "", "astral Lo (U+20000)")
+        compare(err("\ud835\udc00"), "", "U+1D400 math letter")
+        compare(err("\ud83d\ude00 Chat"), "")
+        compare(err("e\u0301"), "")
         // Other spaces inside are fine.
-        compare(err("Le Chat"), "")
+        compare(err("Le\u00a0Chat"), "")
         compare(err("Claude"), "name-taken")
         compare(err("claude"), "name-taken")
         compare(err("GITHUB COPILOT"), "name-taken")
@@ -167,6 +199,18 @@ TestCase {
         compare(err("le chat", ["Le Chat"]), "name-taken")
         compare(err("Le Chat", [testCase.pi]), "")
         compare(err("Claude 2"), "")
+    }
+
+    // The letter-or-digit table, against a few category facts.
+    function test_isLetterOrDigit() {
+        ;[0x30, 0x39, 0x41, 0x7a, 0xaa, 0xb2, 0x3a3, 0x661, 0x4e00, 0xac00, 0x2160, 0x1f100, 0x20000,
+          0x1d400].forEach(function (point) {
+            verify(ChatSites.isLetterOrDigit(point), point.toString(16))
+        })
+        ;[0x20, 0x2f, 0x3a, 0x40, 0x5b, 0x60, 0x7b, 0xad, 0x301, 0x200b, 0x2028, 0x3000, 0xd800, 0xdfff,
+          0xe000, 0xfeff, 0x1f600, 0x10ffff, -1, 0x110000].forEach(function (point) {
+            verify(!ChatSites.isLetterOrDigit(point), point.toString(16))
+        })
     }
 
     function test_userSiteUrlError() {
@@ -181,7 +225,7 @@ TestCase {
         compare(err("https://a.example/" + new Array(2031).join("x")), "")
         compare(err("https://a.example/" + new Array(2032).join("x")), "too-long")
         compare(err("https://a.example/ x"), "whitespace")
-        compare(err("https://a.example/ "), "whitespace")
+        compare(err("https://a.example/\u00a0"), "whitespace")
         compare(err("https://a.example/\u0001"), "whitespace")
         compare(err("https://a.example/\u0085"), "url-chars")
         compare(err("https://пример.рф/"), "url-chars")
@@ -217,6 +261,32 @@ TestCase {
         // A numeric last label that can't be IPv4 counts as this computer.
         compare(err("https://example.0x1/"), "loopback-not-allowed")
         compare(err("https://example.1/"), "loopback-not-allowed")
+    }
+
+    // Round 2 (SEC M-2): every id in a stored text, read or not.
+    function test_rawUserSiteIds() {
+        var damaged = JSON.stringify([testCase.mistral, {id: "user-00c0ffee", name: "x", url: "http://10.0.0.1/",
+                                                        local_kind: "private"}, testCase.mistral])
+        compare(ChatSites.rawUserSiteIds(damaged), ["user-3fa9c01b", "user-00c0ffee"])
+        compare(ChatSites.rawUserSiteIds("[{"), [])
+        compare(ChatSites.rawUserSiteIds("user-0000beef user-0000BEEF user-0000bee"), ["user-0000beef"])
+        compare(ChatSites.rawUserSiteIds(undefined), [])
+        // Applied vs page: the unreadable entry the page lost counts.
+        compare(ChatSites.removedUserSiteIds(damaged, JSON.stringify([testCase.mistral])), ["user-00c0ffee"])
+        compare(ChatSites.removedUserSiteIds(damaged, damaged), [])
+        compare(ChatSites.removedUserSiteIds(damaged, "[]"), ["user-3fa9c01b", "user-00c0ffee"])
+        compare(ChatSites.removedUserSiteIds(JSON.stringify(testCase.added), JSON.stringify([testCase.pi])),
+                ["user-3fa9c01b"])
+        // A page name that looks like an id doesn't hide a removal.
+        var spoof = JSON.stringify([{id: "user-00000001", name: "user-3fa9c01b", url: "https://a.example/"}])
+        compare(ChatSites.removedUserSiteIds(JSON.stringify([testCase.mistral]), spoof), ["user-3fa9c01b"])
+    }
+
+    function test_userSiteHosts() {
+        compare(ChatSites.userSiteHosts(testCase.added), {"user-3fa9c01b": "chat.mistral.ai", "user-0000beef": "pi.ai"})
+        compare(ChatSites.userSiteHosts([{id: "user-00000001", name: "A", url: "https://A.Example./x"}]),
+                {"user-00000001": "a.example"})
+        compare(ChatSites.userSiteHosts(undefined), {})
     }
 
     function test_addressClass() {
@@ -505,8 +575,8 @@ TestCase {
         compare(ChatSites.badgeLetter("le Chat"), "L")
         compare(ChatSites.badgeLetter("  pi "), "P")
         compare(ChatSites.badgeLetter("éclair"), "É")
-        compare(ChatSites.badgeLetter("éclair"), "E", "combining mark: the first code point")
-        compare(ChatSites.badgeLetter("😀 Smile"), "😀")
+        compare(ChatSites.badgeLetter("e\u0301clair"), "E", "combining mark: the first code point")
+        compare(ChatSites.badgeLetter("\ud83d\ude00 Smile"), "\ud83d\ude00")
         compare(ChatSites.badgeLetter("\ud83d"), "\ud83d".toUpperCase())
         compare(ChatSites.badgeLetter("日本"), "日")
         compare(ChatSites.badgeLetter(""), "?")
@@ -1399,7 +1469,7 @@ TestCase {
         compare(ChatSites.displayHost("https://例え.テスト/"), "xn--r8jz45g.xn--zckzah")
         // Cyrillic look-alike of "apple": never shown as Latin letters.
         compare(ChatSites.displayHost("https://аррӏе.com/"), "xn--80ak6aa92e.com")
-        compare(ChatSites.displayHost("https://😀.example/"), "xn--e28h.example")
+        compare(ChatSites.displayHost("https://\ud83d\ude00.example/"), "xn--e28h.example")
     }
 
     function test_displayHost() {

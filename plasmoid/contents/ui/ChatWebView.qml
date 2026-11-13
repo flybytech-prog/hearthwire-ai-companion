@@ -200,8 +200,13 @@ Item {
         if (chatWeb.overlayActive)
             chatWeb.closeOverlay()
         var url = ChatSites.homeUrl(chatWeb.activeSiteId, chatWeb.customUrls, chatWeb.userSites)
-        if (chatWeb.paneView && url !== "")
-            chatWeb.paneView.url = url
+        if (!chatWeb.paneView || url === "")
+            return
+        // Never an added site's new host with its old profile (M1).
+        if (ChatSites.isUserSiteId(chatWeb.paneView.site)
+                && chatWeb.hostOf(url) !== chatWeb.hostOf(chatWeb.paneView.homeUrl))
+            return
+        chatWeb.paneView.url = url
     }
 
     // The toolbar's Open in browser: the user's own click, for a page of
@@ -725,6 +730,9 @@ Item {
     }
 
     // A changed address moves only the views whose home actually changed.
+    // An added site on another host is another site (M1): its view never
+    // goes there with the old profile; it is blanked, and main.qml drops
+    // the site (dropSites), which comes back with a new profile.
     function applyCustomUrls() {
         for (var index = 0; index < pages.count; index++) {
             var view = pages.itemAt(index)
@@ -735,11 +743,21 @@ Item {
                 continue
             if (chatWeb.overlayView && chatWeb.overlayView.site === view.site)
                 chatWeb.closeOverlay()
+            if (ChatSites.isUserSiteId(view.site) && chatWeb.hostOf(url) !== chatWeb.hostOf(view.homeUrl)) {
+                view.url = "about:blank"
+                continue
+            }
             view.homeUrl = url
             view.failed = false
             view.crashed = false
             view.url = url
         }
+    }
+
+    // The exact host of an http(s) address, "" when it has none.
+    function hostOf(url) {
+        var parsed = ChatSites.parseUrl(url)
+        return parsed && parsed.host !== "" ? ChatSites.normalizeHost(parsed.host) : ""
     }
 
     onSiteIdsChanged: chatWeb.syncViews()

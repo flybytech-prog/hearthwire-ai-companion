@@ -138,12 +138,15 @@ KCM.SimpleKCM {
         page.cfg_chatSites, page.tableIds)
     readonly property var enabledIds: page.enabledSites.map(function (site) { return site.id })
     // Added sites the applied settings have and this page no longer does:
-    // applying signs them out and deletes their site data.
-    readonly property var removedUserSiteIds: ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)
-        .sites.map(function (site) { return site.id }).filter(function (id) {
-            return page.userSiteIds.indexOf(id) < 0
-        })
-    readonly property bool canAddSite: page.userSites.length < ChatSites.MAX_USER_SITES
+    // applying signs them out and deletes their site data. Every id in the
+    // applied text counts, also of entries this version can't read.
+    readonly property var removedUserSiteIds: ChatSites.removedUserSiteIds(
+        Plasmoid.configuration.chatUserSites, page.cfg_chatUserSites)
+    // The page's added sites read whole. When they don't (an entry this
+    // version can't read, a hand edit), added sites can't be added, edited,
+    // removed or moved here: a write would drop the unreadable entries.
+    readonly property bool userSitesReadable: ChatSites.parseUserSites(page.cfg_chatUserSites).ok
+    readonly property bool canAddSite: page.userSitesReadable && page.userSites.length < ChatSites.MAX_USER_SITES
     // Every added id this page has seen (it opened with them or made them):
     // a new site never takes one, nor one whose delete is still owed.
     property var seenUserSiteIds: []
@@ -186,6 +189,16 @@ KCM.SimpleKCM {
         var ids = OllamaChat.allSiteIds(ChatSites.siteIds(page.userSites)).filter(function (id) {
             return id === siteId ? enabled : page.enabledIds.indexOf(id) >= 0
         })
+        // Added ids this page can't read stay as they were.
+        var stored = []
+        try {
+            stored = JSON.parse(page.cfg_chatSites)
+        } catch (error) {
+        }
+        if (Array.isArray(stored))
+            ids = ids.concat(stored.filter(function (id, index) {
+                return ChatSites.isUserSiteId(id) && ids.indexOf(id) < 0 && stored.indexOf(id) === index
+            }))
         page.cfg_chatSites = JSON.stringify(ids)
         if (ids.indexOf(page.cfg_chatDefaultSite) < 0 && ids.length > 0)
             page.cfg_chatDefaultSite = page.tableIds.filter(function (id) { return ids.indexOf(id) >= 0 })[0]
@@ -253,6 +266,8 @@ KCM.SimpleKCM {
     // host gives the site a new id at the same place; the old one is
     // removed (its data is deleted on Apply).
     function saveUserSite(siteId, name, url) {
+        if (!page.userSitesReadable)
+            return "damaged"
         var adding = siteId === "new"
         var at = page.userSiteIds.indexOf(siteId)
         if (!adding && at < 0)
@@ -314,7 +329,7 @@ KCM.SimpleKCM {
     // happens until Apply; then main.qml signs it out and deletes its data.
     function removeUserSite(siteId) {
         page.confirmingRemove = ""
-        if (page.userSiteIds.indexOf(siteId) < 0)
+        if (!page.userSitesReadable || page.userSiteIds.indexOf(siteId) < 0)
             return
         if (page.editingId === siteId)
             page.closeEditor()
@@ -333,6 +348,8 @@ KCM.SimpleKCM {
 
     // ↑ (-1) and ↓ (+1): the order only, no site or data changes.
     function moveSite(siteId, delta) {
+        if (!page.userSitesReadable && ChatSites.isUserSiteId(siteId))
+            return
         page.cfg_chatSiteOrder = ChatSites.serializeSiteOrder(
             ChatSites.moveInOrder(page.tableIds, siteId, delta), page.userSites)
     }
@@ -367,6 +384,8 @@ KCM.SimpleKCM {
             return ""
         case "full":
             return i18n("Can't add more sites.")
+        case "damaged":
+            return i18n("Some added sites can't be read by this version, so added sites can't be changed here.")
         case "name-empty":
             return i18n("Enter a name.")
         case "name-too-long":
@@ -427,6 +446,19 @@ KCM.SimpleKCM {
     readonly property real onColumnWidth: Kirigami.Units.gridUnit * 2
     readonly property real iconColumnWidth: Kirigami.Units.iconSizes.smallMedium
     readonly property real nameColumnWidth: Kirigami.Units.gridUnit * 10
+    // The ↑ ↓ Edit Remove buttons' width, as the first row lays them out.
+    property real actionsColumnWidth: 0
+
+    // A tooltip that never reads its text as markup (addresses and names).
+    component PlainToolTip: QQC2.ToolTip {
+        id: tip
+        contentItem: QQC2.Label {
+            objectName: "plainToolTipText"
+            text: tip.text
+            textFormat: Text.PlainText
+            wrapMode: Text.WrapAnywhere
+        }
+    }
 
     // The inline editor of one row (or of a new site), under that row, made
     // by a Repeater of 0 or 1 (no Loader on the settings pages). It
@@ -446,6 +478,8 @@ KCM.SimpleKCM {
 
         Layout.fillWidth: true
         Layout.leftMargin: page.onColumnWidth + page.iconColumnWidth + Kirigami.Units.smallSpacing * 2
+        // Its fields end where the table's addresses do, before the actions.
+        Layout.rightMargin: page.actionsColumnWidth + Kirigami.Units.smallSpacing
         spacing: Kirigami.Units.smallSpacing
 
         function save() {
@@ -502,7 +536,10 @@ KCM.SimpleKCM {
                 maximumLength: ChatSites.MAX_USER_SITE_NAME * 2
                 inputMethodHints: Qt.ImhNoPredictiveText
                 Accessible.name: i18n("Site name")
-                onAccepted: editor.save()
+                // Enter saves this editor only; the settings dialog's OK
+                // never sees it.
+                Keys.onReturnPressed: (event) => { editor.save(); event.accepted = true }
+                Keys.onEnterPressed: (event) => { editor.save(); event.accepted = true }
                 Keys.onEscapePressed: page.closeEditor()
             }
 
@@ -525,7 +562,8 @@ KCM.SimpleKCM {
                     Accessible.name: editor.kind === "ollama" ? i18n("Ollama address")
                         : editor.kind === "user" ? i18n("Site address")
                         : i18n("Address for %1", editor.site ? editor.site.name : "")
-                    onAccepted: editor.save()
+                    Keys.onReturnPressed: (event) => { editor.save(); event.accepted = true }
+                    Keys.onEnterPressed: (event) => { editor.save(); event.accepted = true }
                     Keys.onEscapePressed: page.closeEditor()
                 }
                 QQC2.ToolButton {
@@ -718,58 +756,89 @@ KCM.SimpleKCM {
                         HoverHandler {
                             id: addressHover
                         }
-                        QQC2.ToolTip.text: page.rowAddress(siteRow.modelData)
-                        QQC2.ToolTip.visible: addressHover.hovered && addressLabel.text !== ""
-                    }
-                    QQC2.ToolButton {
-                        objectName: "moveUp"
-                        icon.name: "go-up"
-                        display: QQC2.AbstractButton.IconOnly
-                        text: i18n("Move %1 up", siteRow.modelData.name)
-                        enabled: siteRow.index > 0
-                        onClicked: page.moveSite(siteRow.siteId, -1)
-                        QQC2.ToolTip.text: text
-                        QQC2.ToolTip.visible: hovered
-                    }
-                    QQC2.ToolButton {
-                        objectName: "moveDown"
-                        icon.name: "go-down"
-                        display: QQC2.AbstractButton.IconOnly
-                        text: i18n("Move %1 down", siteRow.modelData.name)
-                        enabled: siteRow.index < page.tableSites.length - 1
-                        onClicked: page.moveSite(siteRow.siteId, 1)
-                        QQC2.ToolTip.text: text
-                        QQC2.ToolTip.visible: hovered
-                    }
-                    QQC2.ToolButton {
-                        objectName: "editSite"
-                        icon.name: "document-edit"
-                        display: QQC2.AbstractButton.IconOnly
-                        text: i18n("Edit %1", siteRow.modelData.name)
-                        checkable: true
-                        checked: page.editingId === siteRow.siteId
-                        onClicked: page.editingId === siteRow.siteId ? page.closeEditor()
-                            : page.openEditor(siteRow.siteId)
-                        QQC2.ToolTip.text: text
-                        QQC2.ToolTip.visible: hovered
-                    }
-                    QQC2.ToolButton {
-                        id: removeButton
-                        objectName: "removeSite"
-                        icon.name: "list-remove"
-                        display: QQC2.AbstractButton.IconOnly
-                        text: i18n("Remove %1", siteRow.modelData.name)
-                        // Built-ins keep the column's width.
-                        opacity: siteRow.added ? 1 : 0
-                        enabled: siteRow.added
-                        Accessible.ignored: !siteRow.added
-                        onClicked: {
-                            page.closeEditor()
-                            page.confirmingRemove = siteRow.siteId
+                        PlainToolTip {
+                            objectName: "siteAddressTip"
+                            text: page.rowAddress(siteRow.modelData)
+                            visible: addressHover.hovered && addressLabel.text !== ""
                         }
-                        QQC2.ToolTip.text: text
-                        QQC2.ToolTip.visible: hovered && siteRow.added
                     }
+                    RowLayout {
+                        id: actionsRow
+                        spacing: Kirigami.Units.smallSpacing
+                        // Added sites stay as they are while the list can't be read.
+                        readonly property bool locked: siteRow.added && !page.userSitesReadable
+
+                        QQC2.ToolButton {
+                            id: upButton
+                            objectName: "moveUp"
+                            icon.name: "go-up"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: i18n("Move %1 up", siteRow.modelData.name)
+                            enabled: siteRow.index > 0 && !actionsRow.locked
+                            onClicked: page.moveSite(siteRow.siteId, -1)
+                            PlainToolTip {
+                                text: upButton.text
+                                visible: upButton.hovered
+                            }
+                        }
+                        QQC2.ToolButton {
+                            id: downButton
+                            objectName: "moveDown"
+                            icon.name: "go-down"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: i18n("Move %1 down", siteRow.modelData.name)
+                            enabled: siteRow.index < page.tableSites.length - 1 && !actionsRow.locked
+                            onClicked: page.moveSite(siteRow.siteId, 1)
+                            PlainToolTip {
+                                text: downButton.text
+                                visible: downButton.hovered
+                            }
+                        }
+                        QQC2.ToolButton {
+                            id: editButton
+                            objectName: "editSite"
+                            icon.name: "document-edit"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: i18n("Edit %1", siteRow.modelData.name)
+                            enabled: !actionsRow.locked
+                            checkable: true
+                            checked: page.editingId === siteRow.siteId
+                            onClicked: page.editingId === siteRow.siteId ? page.closeEditor()
+                                : page.openEditor(siteRow.siteId)
+                            PlainToolTip {
+                                text: editButton.text
+                                visible: editButton.hovered
+                            }
+                        }
+                        QQC2.ToolButton {
+                            id: removeButton
+                            objectName: "removeSite"
+                            icon.name: "list-remove"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: i18n("Remove %1", siteRow.modelData.name)
+                            // Built-ins keep the column's width.
+                            opacity: siteRow.added ? 1 : 0
+                            enabled: siteRow.added && !actionsRow.locked
+                            Accessible.ignored: !siteRow.added
+                            onClicked: {
+                                page.closeEditor()
+                                page.confirmingRemove = siteRow.siteId
+                            }
+                            PlainToolTip {
+                                text: removeButton.text
+                                visible: removeButton.hovered && siteRow.added
+                            }
+                        }
+                    }
+                }
+
+                // The editors' right edge follows the action buttons.
+                Binding {
+                    target: page
+                    property: "actionsColumnWidth"
+                    value: actionsRow.implicitWidth
+                    when: siteRow.index === 0
+                    restoreMode: Binding.RestoreNone
                 }
 
                 // Remove asks first, in the row.
@@ -810,8 +879,21 @@ KCM.SimpleKCM {
             }
         }
 
+        // An added site this version can't read (a hand edit, a newer
+        // version's entry): nothing about added sites changes here.
+        QQC2.Label {
+            objectName: "damagedSites"
+            Layout.fillWidth: true
+            visible: !page.userSitesReadable
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            color: Kirigami.Theme.negativeTextColor
+            text: i18n("Some added sites can't be read by this version, so added sites can't be added, changed, moved or removed here. Nothing is deleted while this is so.")
+        }
+
         QQC2.Button {
             objectName: "addSite"
+            enabled: page.userSitesReadable
             icon.name: "list-add"
             text: i18n("Add site…")
             checkable: true

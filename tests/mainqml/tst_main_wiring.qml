@@ -1848,7 +1848,7 @@ TestCase {
         var label = generalPart(page, "backupAddressChanges")
         compare(label.visible, true)
         compare(label.textFormat, Text.PlainText)
-        compare(label.text, ["This changes 3 chat addresses:",
+        compare(label.text, ["This changes 3 chat sites or addresses:",
                              "Claude: https://old.example.org/ → " + ChatSites.homeUrl("claude", {}),
                              "ChatGPT: " + ChatSites.homeUrl("chatgpt", {}) + " → https://new.example.org/",
                              "Ollama: http://127.0.0.1:11434 → http://[::1]:11434"].join("\n"))
@@ -1869,7 +1869,7 @@ TestCase {
         var page = backupPage()
         importing(page, {chatOllamaUrl: "http://[::1]:11434"})
         compare(generalPart(page, "backupAddressChanges").text,
-                "This changes 1 chat address:\nOllama: " + page.cfg_chatOllamaUrl + " → http://[::1]:11434")
+                "This changes 1 chat site or address:\nOllama: " + page.cfg_chatOllamaUrl + " → http://[::1]:11434")
         generalPart(page, "backupImportConfirm").actions[0].trigger()
         compare(page.cfg_chatOllamaUrl, "http://[::1]:11434")
         compare(generalPart(page, "backupAddressChanges").visible, false)
@@ -1889,7 +1889,7 @@ TestCase {
             many.push({id: "claude", from: "https://a.example.org/", to: "https://b.example.org/<a href=x>"})
         var lines = page.addressChangeText(many).split("\n")
         compare(lines.length, 10)
-        compare(lines[0], "This changes 11 chat addresses:")
+        compare(lines[0], "This changes 11 chat sites or addresses:")
         compare(lines[9], "…and 3 more.")
     }
 
@@ -3721,8 +3721,10 @@ TestCase {
         var label = generalPart(page, "backupAddressChanges")
         compare(label.visible, true)
         compare(label.textFormat, Text.PlainText)
-        compare(label.text, ["This changes 2 chat addresses:", "Adds Pi (pi.ai)",
-                             "Removes Le Chat and deletes its site data when you apply"].join("\n"))
+        // Removed sites first, then added ones (round 2, SEC I-4).
+        compare(label.text, ["This changes 2 chat sites or addresses:",
+                             "Removes Le Chat and deletes its site data when you apply",
+                             "Adds Pi (pi.ai)"].join("\n"))
     }
 
     // Replace sets both keys; a list without the applied sites warns.
@@ -3760,5 +3762,260 @@ TestCase {
         compare(page.cfg_chatSiteOrderDefault, "")
         compare(Plasmoid.configuration.chatUserSites, "[]", "main.xml default")
         compare(Plasmoid.configuration.chatSiteOrder, "", "main.xml default")
+    }
+
+    // --- task 005 round 2 ----------------------------------------------------
+
+    Component {
+        id: keyCatcher
+        Item {
+            property int returns: 0
+            property int enters: 0
+            width: 900
+            height: 700
+            Keys.onReturnPressed: returns++
+            Keys.onEnterPressed: enters++
+        }
+    }
+
+    // REV M-1: Enter in an editor field saves that editor only; the
+    // dialog's own Return (OK, which would apply everything) never sees it.
+    function test_settingsEnterSavesOnlyTheEditor() {
+        var catcher = createTemporaryObject(keyCatcher, testCase)
+        var page = chatPage({chatSites: JSON.stringify(["claude"])})
+        page.parent = catcher
+        partOf(page, "addSite").clicked()
+        var name = partOf(page, "editorName")
+        var address = partOf(page, "editorAddress")
+        name.text = "Bad"
+        address.text = "http://10.0.0.1/"
+        address.forceActiveFocus()
+        tryVerify(function () { return address.activeFocus }, 3000)
+        keyClick(Qt.Key_Return)
+        compare(catcher.returns, 0, "OK never fires")
+        compare(partOf(page, "editorError").visible, true)
+        compare(partOf(page, "editorError").text, "Only https:// addresses can be added.")
+        compare(page.cfg_chatUserSites, "[]")
+        keyClick(Qt.Key_Enter)
+        compare(catcher.enters, 0, "keypad Enter too")
+        // The name field as well; a valid value is saved, still no OK.
+        address.text = "https://chat.mistral.ai/"
+        name.forceActiveFocus()
+        tryVerify(function () { return name.activeFocus }, 3000)
+        keyClick(Qt.Key_Return)
+        compare(catcher.returns, 0)
+        compare(page.editingId, "")
+        compare(ChatSites.parseUserSites(page.cfg_chatUserSites).sites[0].name, "Bad")
+        // A built-in's address field too.
+        page.openEditor("claude")
+        var builtIn = partOf(page, "editorAddress")
+        builtIn.text = "https://user@claude.example.org/"
+        builtIn.forceActiveFocus()
+        tryVerify(function () { return builtIn.activeFocus }, 3000)
+        keyClick(Qt.Key_Return)
+        compare(catcher.returns, 0)
+        compare(page.cfg_chatCustomUrls, "{}")
+    }
+
+    readonly property string damagedList: JSON.stringify([
+        {id: "user-3fa9c01b", name: "Le Chat", url: "https://chat.mistral.ai/chat"},
+        {id: "user-00c0ffee", name: "NAS", url: "http://10.0.0.5/", local_kind: "private"}
+    ])
+
+    // SEC M-2 / REV L-1: a list this version can't read whole can't be
+    // changed here, so no write can drop the unreadable entry.
+    function test_settingsDamagedListIsLocked() {
+        var page = chatPage({chatUserSites: damagedList,
+                             chatSites: JSON.stringify(["claude", "user-3fa9c01b", "user-00c0ffee"])})
+        verify(!page.userSitesReadable)
+        var message = partOf(page, "damagedSites")
+        compare(message.visible, true)
+        compare(message.textFormat, Text.PlainText)
+        compare(partOf(page, "addSite").enabled, false)
+        var row = rowOf(page, "user-3fa9c01b")
+        verify(row !== null, "the readable entry still shows")
+        ;["editSite", "removeSite", "moveUp", "moveDown"].forEach(function (name) {
+            compare(partOf(row, name).enabled, false, name)
+        })
+        compare(partOf(rowOf(page, "claude"), "editSite").enabled, true, "built-ins stay editable")
+        compare(page.saveUserSite("new", "Pi", "https://pi.ai/"), "damaged")
+        compare(page.saveUserSite("user-3fa9c01b", "Mistral", "https://chat.mistral.ai/chat"), "damaged")
+        page.removeUserSite("user-3fa9c01b")
+        page.moveSite("user-3fa9c01b", 1)
+        compare(page.cfg_chatUserSites, damagedList, "never rewritten")
+        compare(page.cfg_chatSiteOrder, "")
+        // Built-in changes still work and keep the unreadable id on.
+        compare(page.saveCustomUrl("claude", "https://claude.example.org/"), "")
+        page.setEnabled("chatgpt", true)
+        compare(JSON.parse(page.cfg_chatSites), ["claude", "chatgpt", "user-3fa9c01b", "user-00c0ffee"])
+        compare(partOf(page, "removalWarning").visible, false)
+        // A write elsewhere (a backup Replace) that drops it: counted.
+        page.cfg_chatUserSites = userSites([testCase.lechat])
+        var removal = partOf(page, "removalWarning")
+        compare(removal.visible, true)
+        compare(removal.text, "When you apply, 1 removed site is signed out and its site data is deleted.")
+        page.cfg_chatUserSites = "[]"
+        compare(removal.text, "When you apply, 2 removed sites are signed out and their site data is deleted.")
+    }
+
+    function test_generalWarningCountsUnreadableEntries() {
+        var page = backupPage()
+        Plasmoid.configuration.chatUserSites = damagedList
+        page.cfg_chatUserSites = damagedList
+        compare(generalPart(page, "removalWarning").visible, false)
+        importing(page, {chatUserSites: userSites([testCase.lechat])})
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        var removal = generalPart(page, "removalWarning")
+        compare(removal.visible, true)
+        compare(removal.text, "When you apply, 1 removed site is signed out and its site data is deleted.")
+    }
+
+    // Popups (tooltips) hang in `data`, not `children`.
+    function inData(item, objectName) {
+        if (!item)
+            return null
+        if (item.objectName === objectName)
+            return item
+        var lists = [item.data || [], item.children || []]
+        for (var at = 0; at < lists.length; at++) {
+            for (var index = 0; index < lists[at].length; index++) {
+                var found = inData(lists[at][index], objectName)
+                if (found)
+                    return found
+            }
+        }
+        return item.contentItem && item.contentItem !== item ? inData(item.contentItem, objectName) : null
+    }
+
+    // SEC L-1: the address tooltip never reads an address as markup.
+    function test_settingsAddressTooltipIsPlainText() {
+        var rich = "https://claude.example.org/<h1>big</h1>&amp;"
+        verify(ChatSites.validateCustomUrl("claude", rich).ok, "a custom address may hold < > &")
+        var page = chatPage({chatCustomUrls: JSON.stringify({claude: rich})})
+        var tip = inData(rowOf(page, "claude"), "siteAddressTip")
+        verify(tip !== null, "the address tooltip")
+        compare(tip.text, rich)
+        compare(tip.contentItem.objectName, "plainToolTipText")
+        compare(tip.contentItem.textFormat, Text.PlainText)
+        compare(tip.contentItem.text, rich)
+        // Every tooltip naming a site is plain too.
+        var edit = inData(partOf(rowOf(page, "claude"), "editSite"), "plainToolTipText")
+        verify(edit !== null)
+        compare(edit.textFormat, Text.PlainText)
+    }
+
+    readonly property var lechatMoved: ({id: "user-3fa9c01b", name: "Le Chat", url: "https://other.example.org/chat"})
+
+    // SEC L-2: the same id on another host is another site: removed (its
+    // data deleted) and shown again with a new profile.
+    function test_movedSiteIsRemovedThenAdded() {
+        var main = loadMain(addedSettings())
+        var removed = []
+        main.chatUserSitesRemoved.connect(function (ids) { removed.push(ids) })
+        // Same host: nothing.
+        Plasmoid.configuration.chatUserSites = userSites([
+            {id: "user-3fa9c01b", name: "Mistral", url: "https://chat.mistral.ai/other"}, testCase.pi])
+        compare(removed, [])
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechatMoved, testCase.pi])
+        compare(removed, [["user-3fa9c01b"]])
+        compare(main.chatSiteIds, ["claude", "chatgpt", "user-3fa9c01b", "user-0000beef"], "still a site")
+        compare(main.chatUserSiteHostsSeen, {"user-3fa9c01b": "other.example.org", "user-0000beef": "pi.ai"})
+        // Also when the rest of the value can't be read: the moved entry
+        // itself is readable before and after.
+        Plasmoid.configuration.chatUserSites = JSON.stringify([testCase.lechat,
+            Object.assign({local: true}, testCase.pi)])
+        compare(removed, [["user-3fa9c01b"], ["user-3fa9c01b"]])
+        compare(main.chatUserSiteIdsSeen, ["user-3fa9c01b", "user-0000beef"], "a damaged read removes nothing else")
+    }
+
+    function test_movedSiteWithSavedSignInsIsDeletedBeforeItsNextPrepare() {
+        var main = unlockedMain(addedSettings(), false, knownWithAdded)
+        var generation = main.chatGeneration
+        main.chatSiteId = "user-3fa9c01b"
+        main.chatSiteWanted("user-3fa9c01b")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites user-3fa9c01b"))
+        compare(main.chatReadySites, ["claude", "user-3fa9c01b"])
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechatMoved, testCase.pi])
+        compare(Plasmoid.configuration.chatPendingSiteClears, "user-3fa9c01b")
+        compare(main.chatReadySites, ["claude"], "its old folder no longer counts")
+        tryVerify(function () { return main.chatOp === "wait" }, 3000)
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site user-3fa9c01b"))
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
+        // Shown again: a new folder, made after the delete.
+        main.chatSiteWanted("user-3fa9c01b")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites user-3fa9c01b"))
+        compare(main.chatKnownSites, knownWithAdded, "the id itself stays")
+    }
+
+    // SEC L-2 on import: shown as Removes and Adds, applied with a new id.
+    function test_backupMovedSiteIsRemovedAndAdded() {
+        var page = backupPage()
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechat])
+        page.cfg_chatUserSites = userSites([testCase.lechat])
+        importing(page, {chatUserSites: userSites([testCase.lechatMoved]),
+                         chatSites: JSON.stringify(["claude", "user-3fa9c01b"])})
+        compare(generalPart(page, "backupAddressChanges").text,
+                ["This changes 2 chat sites or addresses:",
+                 "Removes Le Chat and deletes its site data when you apply",
+                 "Adds Le Chat (other.example.org)"].join("\n"))
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        var sites = ChatSites.parseUserSites(page.cfg_chatUserSites).sites
+        compare(sites.length, 1)
+        verify(sites[0].id !== "user-3fa9c01b" && ChatSites.isUserSiteId(sites[0].id))
+        compare(sites[0].url, testCase.lechatMoved.url)
+        compare(JSON.parse(page.cfg_chatSites), ["claude", sites[0].id])
+        compare(generalPart(page, "removalWarning").visible, true)
+    }
+
+    // SEC I-4: every added and removed site is listed, first; only the
+    // address changes are capped.
+    function test_importListsEverySiteChangeFirst() {
+        var page = backupPage()
+        var changes = []
+        for (var index = 0; index < 10; index++)
+            changes.push({id: "claude", from: "https://a.example.org/", to: "https://b.example.org/"})
+        for (var add = 0; add < 12; add++)
+            changes.push({kind: "add", id: "user-0000000" + add.toString(16), name: "Site " + add, host: "s.example"})
+        for (var gone = 0; gone < 3; gone++)
+            changes.push({kind: "remove", id: "user-1000000" + gone, name: "Old " + gone})
+        var lines = page.addressChangeText(changes).split("\n")
+        compare(lines[0], "This changes 25 chat sites or addresses:")
+        compare(lines.slice(1, 4), ["Removes Old 0 and deletes its site data when you apply",
+                                    "Removes Old 1 and deletes its site data when you apply",
+                                    "Removes Old 2 and deletes its site data when you apply"])
+        compare(lines[4], "Adds Site 0 (s.example)")
+        compare(lines[15], "Adds Site 11 (s.example)")
+        compare(lines.slice(16, 24).every(function (line) { return line.indexOf("Claude: ") === 0 }), true)
+        compare(lines[24], "…and 2 more.")
+        compare(lines.length, 25)
+    }
+
+    // N-3: every row of the middle-click list keeps the icon's room.
+    function test_settingsMiddleClickRowsLineUp() {
+        var page = pageWith(testCase.generalPageFile, addedSettings())
+        var combo = generalPart(page, "middleClickChoice")
+        combo.popup.open()
+        var slots = []
+        tryVerify(function () {
+            slots = allNamed(combo.popup.contentItem, "middleClickIcon")
+            return slots.length === page.middleClickChoices.length
+        }, 3000, "an icon slot in every row")
+        slots.forEach(function (slot) {
+            compare(slot.width, Kirigami.Units.iconSizes.small)
+            compare(slot.visible, true)
+        })
+        combo.popup.close()
+    }
+
+    // N-2: the editor's fields end before the actions column.
+    function test_settingsEditorLeavesTheActionsColumn() {
+        var page = chatPage({})
+        verify(page.actionsColumnWidth > 0)
+        compare(page.actionsColumnWidth, allNamed(rowOf(page, "claude"), "moveUp")[0].parent.implicitWidth)
+        page.openEditor("claude")
+        var address = partOf(page, "editorAddress")
+        var right = address.mapToItem(page, address.width, 0).x
+        var actions = partOf(rowOf(page, "claude"), "moveUp").mapToItem(page, 0, 0).x
+        verify(right <= actions, right + " <= " + actions)
     }
 }

@@ -911,4 +911,30 @@ TestCase {
         compare(view.homeUrl, "https://lechat.invalid/other")
         compare(web.profileFor("user-3fa9c01b"), profile)
     }
+
+    // Round 2 (SEC L-2): an added site moved to another host never goes there
+    // with its old profile; the view is blanked until main.qml drops the
+    // site, which then comes back with a new profile on the new host.
+    function test_addedSiteOnAnotherHostIsNeverLoadedWithItsOldProfile() {
+        var web = addedSites()
+        var view = web.viewFor("user-3fa9c01b", "a")
+        var profile = web.profileFor("user-3fa9c01b")
+        web.siteId = "user-3fa9c01b"
+        web.userSites = [{ id: "user-3fa9c01b", name: "Le Chat", url: "https://elsewhere.invalid/" },
+                         testCase.added[1]]
+        compare(view.url.toString(), "about:blank")
+        compare(view.homeUrl, "https://lechat.invalid/chat", "not moved")
+        compare(web.profileFor("user-3fa9c01b"), profile)
+        // Home refuses too.
+        web.home()
+        compare(view.url.toString(), "about:blank")
+        // main.qml's dropSites: views and profile go; a new profile, the new home.
+        web.clearSite("user-3fa9c01b")
+        tryVerify(function () {
+            var next = web.viewFor("user-3fa9c01b", "a")
+            return next !== null && next !== view && next.homeUrl === "https://elsewhere.invalid/"
+        }, 3000)
+        verify(web.profileFor("user-3fa9c01b") !== profile)
+        compare(web.viewFor("user-3fa9c01b", "a").profile, web.profileFor("user-3fa9c01b"))
+    }
 }

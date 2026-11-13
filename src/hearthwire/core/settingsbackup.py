@@ -35,6 +35,7 @@ import os
 import re
 import stat
 import time
+import unicodedata
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -324,9 +325,17 @@ MAX_USER_SITES_CHARS = 448 * 1024     # ChatSites.js MAX_USER_SITES_CHARS, the s
 MAX_USER_SITE_NAME = 40               # ChatSites.js MAX_USER_SITE_NAME, in UTF-16 units
 USER_SITE_KEYS = ("id", "name", "url")  # Exactly these, written in this order.
 _USER_SITE_ID = re.compile(r"user-[0-9a-f]{8}")
-_JS_TRIM = re.compile("^[" + _JS_SPACE + "]+|[" + _JS_SPACE + "]+\\Z")
-# Markup characters, and invisible or bidi formatting that could spoof the table or a prompt (M3).
-_NAME_FORBIDDEN = re.compile("[<>&\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+# String.prototype.trim as Qt's JS engine runs it: it also strips U+0085 (review I-3).
+_JS_TRIM = re.compile("^[" + _JS_SPACE + "\\x85]+|[" + _JS_SPACE + "\\x85]+\\Z")
+# Markup characters, and invisible or bidi formatting that could spoof the table or a prompt (M3,
+# round 2 SEC M-1): every Default_Ignorable_Code_Point (U+00AD, U+034F, U+061C, U+115F-1160,
+# U+17B4-17B5, U+180B-180F, U+200B-200F, U+202A-202E, U+2060-206F, U+3164, U+FE00-FE0F, U+FEFF,
+# U+FFA0, U+FFF0-FFF8, U+1BCA0-1BCA3, U+1D173-1D17A, U+E0000-E0FFF), the interlinear annotation
+# marks U+FFF9-FFFB, the blank Braille pattern U+2800, and U+2028-2029 (kept from 005 round 1).
+_NAME_FORBIDDEN = re.compile(
+    "[<>&\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e"
+    "\u2060-\u206f\u2800\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufffb"
+    "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
 # Steps 3 and 4 of userSiteUrlError: printable ASCII only, without the characters
 # a browser would percent-encode or refuse.
 _USER_URL_CHARS = re.compile(r'[^\x21-\x7e]|["\\<>`{}|^]')
@@ -351,6 +360,8 @@ def user_site_name_error(name: object, others: tuple[str, ...] = ()) -> str:
 
     ``others`` are the names of the other added sites. The name is checked as
     stored, so leading or trailing whitespace is ``name-chars`` (the editor trims).
+    name-chars also covers controls, lone surrogates, the _NAME_FORBIDDEN characters
+    and a name without any letter or digit (unicodedata L* or N*).
     Codes, first failure wins: name-empty, name-too-long, name-chars, name-taken.
     """
     if not isinstance(name, str) or _JS_TRIM.sub("", name) == "":
@@ -359,6 +370,8 @@ def user_site_name_error(name: object, others: tuple[str, ...] = ()) -> str:
         return "name-too-long"
     if _JS_TRIM.sub("", name) != name or _CONTROL.search(name) or _NAME_FORBIDDEN.search(name):
         return "name-chars"
+    if not any(unicodedata.category(character)[0] in "LN" for character in name):
+        return "name-chars"  # At least one letter or digit (Unicode L* or N*).
     lowered = _js_lower(name)
     if lowered in _TAKEN_NAMES or any(lowered == _js_lower(other) for other in others):
         return "name-taken"
