@@ -56,9 +56,16 @@ Item {
     function saveDownload() {}
     // Called with the site id at teardown, if a test sets it.
     property var clearHook: null
+    // As the real view: siteReleased a moment after clearSite, unless a
+    // test holds it to send it itself.
+    property bool holdRelease: false
+    signal siteWanted(string siteId)
+    signal siteReleased(string siteId)
     function clearSite(siteId) {
         clearedSites = clearedSites.concat([siteId])
         if (clearHook)
             clearHook(siteId)
+        if (!holdRelease)
+            Qt.callLater(function () { siteReleased(siteId) })
     }
 }

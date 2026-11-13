@@ -670,4 +670,94 @@ TestCase {
         compare(web.siteProfileSpec("ollama"), null)
         verify(!web.siteWaits("claude", "a"))
     }
+
+    // SEC-L1: a shown site with saved sign-ins and no fresh prepare asks
+    // main.qml for one (each time its pane is synced), never opens.
+    function test_savedSiteWithoutAFreshPrepareAsksForOne() {
+        var web = createTemporaryObject(webComponent, testCase, {
+            staySignedIn: true,
+            runtimeDir: "/nonexistent/run",
+            storageApplet: 3,
+            storageGeneration: 4
+        })
+        verify(web !== null)
+        var wanted = []
+        web.siteWanted.connect(function (siteId) { wanted.push(siteId) })
+        web.customUrls = testCase.nowhere
+        web.siteIds = ["claude", "chatgpt"]
+        web.siteId = "claude"
+        compare(web.currentView, null)
+        verify(wanted.indexOf("claude") >= 0)
+        wanted = []
+        web.siteIdB = "chatgpt"
+        web.splitActive = true
+        verify(wanted.indexOf("chatgpt") >= 0)
+        compare(Object.keys(web.profiles), [])
+        // Ollama and unknown ids are never asked for.
+        wanted = []
+        web.siteIds = ["ollama"]
+        web.siteId = "ollama"
+        web.splitActive = false
+        compare(wanted, [])
+    }
+
+    // In memory mode nothing is ever asked for.
+    function test_memoryModeNeverAsksForAPrepare() {
+        var web = createTemporaryObject(webComponent, testCase, {})
+        var wanted = []
+        web.siteWanted.connect(function (siteId) { wanted.push(siteId) })
+        web.customUrls = testCase.nowhere
+        web.siteIds = ["claude"]
+        web.siteId = "claude"
+        verify(web.currentView !== null)
+        compare(wanted, [])
+        // Not while a cleared site's old profile is still going either.
+        var old = web.profileFor("claude")
+        web.clearSite("claude")
+        web.syncViews()
+        tryVerify(function () { return web.profileFor("claude") !== null && web.profileFor("claude") !== old }, 3000)
+        compare(wanted, [])
+    }
+
+    // SEC-I1: preparedSites as a list from C++ (no JS Array) still works.
+    QtObject {
+        id: holder
+        property list<string> ids: ["claude"]
+    }
+
+    function test_preparedSitesFromCpp() {
+        verify(!Array.isArray(holder.ids))
+        var web = createTemporaryObject(webComponent, testCase, {
+            staySignedIn: true,
+            runtimeDir: "/nonexistent/run",
+            storageApplet: 3,
+            storageGeneration: 4
+        })
+        web.preparedSites = holder.ids
+        verify(web.siteProfileSpec("claude") !== null)
+        compare(web.siteProfileSpec("chatgpt"), null)
+        web.preparedSites = "claude"
+        compare(web.siteProfileSpec("claude"), null)
+    }
+
+    // SEC-L2: siteReleased comes only after the profile is destroyed (and
+    // for a site without one, too), never at once.
+    function test_siteReleasedFollowsTheProfileDestroy() {
+        var web = twoSites()
+        var states = []
+        web.siteReleased.connect(function (siteId) {
+            states.push({site: siteId, profile: web.profileFor(siteId), retiring: web.retiring[siteId] === true,
+                         views: web.viewList().filter(function (view) { return view.site === siteId }).length})
+        })
+        web.siteId = "claude"
+        web.clearSite("chatgpt")
+        compare(states, [], "not at once")
+        tryVerify(function () { return states.length === 1 }, 3000)
+        compare(states[0], {site: "chatgpt", profile: null, retiring: false, views: 0})
+        // A site without a profile is released too (a moment later).
+        web.clearSite("gemini")
+        compare(states.length, 1)
+        tryVerify(function () { return states.length === 2 }, 3000)
+        compare(states[1].site, "gemini")
+    }
 }

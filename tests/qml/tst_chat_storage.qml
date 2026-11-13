@@ -38,6 +38,9 @@ TestCase {
         compare(ChatStorage.nextGeneration(0), 1)
         compare(ChatStorage.nextGeneration(41), 42)
         compare(ChatStorage.nextGeneration(2147483648), 0)
+        // SEC-I3: wraps after 2**31 - 1, never to 2**31.
+        compare(ChatStorage.nextGeneration(2147483646), 2147483647)
+        compare(ChatStorage.nextGeneration(2147483647), 0)
         compare(ChatStorage.nextGeneration(-1), 0)
     }
 
@@ -843,5 +846,45 @@ TestCase {
         verify(ChatStorage.dropStep("remove-site", {mode: "encrypted", state: "locked"}))
         verify(ChatStorage.dropStep("remove-site", {mode: "encrypted", state: ""}))
         verify(!ChatStorage.dropStep("remove-site", {mode: "encrypted", state: "unlocked"}))
+    }
+
+    // A list from C++ (QVariantList) is no JS Array.
+    QtObject {
+        id: holder
+        property list<string> ids: ["claude", "user-0123abcd"]
+    }
+
+    // SEC-I1: lists from C++ work, anything else holds nothing.
+    function test_listHas() {
+        verify(!Array.isArray(holder.ids), "the case under test really is no Array")
+        verify(ChatStorage.listHas(holder.ids, "claude"))
+        verify(ChatStorage.listHas(holder.ids, "user-0123abcd"))
+        verify(!ChatStorage.listHas(holder.ids, "gemini"))
+        verify(ChatStorage.listHas(["claude"], "claude"))
+        verify(!ChatStorage.listHas(["claude"], "Claude"))
+        verify(!ChatStorage.listHas("claude", "claude"))
+        verify(!ChatStorage.listHas("xclaudex", "c"))
+        verify(!ChatStorage.listHas({claude: true}, "claude"))
+        verify(!ChatStorage.listHas({length: 1, 0: "claude"}, "gemini"))
+        verify(!ChatStorage.listHas({length: -1}, "claude"))
+        verify(!ChatStorage.listHas({length: "1", 0: "claude"}, "claude"))
+        verify(!ChatStorage.listHas(null, "claude"))
+        verify(!ChatStorage.listHas(undefined, "claude"))
+        verify(!ChatStorage.listHas(7, "claude"))
+    }
+
+    // SEC-I4: at most 207 kept, so the list after a delete always stores.
+    function test_pendingClearsAreCapped() {
+        var many = []
+        for (var index = 0; index < 300; index++)
+            many.push("user-" + ("0000000" + index.toString(16)).slice(-8))
+        var parsed = ChatStorage.parsePendingClears(many.join(","))
+        compare(parsed.length, 207)
+        compare(parsed, many.slice(0, 207))
+        verify(ChatStorage.pendingClearsText(parsed) !== null)
+        verify(ChatStorage.pendingClearsText(parsed.slice(1)) !== null)
+        // Bad parts don't count against the cap.
+        compare(ChatStorage.parsePendingClears(["x", "claude"].concat(many).join(",")).length, 207)
+        compare(ChatStorage.parsePendingClears(["x", "claude"].concat(many).join(","))[0], "claude")
     }
 }

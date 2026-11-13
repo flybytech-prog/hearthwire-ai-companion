@@ -116,9 +116,10 @@ function normalizeGeneration(value) {
     return Math.max(0, validInt(value))
 }
 
+// Wraps to 0 after 2**31 - 1, so the next one is always a valid number.
 function nextGeneration(generation) {
     var current = validInt(generation)
-    return current < 0 || current >= MAX_INT ? 0 : current + 1
+    return current < 0 || current >= MAX_INT - 1 ? 0 : current + 1
 }
 
 // The generation folder's name. Since every site has its own profile
@@ -137,6 +138,21 @@ function profileName(applet, generation) {
 var BUILTIN_SITE_IDS = ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot", "local"]
 // The helper takes at most this many ids in one --sites or --known list.
 var MAX_SITE_IDS = 207
+
+// Whether `list` holds `value`: a JS array or a list from C++ (QVariantList,
+// which is no Array); anything else holds nothing (fail closed).
+function listHas(list, value) {
+    if (list === null || list === undefined || typeof list !== "object")
+        return false
+    var length = list.length
+    if (typeof length !== "number" || !Number.isInteger(length) || length < 0 || length > MAX_INT)
+        return false
+    for (var index = 0; index < length; index++) {
+        if (list[index] === value)
+            return true
+    }
+    return false
+}
 
 function isSiteId(id) {
     return typeof id === "string"
@@ -177,13 +193,15 @@ function siteList(ids) {
 // as stored ("" or ids separated by commas). Read strictly: anything that
 // isn't a valid id is dropped and never reaches a command; a valid id in a
 // damaged text still counts, so that site is never prepared before its
-// delete worked. Not a string: nothing is pending.
+// delete worked. Not a string: nothing is pending. At most MAX_SITE_IDS
+// ids are kept (the first ones), so the list left after a delete can always
+// be stored again.
 function parsePendingClears(text) {
     if (typeof text !== "string" || text === "")
         return []
     var ids = []
     var parts = text.split(",")
-    for (var index = 0; index < parts.length; index++) {
+    for (var index = 0; index < parts.length && ids.length < MAX_SITE_IDS; index++) {
         if (isSiteId(parts[index]) && ids.indexOf(parts[index]) < 0)
             ids.push(parts[index])
     }

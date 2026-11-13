@@ -80,6 +80,10 @@ ColumnLayout {
     // profile go: main.qml stores the site as pending, waits, then deletes
     // its folder.
     signal siteDataClearRequested(string siteId)
+    // The web view destroyed that site's profile (Clear <site> data).
+    signal siteDataReleased(string siteId)
+    // Saved sign-ins: a shown site waits for a fresh prepare of its folder.
+    signal siteProfileWanted(string siteId)
     // Ctrl+= / Ctrl+- / Ctrl+0 on the site shown: +1, -1 or 0 (reset).
     signal zoomRequested(int direction)
     // Ctrl+wheel in a page: store factor (a ZOOM_STEPS value) for siteId.
@@ -211,7 +215,7 @@ ColumnLayout {
             return
         if (chatView.persistentActive) {
             chatView.siteDataClearRequested(siteId)
-            if (!Array.isArray(chatView.pendingSiteClears) || chatView.pendingSiteClears.indexOf(siteId) < 0)
+            if (!ChatStorage.listHas(chatView.pendingSiteClears, siteId))
                 return
         }
         chatView.web.clearSite(siteId)
@@ -483,6 +487,13 @@ ColumnLayout {
         ignoreUnknownSignals: true
         function onSiteZoomRequested(siteId, factor) {
             chatView.siteZoomRequested(siteId, factor)
+        }
+        function onSiteReleased(siteId) {
+            chatView.siteDataReleased(siteId)
+        }
+        function onSiteWanted(siteId) {
+            if (chatView.persistentActive)
+                chatView.siteProfileWanted(siteId)
         }
         // A failing page may mean the folder went away: let main.qml check.
         function onPageFailedChanged() {

@@ -281,17 +281,20 @@ its own network context and in-memory cache on top of the page itself). A site's
 What this guarantees:
 
 - Each chat site has its own cookies, local storage, IndexedDB, cache,
-  service workers and permissions.
+  service workers, permissions, history and favicons, and with saved sign-ins
+  its own folder (including its GPU caches) in the encrypted folder.
 - A compromised or hostile page on one site can't send requests that carry
   another site's sign-in, and can't read another site's data. Another site
   framed inside it shows as signed out.
 
 Its limits:
 
-- One Qt WebEngine process serves all the profiles. A page that exploits a
-  bug in the page renderer and also escapes Chromium's sandbox runs as you,
-  and could read every site's data in memory and, while it is unlocked, the
-  encrypted folder.
+- The pages themselves run in separate, sandboxed renderer processes, one
+  per page. What all profiles share is Chromium's browser process, which is
+  Plasma itself, and its network and GPU processes. A page that exploits a
+  bug in its renderer and also escapes Chromium's sandbox runs as you, inside
+  Plasma, and could read every site's data in memory and, while it is
+  unlocked, the encrypted folder.
 - The clipboard, your Downloads folder, your system browser and your network
   are shared by all sites.
 
@@ -436,8 +439,11 @@ newer version starts, it moves to one profile per site once
 
 Going back to 1.0.1 is harmless: its sign-ins start empty, and its Clear chat
 data still deletes everything, including the per-site folders. Upgrading
-again shows no second notice; the tidying after the next unlock deletes what
-1.0.1 left behind, and you sign in to each site once more.
+again shows no second notice. At the next unlock, before any site opens, the
+widget sees what 1.0.1 left in its folder and deletes everything in that
+folder: 1.0.1's files and every site's saved sign-in from before you went
+back. So no account you used before the downgrade comes back on its own; you
+sign in to each site once more.
 
 Turning Stay signed in **Off** (after a confirmation in settings) deletes the
 whole encrypted folder, with every sign-in saved in it, for all Hearthwire
@@ -542,7 +548,7 @@ What Encrypted mode does not protect against:
 
 | Data | Off | Encrypted |
 | --- | --- | --- |
-| Cookies, sessions, site storage | Memory only, one profile per site; dropped on Clear <site> data (that site), Clear chat data or Plasma restart | Encrypted folder, one `site-<id>` folder per site; deleted on Clear <site> data (that site), Clear chat data (this widget) or when you turn it Off (all widgets) |
+| Cookies, sessions, site storage | Memory only, one profile per site; dropped on Clear <site> data (that site), Clear chat data or Plasma restart | Encrypted folder, one `site-<id>` folder per site (with that site's history, favicons and GPU caches); deleted on Clear <site> data (that site), Clear chat data (this widget) or when you turn it Off (all widgets) |
 | HTTP cache | Memory only | Memory only |
 | Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them | Same; Qt WebEngine's own history files, if any, are inside the encrypted folder |
 | Passphrase | Not used | Never stored; typed into kdialog, read by gocryptfs |
@@ -858,9 +864,11 @@ It does not protect against:
   its memory until the model is unloaded;
 - security bugs in the web engine itself: Qt WebEngine ships its own copy of
   Chromium, which often lags weeks behind Chrome's security fixes, and a
-  page that exploits such a bug runs inside Plasma (see below); one web
-  engine process serves every site's profile, so such a page that also
-  escapes Chromium's sandbox can reach every site's data;
+  page that exploits such a bug runs inside Plasma (see below); pages have
+  their own sandboxed renderer processes, but Chromium's browser process
+  (Plasma itself) and its network and GPU processes serve every site's
+  profile, so such a page that also escapes Chromium's sandbox can reach
+  every site's data;
 - what all sites share: the clipboard, your Downloads folder, your system
   browser and your network;
 - swap, hibernation, core dumps, or clipboard managers, unless configured as

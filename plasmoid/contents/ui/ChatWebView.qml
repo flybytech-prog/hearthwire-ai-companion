@@ -59,6 +59,9 @@ Item {
     // {siteId: true} while a dropped profile still waits to be destroyed;
     // no new profile is made for that site until it is gone.
     readonly property var retiring: ({})
+    // Bumped whenever profiles or retiring change (they never notify), so
+    // bindings that read them (siteWaits) are evaluated again.
+    property int profilesRevision: 0
 
     // Enabled site ids (catalog order) and the one being shown.
     property var siteIds: []
@@ -74,6 +77,12 @@ Item {
     // A page was zoomed with Ctrl+wheel (Chromium's own zoom): main.qml
     // stores factor, a ZOOM_STEPS value, for siteId. Never written here.
     signal siteZoomRequested(string siteId, real factor)
+    // Saved sign-ins: a shown site has no profile and may not get one yet;
+    // main.qml prepares (and so verifies) its folder again first.
+    signal siteWanted(string siteId)
+    // Clear <site> data: the site's profile is destroyed (or it had none);
+    // only now may its folder be deleted.
+    signal siteReleased(string siteId)
 
     // Split view (runtime only): pane b shows siteIdB. Below splitMinWidth
     // only pane a is shown (its pages stay).
@@ -318,7 +327,7 @@ Item {
     // With saved sign-ins, a pane's site still waits for main.qml to
     // prepare its folder: no view, no profile, none allowed yet.
     function siteWaits(siteId, pane) {
-        return chatWeb.staySignedIn && chatWeb.siteIds.indexOf(siteId) >= 0
+        return chatWeb.profilesRevision >= 0 && chatWeb.staySignedIn && chatWeb.siteIds.indexOf(siteId) >= 0
             && chatWeb.viewFor(siteId, pane) === null && !chatWeb.profileFor(siteId)
             && !chatWeb.siteProfileSpec(siteId)
     }
@@ -426,7 +435,7 @@ Item {
             return null
         if (!chatWeb.staySignedIn)
             return { saved: false, sitePath: "", siteName: "" }
-        if (!Array.isArray(chatWeb.preparedSites) || chatWeb.preparedSites.indexOf(siteId) < 0)
+        if (!ChatStorage.listHas(chatWeb.preparedSites, siteId))
             return null
         var name = ChatStorage.siteProfileName(chatWeb.storageApplet, chatWeb.storageGeneration, siteId)
         var path = ChatStorage.siteProfilePath(chatWeb.runtimeDir, chatWeb.storageApplet,
@@ -434,6 +443,11 @@ Item {
         if (name === "" || path === "")
             return null
         return { saved: true, sitePath: path, siteName: name }
+    }
+
+    // A cleared site's old profile is still being destroyed.
+    function siteRetiring(siteId) {
+        return chatWeb.retiring[siteId] === true
     }
 
     // siteId's profile, made now if it has none; called only right before a
@@ -455,6 +469,7 @@ Item {
         }
         profile.httpUserAgent = chatWeb.baseUserAgent
         chatWeb.profiles[siteId] = profile
+        chatWeb.profilesRevision++
         return profile
     }
 
@@ -490,10 +505,13 @@ Item {
         }
         chatWeb.syncCurrentViews()
         var profile = chatWeb.profileFor(siteId)
-        if (!profile)
+        if (!profile) {
+            Qt.callLater(function () { chatWeb.siteReleased(siteId) })
             return
+        }
         delete chatWeb.profiles[siteId]
         chatWeb.retiring[siteId] = true
+        chatWeb.profilesRevision++
         // The views' own deletion was posted first; the profile's follows.
         Qt.callLater(function () { chatWeb.releaseProfile(siteId, profile) })
     }
@@ -509,6 +527,8 @@ Item {
         profile.destroy()
         Qt.callLater(function () {
             delete chatWeb.retiring[siteId]
+            chatWeb.profilesRevision++
+            chatWeb.siteReleased(siteId)
             chatWeb.syncViews()
         })
     }
@@ -666,15 +686,20 @@ Item {
             chatWeb.focusedPane = "a"
         // Append only: existing views keep their page and are never reloaded.
         // A Local view on this computer is created only after the owner check.
-        // A site that may not have a profile yet (its folder isn't prepared)
-        // waits; this runs again when the prepared sites change.
+        // A site that may not have a profile yet (with saved sign-ins: no
+        // prepare of its folder since the last status check) waits and asks
+        // main.qml for one; this runs again when the prepared sites change.
         var panes = chatWeb.splitActive ? ["a", "b"] : ["a"]
         for (var at = 0; at < panes.length; at++) {
             var pane = panes[at]
             var wanted = pane === "b" ? chatWeb.siteIdB : chatWeb.siteId
-            if (chatWeb.siteIds.indexOf(wanted) < 0 || chatWeb.viewFor(wanted, pane) !== null
-                    || (!chatWeb.profileFor(wanted) && !chatWeb.siteProfileSpec(wanted)))
+            if (chatWeb.siteIds.indexOf(wanted) < 0 || chatWeb.viewFor(wanted, pane) !== null)
                 continue
+            if (!chatWeb.profileFor(wanted) && !chatWeb.siteProfileSpec(wanted)) {
+                if (chatWeb.staySignedIn && ChatStorage.isSiteId(wanted) && !chatWeb.siteRetiring(wanted))
+                    chatWeb.siteWanted(wanted)
+                continue
+            }
             var home = ChatSites.homeUrl(wanted, chatWeb.customUrls)
             if (ChatSites.localOwnerPort({ siteId: wanted, customUrls: chatWeb.customUrls,
                                            url: home }) === 0) {
@@ -765,6 +790,11 @@ Item {
     // creation. Order matters: the paths come before storageName and
     // offTheRecord is last, or Qt creates a stray profile folder under
     // Plasma's own data directory before it sees the paths.
+    // Qt 6.9+ logs that WebEngineProfilePrototype should be used instead. It
+    // is not: QML can't pick a type by Qt version, so 6.8 (still the
+    // minimum, e.g. Debian stable) would need a second, untested profile
+    // path. tests/test_main_qml_wiring.py checks with real saved profiles
+    // that nothing is written outside the site folders.
     Component {
         id: siteProfileComponent
 

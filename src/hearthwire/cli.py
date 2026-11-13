@@ -12,19 +12,21 @@ from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
 
 # Largest applet id or profile generation the plasmoid may pass.
 MAX_INT_ARGUMENT = 2**31
-_INT_ARGUMENT = re.compile(r"[0-9]{1,10}")
-_PORT_ARGUMENT = re.compile(r"[0-9]{1,5}")
+# The plasmoid prints numbers plainly, so 0 or no leading zero (audit SEC-I2).
+_INT_ARGUMENT = re.compile(r"0|[1-9][0-9]{0,9}")
+# A port the plasmoid prints: no leading zero (audit SEC-I2).
+_PORT_ARGUMENT = re.compile(r"[1-9][0-9]{0,4}")
 
 
 def _bounded_int(value: str) -> int:
-    """A plain decimal 0..2**31: no sign, spaces, underscores or other digits."""
+    """A plain decimal 0..2**31: no sign, leading zero, spaces, underscores or other digits."""
     if not _INT_ARGUMENT.fullmatch(value) or int(value) > MAX_INT_ARGUMENT:
         raise argparse.ArgumentTypeError("expected an integer from 0 to 2147483648")
     return int(value)
 
 
 def _port(value: str) -> int:
-    """A plain decimal TCP port 1..65535: no sign, spaces, underscores or other digits."""
+    """A plain decimal TCP port 1..65535: no sign, leading zero, spaces, underscores or other digits."""
     if not _PORT_ARGUMENT.fullmatch(value) or not portowner.MIN_PORT <= int(value) <= portowner.MAX_PORT:
         raise argparse.ArgumentTypeError("expected a port from 1 to 65535")
     return int(value)
@@ -66,11 +68,50 @@ def _site_id(value: str) -> str:
     return value
 
 
+def _given_once(argument_parser: argparse.ArgumentParser, namespace: argparse.Namespace,
+                dest: str, option_string: str | None) -> None:
+    """Refuse an option given a second time (also under an abbreviation or another of its names).
+
+    argparse keeps the last one silently, so `--site a --site b` would act on b
+    (audit SEC-I2). The message names the option, never its value.
+    """
+    given = getattr(namespace, "_given_options", None)
+    if given is None:
+        given = set()
+        setattr(namespace, "_given_options", given)
+    if dest in given:
+        argument_parser.error(f"{option_string} may be given only once")
+    given.add(dest)
+
+
+class _StoreOnce(argparse.Action):
+    """``store``, but only once."""
+
+    def __call__(self, argument_parser, namespace, values, option_string=None):
+        _given_once(argument_parser, namespace, self.dest, option_string)
+        setattr(namespace, self.dest, values)
+
+
+class _StoreTrueOnce(argparse.Action):
+    """``store_true``, but only once."""
+
+    def __init__(self, option_strings, dest, default=False, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, const=True, default=default, **kwargs)
+
+    def __call__(self, argument_parser, namespace, values, option_string=None):
+        _given_once(argument_parser, namespace, self.dest, option_string)
+        setattr(namespace, self.dest, True)
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="hearthwire",
         description="Read local AI CLI sessions and print subscription usage as JSON.",
     )
+    # Every option below may appear at most once.
+    result.register("action", None, _StoreOnce)
+    result.register("action", "store", _StoreOnce)
+    result.register("action", "store_true", _StoreTrueOnce)
     result.add_argument("--json", action="store_true", help="Print JSON (the default).")
     result.add_argument(
         "--providers",

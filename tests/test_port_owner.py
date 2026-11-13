@@ -320,7 +320,7 @@ def test_cli_turns_any_surprise_into_unreadable(monkeypatch, capsys):
     assert json.loads(out) == UNREADABLE
 
 
-@pytest.mark.parametrize("port", ["1", "65535", "08080"])
+@pytest.mark.parametrize("port", ["1", "80", "8080", "11434", "65535"])
 def test_cli_accepts_ports_in_range(monkeypatch, capsys, port):
     seen = []
     monkeypatch.setattr(portowner, "run", lambda value: seen.append(value) or {"ok": True, "owner": "none"})
@@ -331,7 +331,7 @@ def test_cli_accepts_ports_in_range(monkeypatch, capsys, port):
 @pytest.mark.parametrize(
     "port",
     ["0", "65536", "70000", "abc", "-1", "+80", "", " 80", "80 ", "1_000", "011434", "0x2caa", "8e3",
-     "٣٣"],
+     "٣٣", "08080", "080", "00080", "00", "01"],
 )
 def test_cli_rejects_bad_ports_with_exit_2(monkeypatch, capsys, port):
     monkeypatch.setattr(portowner, "run", lambda value: pytest.fail("must not run"))
@@ -362,3 +362,16 @@ def test_cli_port_owner_stands_alone(monkeypatch, capsys, extra):
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "--port-owner" in captured.err
+
+
+@pytest.mark.parametrize("argv", [["--port-owner", "11434", "--port-owner", "11434"],
+                                  ["--port-owner", "11434", "--port-owner", "8080"],
+                                  ["--port-owner", "11434", "--port", "8080"]])
+def test_cli_refuses_a_repeated_port_owner(monkeypatch, capsys, argv):
+    monkeypatch.setattr(portowner, "run", lambda value: pytest.fail("must not run"))
+    with pytest.raises(SystemExit) as raised:
+        cli.main(argv)
+    assert raised.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--port-owner may be given only once" in captured.err

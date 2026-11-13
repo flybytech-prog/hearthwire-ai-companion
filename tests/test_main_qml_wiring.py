@@ -15,11 +15,11 @@ import pytest
 
 HARNESS = Path(__file__).resolve().parent / "mainqml"
 PATH = "/usr/lib/qt6:/usr/lib/qt6/bin:/usr/bin:/bin"
-# The 157 test functions of tst_main_wiring.qml, fourteen of them run once for
+# The 161 test functions of tst_main_wiring.qml, fourteen of them run once for
 # each of their data rows (3, 24, 24, 6, 6, 4, 4, 3, 2, 8, 3, 5, 3 and 2), plus
 # QtTest's initTestCase and cleanupTestCase, which count as passed even when no
 # test ran.
-MIN_PASSED = 242
+MIN_PASSED = 246
 
 
 def _run(command, env, cwd):
@@ -62,3 +62,52 @@ def test_real_main_qml_wiring(tmp_path):
     assert completed.returncode == 0, output
     totals = re.search(r"Totals: (\d+) passed, 0 failed", output)
     assert totals is not None and int(totals.group(1)) >= MIN_PASSED, output
+
+
+PROFILE_FOLDERS = HARNESS / "profilefolders" / "tst_profile_folders.qml"
+SITE_FOLDERS = ("site-claude", "site-chatgpt")
+# What Qt WebEngine (Chromium) keeps in a profile folder; none of it may
+# appear outside a site's own folder.
+WEBENGINE_NAMES = re.compile(
+    r"QtWebEngine|webengine|chromium|Cookies|GPUCache|Dawn\w*Cache|Local Storage|Session Storage|"
+    r"History|Favicons|blob_storage|Visited Links|Trust Tokens|Shared Dictionary|Network Persistent State|"
+    r"user_prefs\.json|applet-", re.IGNORECASE)
+
+
+def test_saved_profiles_write_only_inside_their_site_folders(tmp_path):
+    """Real saved per-site profiles (Qt WebEngine) write only into site-<id>; no stray folder anywhere.
+
+    Every folder the run can reach (HOME, TMPDIR, XDG_RUNTIME_DIR) is new and
+    empty; the QML file refuses to run with any other runtime or home folder.
+    """
+    runner = shutil.which("qmltestrunner", path=PATH)
+    if runner is None:
+        pytest.skip("qmltestrunner is not installed")
+    home = tmp_path / "hw-profile-home"
+    runtime = tmp_path / "hw-profile-folders"
+    temp = tmp_path / "tmp"
+    home.mkdir()
+    temp.mkdir()
+    runtime.mkdir(mode=0o700)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "LANG": "C.UTF-8", "QT_QPA_PLATFORM": "offscreen",
+           "XDG_RUNTIME_DIR": str(runtime), "TMPDIR": str(temp)}
+    completed = _run([runner, "-input", str(PROFILE_FOLDERS)], env, tmp_path)
+    output = completed.stdout + completed.stderr
+    if "module \"QtTest\" is not installed" in output or "module \"QtWebEngine\" is not installed" in output:
+        pytest.skip("QtTest or Qt WebEngine is not installed")
+    assert completed.returncode == 0, output
+    assert re.search(r"Totals: 3 passed, 0 failed", output), output
+    container = runtime / "hearthwire" / "vault" / "web" / "applet-3-g4"
+    sites = [container / name for name in SITE_FOLDERS]
+    for site in sites:
+        assert (site / "Cookies").is_file(), f"{site.name} holds its own cookies"
+    chain = {runtime / "hearthwire", runtime / "hearthwire" / "vault", runtime / "hearthwire" / "vault" / "web",
+             container}
+    stray = []
+    for path in sorted(tmp_path.rglob("*")):
+        if path in chain or any(path == site or site in path.parents for site in sites):
+            continue
+        relative = path.relative_to(tmp_path)
+        if WEBENGINE_NAMES.search(str(relative)) or runtime in path.parents:
+            stray.append(str(relative))
+    assert not stray, f"Qt WebEngine wrote outside the site folders: {stray}"

@@ -590,6 +590,8 @@ PlasmaExtras.Representation {
                     pendingSiteClears: root.chatPendingClears
                     profileLayout: root.chatProfileLayout
                     onSiteDataClearRequested: (siteId) => root.chatClearSite(siteId)
+                    onSiteDataReleased: (siteId) => root.chatSiteReleased(siteId)
+                    onSiteProfileWanted: (siteId) => root.chatSiteWanted(siteId)
                     card: root.chatCard
                     missingTools: root.chatVaultMissing
                     installDistro: root.installDistro

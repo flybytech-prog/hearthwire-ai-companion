@@ -487,11 +487,22 @@ at a time without following symlinks.
 | `--vault lock` | `fusermount3 -u`; retried after 0.5 s and 1 s, never forced or lazy; already locked or a dead mount is success | `{"ok":true}` |
 | `--vault change-passphrase` | `gocryptfs -passwd`, only while locked (kdialog `--password`, then `--newpassword`) | `{"ok":true}` |
 | `--vault destroy` | Deletes the cipher directory, `vault-keys/` and the bare mountpoint, only while not unlocked, then the wallet entry when this folder had a wallet slot and the wallet holds it; nothing there is success | `{"ok":true}` |
-| `--web-data prepare --store encrypted --applet N --generation G [--sites IDS]` | Creates `web/applet-N-gG/` inside the verified mount and, for each id in `IDS`, `site-<id>/` inside it (all `0700`; an existing folder is reset to `0700` and keeps its contents). Without `--sites` only the generation folder is made. Run when a site is first opened | `{"ok":true}` |
-| `--web-data prune --store encrypted --applet N --generation G --known IDS` | Inside `applet-N-gG/` only, deletes every entry except a `site-<id>/` folder whose id is in `IDS`: Chromium files left at the container root (a shared profile from 1.0.1 or earlier), unknown or removed sites, and a symlink or file wearing a known name (it is unlinked, never followed). Never touches other generations, other applets or anything else in `web/`. A missing `web/` or generation folder is success and nothing is created. The widget runs it only when its site list reads as valid, after each unlock's prepare and after an added site is removed | `{"ok":true}` |
+| `--web-data prepare --store encrypted --applet N --generation G [--sites IDS]` | Creates `web/applet-N-gG/` inside the verified mount and, for each id in `IDS`, `site-<id>/` inside it (all `0700`; an existing folder is reset to `0700` and keeps its contents). Without `--sites` only the generation folder is made. First, if the generation folder's root holds anything but `site-<id>` entries (rollback evidence, see below), it deletes everything in it, site folders first, then makes the listed ones empty. Run when a site is first opened | `{"ok":true}` |
+| `--web-data prune --store encrypted --applet N --generation G --known IDS` | Inside `applet-N-gG/` only, deletes every entry except a `site-<id>/` folder whose id is in `IDS`: unknown or removed sites, and a symlink or file wearing a known name (it is unlinked, never followed). If the root holds anything but `site-<id>` entries (rollback evidence, see below), it deletes every entry, known site folders included. Never touches other generations, other applets or anything else in `web/`. A missing `web/` or generation folder is success and nothing is created. The widget runs it only when its site list reads as valid, after each unlock's prepare and after an added site is removed | `{"ok":true}` |
 | `--web-data remove-site --store encrypted --applet N --generation G --site ID` | Deletes `applet-N-gG/site-<ID>` only (a symlink there is unlinked, never followed); a missing folder is success. Used by "Clear <site> data" after the site's profile is gone | `{"ok":true}` |
 | `--web-data remove --store encrypted --applet N [--keep G]` | Deletes this widget's `applet-N-g*` folders, except generation `G` when given; nothing there is success. Unchanged by per-site folders: deleting a generation folder deletes its `site-*` folders with it | `{"ok":true}` |
 | `--web-data purge` | Deletes the encrypted folder and `vault-keys/` for `scripts/install.sh --uninstall-web-data`, then the wallet entry when `vault-keys/` held a wallet slot, kwallet-query and qdbus6 are there and the wallet holds it; refuses while anything is mounted at the mountpoint or from the cipher directory (also checks `/run/user/<uid>`); runs no other tool | `{"ok":true,"removed":[...]}` with any of `"vault"`, `"vault-keys"`, `"wallet-entry"` in that order (empty when nothing was there) |
+
+**Rollback evidence.** Since every site has its own profile, nothing this
+version makes lives at the root of `applet-N-gG/`; only an older version that
+opened the folder as its one shared profile (1.0.1 or earlier, after a
+downgrade) writes there. Any root name that isn't `site-` plus a valid site id
+counts. Then `prepare` and `prune` delete every entry with the safe delete
+(`remove_entry`): all site entries first and the root leftovers last, so a
+refused entry (`not-owned`) keeps the evidence and the next run tries again.
+Every site then starts signed out, and no account from before the downgrade
+comes back (review REV-M1). `prepare` does this too because it runs before any
+saved profile opens; prune alone would come after one.
 
 #### How the widget uses the web-data commands
 
@@ -666,7 +677,11 @@ Argument rules (argparse exits 2 with a usage message on stderr otherwise):
   empty items; `ID` is one site id. Any other id, including `ollama`, is a
   usage error and nothing is touched.
 - `N` and `G` are plain decimal integers from 0 to 2147483648 (at most 10
-  digits; no sign, spaces, or underscores).
+  digits; no sign, leading zero, spaces, or underscores), and so is the
+  `--keep` and `--id` value.
+- Every option may be given at most once, under any of its names or
+  abbreviations (`--site a --site b`, `--gen 0 --generation 1`); a repeat is a
+  usage error that names the option but never its value.
 - `--usage-history read|record|clear` need `--applet N` with N from 1 to
   2147483648 (the widget's Plasma applet id); only `clear --all` takes no
   `--applet`, and `--all` is refused anywhere else. `--settings-backup export`
@@ -911,8 +926,9 @@ Reply (one JSON object on stdout, exit 0):
 | `{"ok":false,"error":"unreadable"}` | The tables could not be read or parsed, or anything unexpected happened |
 
 Replies never contain uids, user names, inodes, or addresses. `<port>` is a
-plain decimal integer from 1 to 65535 (at most 5 digits; no sign, spaces, or
-underscores), and `--port-owner` cannot be combined with any other option;
+plain decimal integer from 1 to 65535 (at most 5 digits; no sign, leading
+zero, spaces, or underscores), `--port-owner` may be given only once, and it
+cannot be combined with any other option;
 otherwise argparse exits 2 with a usage message on stderr and prints nothing on
 stdout. The plasmoid sends (or, for Local web UI, loads) only for `self` or `system`
 and fails closed on everything else, including a non-zero exit, any other

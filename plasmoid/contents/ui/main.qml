@@ -196,9 +196,14 @@ PlasmoidItem {
         ChatStorage.effectiveUnlockMethod(root.chatUnlockSetting, root.chatVaultWallet)
     // Generation the helper prepared inside the verified mount; -1 = none.
     property int chatPreparedGeneration: -1
-    // Sites whose folder that prepare (and later ones) created; they count
+    // Sites whose folder a prepare created after the latest status check:
+    // that prepare also verified the mount again. Only these may get a new
+    // saved profile; every status reply empties the list, so a site opened
+    // later is prepared (and the mount verified) once more first. They count
     // only while chatPreparedGeneration is the current generation.
-    property var chatPreparedSites: []
+    property var chatFreshSites: []
+    // Shown sites the Chat tab asked a fresh prepare for (siteWanted).
+    property var chatWantedSites: []
     // The sites the shown panes need a folder for (split view: both).
     readonly property var chatNeededSites: {
         var wanted = [root.chatWebSiteId].concat(root.chatSplit ? [root.chatSiteIdB] : [])
@@ -211,7 +216,7 @@ PlasmoidItem {
         return ids
     }
     // What the Chat tab may open a saved profile for.
-    readonly property var chatReadySites: root.chatStorageReady ? root.chatPreparedSites : []
+    readonly property var chatReadySites: root.chatStorageReady ? root.chatFreshSites : []
     // Every site id whose folder prune keeps: the built-ins (added sites
     // join in a later version).
     readonly property var chatKnownSites: ChatStorage.BUILTIN_SITE_IDS
@@ -819,9 +824,11 @@ PlasmoidItem {
             }
         }
         root.chatOpRun = ChatStorage.nextRun(root.chatOpRun)
-        // The sites shown now, but never one whose folder still waits to be
-        // deleted (Clear <site> data).
-        root.chatOpSites = step === "prepare" ? root.chatNeededSites.filter(function (id) {
+        // The sites shown now and those the Chat tab asked for, but never one
+        // whose folder still waits to be deleted (Clear <site> data).
+        root.chatOpSites = step === "prepare" ? root.chatNeededSites.concat(root.chatWantedSites.filter(function (id) {
+            return root.chatNeededSites.indexOf(id) < 0
+        })).filter(function (id) {
             return !root.chatRemovalPending(id)
         }) : []
         var command = root.chatCommand(step, root.chatOpRun)
@@ -857,24 +864,35 @@ PlasmoidItem {
         return Plasmoid.configuration.chatPendingSiteClears === text
     }
 
-    // A shown site has no folder yet while the generation is prepared:
-    // prepare again (once at a time; a running one checks when it ends).
+    // A site the Chat tab waits for has no fresh prepare while the
+    // generation is prepared: prepare again (once at a time; a running one
+    // checks when it ends). A site still owing its delete waits for that.
     function chatPrepareMissing() {
         if (!root.chatStorageReady || !root.chatWantsSaved() || root.chatOp === "prepare"
                 || root.chatQueue.indexOf("prepare") >= 0)
             return
-        var missing = root.chatNeededSites.some(function (id) {
-            return root.chatPreparedSites.indexOf(id) < 0 && !root.chatRemovalPending(id)
+        var missing = root.chatWantedSites.some(function (id) {
+            return root.chatFreshSites.indexOf(id) < 0 && !root.chatRemovalPending(id)
         })
         if (missing)
             root.chatEnqueue(["prepare"])
     }
 
+    // The Chat tab's web view has no profile for a shown site and may not
+    // make one: prepare its folder (verifying the mount) right before.
+    function chatSiteWanted(siteId) {
+        if (!ChatStorage.isSiteId(siteId) || root.chatWebSiteIds.indexOf(siteId) < 0)
+            return
+        if (root.chatWantedSites.indexOf(siteId) < 0)
+            root.chatWantedSites = root.chatWantedSites.concat([siteId])
+        root.chatPrepareMissing()
+    }
+
     // Clear <site> data with saved sign-ins, before ChatView drops the
     // site's views and profile (it does so only if the site is pending
     // afterwards): the site is stored as pending first, so the delete is
-    // owed even across a restart. Its folder no longer counts as prepared;
-    // after the wait it is deleted, then made again if the site is shown.
+    // owed even across a restart. Its folder no longer counts as prepared.
+    // Nothing is deleted yet: see chatSiteReleased.
     function chatClearSite(siteId) {
         if (!ChatStorage.isSiteId(siteId) || !root.chatStorageReady)
             return
@@ -882,11 +900,17 @@ PlasmoidItem {
                 && !root.chatWritePendingClears(root.chatPendingClears.concat([siteId])))
             return
         root.chatRemoveTried = root.chatRemoveTried.filter(function (id) { return id !== siteId })
-        root.chatPreparedSites = root.chatPreparedSites.filter(function (id) { return id !== siteId })
-        // One delete for each owed site not tried yet this round, this one too.
+        root.chatFreshSites = root.chatFreshSites.filter(function (id) { return id !== siteId })
+    }
+
+    // The web view destroyed the cleared site's profile: after the wait its
+    // folder is deleted (one delete for each owed site not tried yet this
+    // round, this one too), then made again if the site is shown.
+    function chatSiteReleased(siteId) {
+        if (!root.chatRemovalPending(siteId) || !root.chatStorageReady)
+            return
         var owed = root.chatPendingClears.filter(function (id) { return root.chatRemoveTried.indexOf(id) < 0 })
         root.chatEnqueue(["wait"].concat(owed.map(function () { return "remove-site" })))
-        root.chatPrepareMissing()
     }
 
     function chatWantsSaved() {
@@ -901,6 +925,8 @@ PlasmoidItem {
         switch (step) {
         case "status":
         case "leave-status":
+            // A new profile needs a prepare newer than this check.
+            root.chatFreshSites = []
             // Another widget holds the folder's lock (e.g. its passphrase
             // window is open): keep what we knew.
             if (!reply.ok && reply.error === "busy" && root.chatVaultState !== "")
@@ -930,8 +956,11 @@ PlasmoidItem {
                 var created = root.chatOpSites.filter(function (id) { return !root.chatRemovalPending(id) })
                 root.chatVaultError = ""
                 root.chatPreparedGeneration = root.chatGeneration
-                root.chatPreparedSites = first ? created : root.chatPreparedSites.concat(
-                    created.filter(function (id) { return root.chatPreparedSites.indexOf(id) < 0 }))
+                root.chatFreshSites = first ? created : root.chatFreshSites.concat(
+                    created.filter(function (id) { return root.chatFreshSites.indexOf(id) < 0 }))
+                root.chatWantedSites = root.chatWantedSites.filter(function (id) {
+                    return root.chatFreshSites.indexOf(id) < 0
+                })
                 if (first) {
                     // Old generations of this widget (e.g. after Clear, or the
                     // old shared profile after the update) go away, then
@@ -1720,7 +1749,6 @@ PlasmoidItem {
     }
 
     onChatStorageModeChanged: root.chatModeChanged()
-    onChatNeededSitesChanged: root.chatPrepareMissing()
     // A settings dialog opened earlier may write back an old generation.
     onChatConfiguredGenerationChanged: {
         if (root.chatGeneration >= 0 && root.chatConfiguredGeneration !== root.chatGeneration)

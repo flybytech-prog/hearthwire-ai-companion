@@ -2311,16 +2311,35 @@ TestCase {
 
     // The Stay signed in helper commands, without the run prefix (checked
     // here: this widget, nothing else in front).
+    // main.qml's own sources sit at its top level (see checkStubs); a full
+    // walk of a popup's tree on every poll is slow.
+    function topSources(owner) {
+        var found = []
+        for (var index = 0; index < owner.data.length; index++) {
+            if (typeof owner.data[index].connectSource === "function")
+                found.push(owner.data[index])
+        }
+        return found
+    }
+
     function storageCommands(owner) {
         wait(0)
         var prefix = new RegExp("^env HEARTHWIRE_RUN=[0-9]+ HEARTHWIRE_APPLET=" + Plasmoid.id
                                 + " python3 -P -m hearthwire ")
-        return everyCommand(owner).filter(function (command) {
+        var all = []
+        topSources(owner).forEach(function (source) { all = all.concat(source.commands) })
+        return all.filter(function (command) {
             return / --(web-data|vault) /.test(command)
         }).map(function (command) {
             verify(prefix.test(command), command)
             return command.replace(prefix, "")
         })
+    }
+
+    // The same without status checks (main.qml's recheck may come at any
+    // time in a longer test).
+    function webDataCommands(owner) {
+        return storageCommands(owner).filter(function (command) { return command !== "--vault status" })
     }
 
     function lastStorageCommand(owner) {
@@ -2331,7 +2350,7 @@ TestCase {
     function answerStorage(owner, reply) {
         wait(0)
         var running = null
-        sourcesOf(owner).forEach(function (source) {
+        topSources(owner).forEach(function (source) {
             source.connectedSources.forEach(function (command) {
                 if (/ --(web-data|vault) /.test(command))
                     running = {source: source, command: command}
@@ -2343,9 +2362,16 @@ TestCase {
     }
 
     // Answers the running step after checking it is `expected`.
+    // main.qml's recheck 2 s after the first prepare may come in between:
+    // it is answered (still unlocked) when another step is expected.
     function expectStorage(owner, expected, reply) {
-        tryVerify(function () { return lastStorageCommand(owner) === expected }, 3000,
-                  "expected `" + expected + "`, last was `" + lastStorageCommand(owner) + "`")
+        tryVerify(function () {
+            var last = lastStorageCommand(owner)
+            if (last === "--vault status" && expected !== last && owner.chatOp === "status"
+                    && owner.chatStorageReady)
+                answerStorage(owner, testCase.unlockedReply)
+            return lastStorageCommand(owner) === expected
+        }, 3000, "expected `" + expected + "`, last was `" + lastStorageCommand(owner) + "`")
         answerStorage(owner, reply === undefined ? testCase.okReply : reply)
     }
 
@@ -2446,6 +2472,8 @@ TestCase {
         var main = unlockedMain()
         var generation = main.chatGeneration
         main.chatSiteId = "gemini"
+        // As the web view does for a shown site without a profile.
+        main.chatSiteWanted("gemini")
         expectStorage(main, webData("prepare", " --generation " + generation + " --sites gemini"))
         compare(main.chatReadySites, ["claude", "gemini"])
         // Back to a prepared site: nothing runs.
@@ -2456,6 +2484,7 @@ TestCase {
         // Split view on chatgpt next to claude: only chatgpt is new.
         main.chatSiteIdB = "chatgpt"
         main.setChatSplit(true)
+        main.chatSiteWanted("chatgpt")
         expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude,chatgpt"))
         compare(main.chatReadySites, ["claude", "gemini", "chatgpt"])
         // No more keep or prune after these.
@@ -2518,9 +2547,10 @@ TestCase {
         var text = allNamed(chat, "clearSiteText")[0]
         compare(text.textFormat, Text.PlainText)
         compare(text.text, "Clear Claude data? This signs you out of this site and deletes its saved sign-in. Other sites stay signed in.")
-        var count = storageCommands(main).length
+        var count = webDataCommands(main).length
         // The delete it owes is stored before anything is torn down.
         var storedAtTeardown = []
+        chat.web.holdRelease = true
         chat.web.clearHook = function (siteId) {
             storedAtTeardown.push(Plasmoid.configuration.chatPendingSiteClears)
         }
@@ -2531,9 +2561,20 @@ TestCase {
         compare(chat.confirmingClearSite, "")
         compare(main.chatReadySites, [], "claude's folder no longer counts")
         compare(chat.web.preparedSites, [])
-        // Nothing is deleted before the wait (the profile closes its files).
-        compare(storageCommands(main).length, count)
-        compare(main.chatOp, "wait")
+        // Nothing is deleted, nor waited for, before the profile is gone.
+        wait(50)
+        compare(webDataCommands(main).length, count)
+        verify(main.chatOp !== "wait" && main.chatOp !== "remove-site", main.chatOp)
+        compare(main.chatQueue.filter(function (step) { return step !== "status" }), [])
+        // The web view destroyed the profile; the shown site then waits.
+        chat.web.siteReleased("claude")
+        chat.web.siteWanted("claude")
+        // Then the wait (the profile closes its files), then the delete.
+        tryVerify(function () {
+            if (main.chatOp === "status" && main.chatStorageReady)
+                answerStorage(main, testCase.unlockedReply)
+            return main.chatOp === "wait"
+        }, 3000)
         compare(main.chatProfileCloseWait, 1000)
         compare(Plasmoid.configuration.chatPendingSiteClears, "claude")
         expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"))
@@ -2542,9 +2583,11 @@ TestCase {
         expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
         compare(main.chatReadySites, ["claude"])
         compare(chat.web.preparedSites, ["claude"])
-        // Only that one folder: no remove of the generation, no prune.
-        var after = storageCommands(main).slice(count)
-        compare(after.length, 2)
+        // Only that one folder: no remove of the generation, no prune
+        // (the recheck's status may come in between).
+        var after = webDataCommands(main).slice(count)
+        compare(after, [webData("remove-site", " --generation " + generation + " --site claude"),
+                        webData("prepare", " --generation " + generation + " --sites claude")])
     }
 
     // A failed delete keeps the site closed (never re-prepared with its old
@@ -2553,6 +2596,9 @@ TestCase {
         var main = unlockedMain()
         var generation = main.chatGeneration
         main.chatClearSite("claude")
+        // As the web view does: profile gone, then the shown site waits.
+        main.chatSiteReleased("claude")
+        main.chatSiteWanted("claude")
         expectStorage(main, webData("remove-site", " --generation " + generation + " --site claude"),
                       JSON.stringify({ok: false, error: "os-error"}))
         wait(50)
@@ -2705,6 +2751,7 @@ TestCase {
         verify(main.chatStorageReady)
         // Another site shown meanwhile is prepared; claude never is.
         main.chatSiteId = "gemini"
+        main.chatSiteWanted("gemini")
         expectStorage(main, webData("prepare", " --generation " + generation + " --sites gemini"))
         compare(main.chatReadySites, ["gemini"])
         compare(Plasmoid.configuration.chatPendingSiteClears, "claude")
@@ -2782,15 +2829,15 @@ TestCase {
         for (var index = 0; index < 207; index++)
             full.push("user-" + ("0000000" + index.toString(16)).slice(-8))
         Plasmoid.configuration.chatPendingSiteClears = full.join(",")
-        var count = storageCommands(main).length
+        var count = webDataCommands(main).length
         chat.askClearSite()
         allNamed(chat, "clearSiteConfirm")[0].clicked()
         compare(chat.web.clearedSites, [])
         compare(Plasmoid.configuration.chatPendingSiteClears, full.join(","))
-        compare(main.chatReadySites, ["claude"])
+        verify(!main.chatRemovalPending("claude"))
         wait(50)
-        compare(storageCommands(main).length, count)
-        compare(main.chatQueue, [])
+        compare(webDataCommands(main).length, count)
+        compare(main.chatQueue.filter(function (step) { return step !== "status" }), [])
     }
 
     function test_clearChatDataEndsTheOwedDeletes_data() {
@@ -2806,6 +2853,7 @@ TestCase {
         // Owed from an earlier failed delete (as if written by an earlier run).
         Plasmoid.configuration.chatPendingSiteClears = "gemini"
         main.chatClearSite("claude")
+        main.chatSiteReleased("claude")
         compare(Plasmoid.configuration.chatPendingSiteClears, "gemini,claude")
         tryVerify(function () { return main.chatOp === "" || main.chatOp === "remove-site" }, 3000)
         expectStorage(main, webData("remove-site", " --generation " + generation + " --site gemini"),
@@ -2820,5 +2868,78 @@ TestCase {
         expectStorage(main, webData("remove", ""), data.reply)
         compare(Plasmoid.configuration.chatPendingSiteClears, data.left)
         expectStorage(main, "--vault lock")
+    }
+
+    // --- SEC-L1: a new saved profile only after a fresh, verified prepare ---
+
+    // Every status check ends what the prepares before it allowed: a site
+    // opened after it is prepared again (the helper verifies the mount)
+    // before any new saved profile is made for it.
+    function test_newSavedProfileNeedsAPrepareAfterTheLastStatus() {
+        var main = unlockedMain()
+        var generation = main.chatGeneration
+        compare(main.chatReadySites, ["claude"])
+        main.chatStorageRequest("recheck")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        compare(main.chatReadySites, [], "the check ends the prepare's say")
+        verify(main.chatStorageReady, "open profiles stay")
+        // The recheck alone runs nothing more.
+        wait(50)
+        compare(lastStorageCommand(main), "--vault status")
+        // A site opened now (even claude again, after its view was gone).
+        main.chatSiteId = "gemini"
+        main.chatSiteWanted("gemini")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites gemini"))
+        compare(main.chatReadySites, ["gemini"])
+        main.chatSiteWanted("claude")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites gemini,claude"))
+        compare(main.chatReadySites, ["gemini", "claude"])
+        // Asking again while fresh runs nothing.
+        var count = storageCommands(main).length
+        main.chatSiteWanted("claude")
+        wait(50)
+        compare(storageCommands(main).length, count)
+        // A busy status (another widget) counts as a check too.
+        main.chatStorageRequest("recheck")
+        expectStorage(main, "--vault status", JSON.stringify({ok: false, error: "busy"}))
+        compare(main.chatReadySites, [])
+    }
+
+    // A prepare that fails (the mount went away) allows nothing.
+    function test_failedPrepareAllowsNoNewProfile() {
+        var main = unlockedMain()
+        var generation = main.chatGeneration
+        main.chatStorageRequest("recheck")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        main.chatSiteId = "gemini"
+        main.chatSiteWanted("gemini")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites gemini"),
+                      JSON.stringify({ok: false, error: "not-verified"}))
+        compare(main.chatReadySites, [])
+        verify(!main.chatStorageReady)
+    }
+
+    // Requests for sites that aren't shown chat web sites are ignored.
+    function test_siteWantedIgnoresOddIds() {
+        var main = unlockedMain()
+        var count = storageCommands(main).length
+        ;["ollama", "", "claude2", "user-0123abcd", "__proto__"].forEach(function (id) { main.chatSiteWanted(id) })
+        wait(50)
+        compare(storageCommands(main).length, count)
+        compare(main.chatWantedSites, [])
+    }
+
+    // The real Chat tab forwards its web view's request, only with saved
+    // sign-ins open.
+    function test_chatTabForwardsTheSiteRequest() {
+        var main = unlockedMain({}, true)
+        var generation = main.chatGeneration
+        var chat = testCase.chatOpened
+        tryVerify(function () { return chat.persistentActive }, 3000)
+        main.chatSiteId = "gemini"
+        chat.web.siteWanted("gemini")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites gemini"))
+        verify(main.chatReadySites.indexOf("gemini") >= 0)
+        compare(chat.web.preparedSites.indexOf("gemini") >= 0, true)
     }
 }

@@ -902,15 +902,13 @@ def test_prepare_refuses_a_foreign_site_folder(data, capsys, mounted, monkeypatc
 
 
 def test_prune_keeps_exactly_the_known_site_folders(data, capsys, mounted):
+    # Only site folders at the root: no rollback, so the known ones stay.
     container = make_container(
         mounted,
-        sites=("claude", "gemini", "user-0000000a", "user-0000000b"),
-        root_files=("Cookies", "Preferences", "site-copilot-old", "site-"),
+        sites=("claude", "gemini", "user-0000000a", "user-0000000b", "local"),
+        root_files=("site-grok",),
     )
-    for name in ("Local Storage", "Service Worker", "site-ollama", "site-bogus", "site-claude.bak", "site-Claude"):
-        (container / name).mkdir()
-        (container / name / "data").write_text("x")
-    known = ",".join(BUILTINS + ("user-0000000a",))
+    known = ",".join(("claude", "gemini", "grok", "user-0000000a"))
     assert web_op(capsys, "prune", known=known) == {"ok": True}
     assert names(container) == ["site-claude", "site-gemini", "site-user-0000000a"]
     assert (container / "site-claude" / "Cookies").read_text() == "claude"
@@ -918,7 +916,7 @@ def test_prune_keeps_exactly_the_known_site_folders(data, capsys, mounted):
 
 
 def test_prune_never_touches_other_generations_or_applets(data, capsys, mounted):
-    make_container(mounted, 1, 0, sites=("claude",))
+    make_container(mounted, 1, 0, sites=("claude", "user-000000aa"), root_files=())
     others = {
         (1, 1): make_container(mounted, 1, 1, sites=("claude", "user-0000000b")),
         (2, 0): make_container(mounted, 2, 0, sites=("user-0000000b",)),
@@ -962,16 +960,19 @@ def test_prune_refuses_a_symlinked_web_folder(data, capsys, tmp_path, mounted):
     assert (target / "applet-1-g0" / "Cookies").read_text() == "x"
 
 
-@pytest.mark.parametrize("name", ["site-claude", "site-grok", "site-ollama", "Cookies"])
-def test_prune_unlinks_symlinks_and_never_follows_them(data, capsys, tmp_path, mounted, name):
+@pytest.mark.parametrize("name, rollback", [("site-claude", False), ("site-grok", False),
+                                            ("site-ollama", True), ("Cookies", True)])
+def test_prune_unlinks_symlinks_and_never_follows_them(data, capsys, tmp_path, mounted, name, rollback):
     # site-claude is known but a symlink is never a profile, so it is unlinked too.
+    # A non-site name at the root is rollback evidence: then every site folder goes.
     target = outside_target(tmp_path)
     container = make_container(mounted, sites=("chatgpt",), root_files=())
     (container / name).symlink_to(target)
     (container / "site-chatgpt" / "link").symlink_to(target)
     assert web_op(capsys, "prune", known="claude,chatgpt") == {"ok": True}
-    assert names(container) == ["site-chatgpt"]
-    assert (container / "site-chatgpt" / "link").is_symlink()
+    assert names(container) == ([] if rollback else ["site-chatgpt"])
+    if not rollback:
+        assert (container / "site-chatgpt" / "link").is_symlink()
     assert_target_intact(target)
 
 
@@ -1077,8 +1078,11 @@ def test_prepare_prune_remove_site_flow(data, capsys, mounted):
     # Unlock: prepare then prune; a site's data is cleared; an added site is removed.
     old_root = make_container(mounted, 4, 2, root_files=("Cookies", "Preferences"))
     assert web_op(capsys, "prepare", 4, 2, sites="claude,user-000000ff") == {"ok": True}
+    assert names(old_root) == ["site-claude", "site-user-000000ff"]
+    (old_root / "site-claude" / "Cookies").write_text("new")
     assert web_op(capsys, "prune", 4, 2, known=",".join(BUILTINS + ("user-000000ff",))) == {"ok": True}
     assert names(old_root) == ["site-claude", "site-user-000000ff"]
+    assert (old_root / "site-claude" / "Cookies").read_text() == "new"
     assert web_op(capsys, "remove-site", 4, 2, site="claude") == {"ok": True}
     assert web_op(capsys, "prune", 4, 2, known=",".join(BUILTINS)) == {"ok": True}
     assert names(old_root) == []
@@ -1217,3 +1221,177 @@ def test_unexpected_exception_in_site_operations_is_a_bare_code(data, capsys, mo
     monkeypatch.setattr(webdata, "remove_site", boom)
     assert web_op(capsys, "prune", known="claude") == {"ok": False, "error": "os-error"}
     assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "os-error"}
+
+
+# --- REV-M1: leftovers at the container root mean a rollback; every site starts fresh --------
+
+
+# What 1.0.1 writes when it opens the container as its one shared profile.
+OLD_SHARED_PROFILE = ("Cookies", "Cookies-journal", "Preferences", "Network Persistent State")
+OLD_SHARED_DIRS = ("Local Storage", "Service Worker", "Session Storage")
+
+
+def downgrade_wrote(container):
+    for name in OLD_SHARED_PROFILE:
+        (container / name).write_text("1.0.1")
+    for name in OLD_SHARED_DIRS:
+        (container / name).mkdir()
+        (container / name / "data").write_text("1.0.1")
+
+
+def test_re_upgrade_never_brings_an_old_sign_in_back(data, capsys, mounted):
+    # The lab's REV-M1 sequence: signed in on this version, down to 1.0.1, up again.
+    container = make_container(mounted, 4, 2, sites=("claude", "user-0000000a"), root_files=())
+    (container / "site-claude" / "Cookies").write_text("ck_one=one")
+    downgrade_wrote(container)
+    other = make_container(mounted, 4, 1, sites=("claude",))
+    other_applet = make_container(mounted, 5, 2, sites=("claude",))
+    # The first prepare after the unlock comes before any profile opens.
+    assert web_op(capsys, "prepare", 4, 2, sites="claude") == {"ok": True}
+    assert names(container) == ["site-claude"]
+    assert names(container / "site-claude") == []
+    assert mode(container / "site-claude") == 0o700
+    assert web_op(capsys, "prune", 4, 2, known=",".join(BUILTINS + ("user-0000000a",))) == {"ok": True}
+    assert names(container) == ["site-claude"]
+    assert names(other) == ["Cookies", "site-claude"] and names(other_applet) == ["Cookies", "site-claude"]
+
+
+def test_prune_after_a_rollback_deletes_every_site_folder(data, capsys, mounted):
+    container = make_container(mounted, sites=("claude", "gemini", "user-0000000a"), root_files=())
+    downgrade_wrote(container)
+    assert web_op(capsys, "prune", known=",".join(BUILTINS + ("user-0000000a",))) == {"ok": True}
+    assert names(container) == []
+    assert container.is_dir() and not container.is_symlink()
+
+
+@pytest.mark.parametrize("leftover", ["Cookies", "site-", "site-ollama", "site-Claude", "site-claude.bak",
+                                      "site-user-DEADBEEF", "x"])
+def test_any_non_site_name_at_the_root_counts_as_a_rollback(data, capsys, mounted, leftover):
+    container = make_container(mounted, sites=("claude",), root_files=(leftover,))
+    assert web_op(capsys, "prune", known="claude") == {"ok": True}
+    assert names(container) == []
+
+
+def test_prepare_without_leftovers_keeps_every_site_folder(data, capsys, mounted):
+    container = make_container(mounted, sites=("claude", "user-0000000a"), root_files=("site-grok",))
+    assert web_op(capsys, "prepare", sites="gemini") == {"ok": True}
+    assert names(container) == ["site-claude", "site-gemini", "site-grok", "site-user-0000000a"]
+    assert (container / "site-claude" / "Cookies").read_text() == "claude"
+
+
+def test_prepare_without_sites_also_clears_after_a_rollback(data, capsys, mounted):
+    container = make_container(mounted, sites=("claude",), root_files=("Cookies",))
+    assert prepare(capsys, 1, 0) == {"ok": True}
+    assert names(container) == []
+
+
+def test_rollback_clear_deletes_site_folders_before_the_leftovers(data, capsys, mounted, monkeypatch):
+    container = make_container(mounted, sites=("claude", "grok"), root_files=("Cookies", "Preferences"))
+    order = []
+    real = webdata.remove_entry
+    monkeypatch.setattr(webdata, "remove_entry", lambda parent, name: (order.append(name), real(parent, name)))
+    assert web_op(capsys, "prune", known="claude") == {"ok": True}
+    assert order == ["site-claude", "site-grok", "Cookies", "Preferences"]
+    assert names(container) == []
+
+
+@pytest.mark.parametrize("operation", ["prepare", "prune"])
+def test_a_refused_site_folder_keeps_the_rollback_evidence(data, capsys, mounted, monkeypatch, operation):
+    # The next run must try again, so the leftovers stay while a site folder does.
+    container = make_container(mounted, sites=("claude", "gemini"), root_files=("Cookies",))
+    with monkeypatch.context() as patch:
+        fake_foreign_owner(patch, "site-gemini")
+        options = {"sites": "claude"} if operation == "prepare" else {"known": "claude"}
+        assert web_op(capsys, operation, **options) == {"ok": False, "error": "not-owned"}
+    assert names(container) == ["Cookies", "site-gemini"]
+    assert web_op(capsys, operation, **options) == {"ok": True}
+    assert names(container) == (["site-claude"] if operation == "prepare" else [])
+
+
+def test_a_refused_leftover_stops_prepare_before_any_site_folder(data, capsys, mounted, monkeypatch):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    (container / "Local Storage").mkdir()
+    fake_foreign_owner(monkeypatch, "Local Storage")
+    assert web_op(capsys, "prepare", sites="claude,gemini") == {"ok": False, "error": "not-owned"}
+    assert names(container) == ["Local Storage"]
+
+
+def test_rollback_clear_unlinks_symlinks_and_never_follows_them(data, capsys, tmp_path, mounted):
+    target = outside_target(tmp_path)
+    container = make_container(mounted, sites=("gemini",), root_files=())
+    (container / "site-claude").symlink_to(target)
+    (container / "Cookies").symlink_to(target)
+    (container / "site-gemini" / "link").symlink_to(target)
+    assert web_op(capsys, "prepare", sites="claude") == {"ok": True}
+    assert names(container) == ["site-claude"]
+    assert not (container / "site-claude").is_symlink()
+    assert_target_intact(target)
+
+
+def test_rollback_clear_replies_with_codes_only(data, capsys, tmp_path, mounted, monkeypatch):
+    texts = []
+    container = make_container(mounted, sites=("claude",), root_files=("Cookies",))
+    for argv in (["prepare", *_SITE_BASE, "--sites", "claude"], ["prune", *_SITE_BASE, "--known", "claude"]):
+        downgrade_wrote(container)
+        with monkeypatch.context() as patch:
+            fake_foreign_owner(patch, "Local Storage")
+            cli.main(["--web-data", *argv])
+        cli.main(["--web-data", *argv])
+        captured = capsys.readouterr()
+        texts.append(captured.out + captured.err)
+    text = "".join(texts)
+    assert text.count('{"ok":false,"error":"not-owned"}') == 2 and text.count('{"ok":true}') == 2
+    assert str(tmp_path) not in text and "/" not in text
+    assert "Cookies" not in text and "site" not in text and "claude" not in text and "Local" not in text
+
+
+# --- SEC-I2: no leading zeros, no option given twice --------------------------------------
+
+
+@pytest.mark.parametrize("argv", [
+    [*_PREPARE, "--applet", "01", "--generation", "0"],
+    [*_PREPARE, "--applet", "00", "--generation", "0"],
+    [*_PREPARE, "--applet", "1", "--generation", "00"],
+    [*_PREPARE, "--applet", "1", "--generation", "007"],
+    ["--web-data", "remove", "--store", "encrypted", "--applet", "1", "--keep", "01"],
+    ["--web-data", "remove-site", *_SITE_BASE, "--site", "claude", "--site", "gemini"],
+    ["--web-data", "remove-site", *_SITE_BASE, "--site", "claude", "--site", "claude"],
+    ["--web-data", "prepare", *_SITE_BASE, "--sites", "claude", "--sites", "gemini"],
+    ["--web-data", "prune", *_SITE_BASE, "--known", "claude", "--known", "gemini"],
+    ["--web-data", "prune", *_SITE_BASE, "--known", "claude", "--know", "gemini"],
+    [*_PREPARE, "--applet", "1", "--applet", "2", "--generation", "0"],
+    [*_PREPARE, "--applet", "1", "--generation", "0", "--generation", "1"],
+    [*_PREPARE, "--applet", "1", "--generation", "0", "--gen", "1"],
+    [*_PREPARE, "--store", "encrypted", "--applet", "1", "--generation", "0"],
+    ["--web-data", "prepare", "--web-data", "remove", "--store", "encrypted", "--applet", "1", "--generation", "0"],
+    ["--web-data", "remove", "--store", "encrypted", "--applet", "1", "--keep", "0", "--keep", "1"],
+    ["--web-data", "purge", "--web-data", "purge"],
+])
+def test_leading_zeros_and_repeated_options_exit_2_and_touch_nothing(data, capsys, mounted, argv):
+    make_container(mounted, sites=("claude", "gemini"), root_files=())
+    before = names(mounted / "web" / "applet-1-g0")
+    with pytest.raises(SystemExit) as raised:
+        cli.main(argv)
+    assert raised.value.code == 2
+    assert capsys.readouterr().out == ""
+    assert names(mounted / "web" / "applet-1-g0") == before
+    assert names(mounted / "web") == ["applet-1-g0"]
+
+
+@pytest.mark.parametrize("argv", [["--json", "--json"], ["--catalog", "--catalog"], ["--detect", "--det"],
+                                  ["--vault", "status", "--vault", "lock"], ["--prompts", "list", "--prompts", "list"],
+                                  ["--usage-history", "read", "--applet", "1", "--applet", "1"],
+                                  ["--port-owner", "8080", "--port-owner", "9090"]])
+def test_every_option_is_refused_the_second_time(data, capsys, argv):
+    with pytest.raises(SystemExit) as raised:
+        cli.main(argv)
+    assert raised.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "may be given only once" in captured.err
+
+
+def test_a_repeated_option_is_named_without_its_value(data, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--data", "secret-settings-text", "--data", "more-secret-text"])
+    err = capsys.readouterr().err
+    assert "--data" in err and "secret" not in err

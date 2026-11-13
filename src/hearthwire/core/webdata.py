@@ -257,6 +257,36 @@ def _remove_profiles(web: int, applet: int, keep: Optional[int]) -> None:
 # --- store "encrypted": <verified gocryptfs mount>/web ---------------------------------
 
 
+def _is_site_folder_name(name: str) -> bool:
+    return name.startswith(SITE_PREFIX) and valid_site_id(name[len(SITE_PREFIX):])
+
+
+def _list(directory: int) -> list[str]:
+    try:
+        return sorted(os.listdir(directory))
+    except OSError:
+        raise HelperError("os-error") from None
+
+
+def _clear_after_rollback(container: int, names: list[str]) -> bool:
+    """Empty the container when its root holds anything but site folders.
+
+    Since every site has its own profile, nothing this version makes lives
+    at the container root; anything there was written by an older version
+    that opened the container as its one shared profile, i.e. after a
+    downgrade. The site folders from before that downgrade then hold
+    sign-ins the user may have changed or left there, so every one goes too:
+    after a re-upgrade each site starts signed out (REV-M1). Site folders are
+    deleted first, the root leftovers last, so a failed delete keeps the
+    evidence and the next run tries again. True when it emptied the container.
+    """
+    if all(_is_site_folder_name(name) for name in names):
+        return False
+    for name in sorted(names, key=lambda entry: not _is_site_folder_name(entry)):
+        remove_entry(container, name)
+    return True
+
+
 def _prepare_encrypted(
     applet: int,
     generation: int,
@@ -270,6 +300,8 @@ def _prepare_encrypted(
         for name in (WEB_DIR, profile_name(applet, generation)):
             parent = open_child_dir(parent, name, create=True)
             opened.append(parent)
+        # Before any site folder is handed out: never an old one after a rollback.
+        _clear_after_rollback(parent, _list(parent))
         for site in sites:
             opened.append(open_child_dir(parent, site_folder(site), create=True))
 
@@ -326,11 +358,10 @@ def _prune_encrypted(
     with _existing_container(applet, generation, environ) as container:
         if container is None:
             return
-        try:
-            names = os.listdir(container)
-        except OSError:
-            raise HelperError("os-error") from None
-        for name in sorted(names):
+        names = _list(container)
+        if _clear_after_rollback(container, names):
+            return
+        for name in names:
             # A known name that is a symlink or a file is never a site's
             # profile (prepare would refuse it), so it goes too.
             if name in keep and _is_real_directory(container, name):

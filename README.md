@@ -77,8 +77,10 @@ plasmashell's memory.
   (cookies, storage, cache, service workers, permissions), so one site's page
   can't use or read another site's sign-in. Each site signs in on its own,
   Google sign-in included. **Clear <site> data…** in the Chat toolbar signs
-  you out of just the site you are using. The sites still share one web
-  engine process, the clipboard, your Downloads folder and your network
+  you out of just the site you are using. Pages run in their own sandboxed
+  renderers, but the sites still share Chromium's browser process (Plasma
+  itself) and its network and GPU processes, the clipboard, your Downloads
+  folder and your network
   (see [the limits](docs/privacy.md#one-profile-per-chat-site)).
 - **Private by default**: pages run in in-memory browser profiles. You sign
   in on each site normally; nothing is saved to disk, and you are signed out
@@ -595,7 +597,9 @@ Newer versions give every chat site its own profile. After the update, sign
 in once more to each chat site: the old shared profile is not used again, and
 with Stay signed in → Encrypted it is deleted inside the encrypted folder after
 the next unlock. The Chat tab says so once (**Got it** hides it). Going back to
-1.0.1 is harmless, but its chat sign-ins start empty too. See
+1.0.1 is harmless, but its chat sign-ins start empty too, and upgrading again
+starts every chat site signed out once more (no account from before the
+downgrade comes back). See
 [Privacy](docs/privacy.md#one-profile-per-site-the-one-time-move).
 
 ## Upgrading from AI Usage 2.x
@@ -734,8 +738,8 @@ is the only authentication cache created by Hearthwire; it is stored with mode
 fingerprint.
 
 The Chat tab gives every chat site its own profile, so no site can use or
-read another's sign-in (one web engine process, the clipboard, Downloads and
-the network are still shared). It keeps cookies, sessions, and site data in
+read another's sign-in (Chromium's browser, network and GPU processes, the
+clipboard, Downloads and the network are still shared). It keeps cookies, sessions, and site data in
 memory only, denies
 every site permission (microphone, camera, screen sharing, notifications,
 location, clipboard reading), asks before each download, asks before opening
