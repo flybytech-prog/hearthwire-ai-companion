@@ -1080,6 +1080,11 @@ MAIN_SITE_GATE = (
     r"readonly\s+property\s+var\s+chatPendingClears\s*:\s*"
     r"ChatStorage\.parsePendingClears\(\s*Plasmoid\.configuration\.chatPendingSiteClears\s*\)",
 )
+# L1-r: the one other place chatFreshSites is emptied; group 1 is the assignment.
+FRESH_EXPIRY = (
+    r"Timer\s*\{\s*id\s*:\s*chatFreshTimer\s+interval\s*:\s*root\.chatFreshWait\s+repeat\s*:\s*false\s+"
+    r"onTriggered\s*:\s*root\.(chatFreshSites\s*=\s*\[\s*\])\s*\}"
+)
 CHAT_REMOVAL_PENDING_BODY = "{ return root.chatPendingClears.indexOf(siteId) >= 0 }"
 NOT_PENDING = r"\.filter\(\s*function\s*\(\s*id\s*\)\s*\{\s*return\s+!root\.chatRemovalPending\(\s*id\s*\)\s*\}\s*\)"
 
@@ -1088,7 +1093,9 @@ def _prepared_site_problems(main, full_representation, storage=None):
     """3f + SEC-L1: a new saved profile only for a site in chatFreshSites. Every
     status reply empties it first; it grows only in an ok prepare reply (so
     only from a prepare that came after the latest status: steps run one at a
-    time) and shrinks only when the site is cleared."""
+    time) and shrinks only when the site is cleared. L1-r: it also expires
+    chatFreshWait after the latest ok prepare reply (chatFreshTimer), so a
+    site no view took is prepared again before it gets a profile."""
     problems = [f"main.qml needs `{pattern}` once" for pattern in MAIN_SITE_GATE if len(re.findall(pattern, main)) != 1]
     if len(_hits(r"(?m)^\s*preparedSites\s*:\s*root\.chatReadySites\s*$", full_representation)) != 1 \
             or len(_hits(r"\bpreparedSites\s*:", full_representation)) != 1:
@@ -1104,10 +1111,22 @@ def _prepared_site_problems(main, full_representation, storage=None):
     emptied = [match.start() for match in re.finditer(
         r'case\s+"status"\s*:\s*case\s+"leave-status"\s*:\s*root\.(chatFreshSites)\s*=\s*\[\s*\]', main)]
     empties = [match.start() for match in re.finditer(r"\bchatFreshSites\s*=\s*\[\s*\]", main)]
+    expiry = [match.start(1) for match in re.finditer(FRESH_EXPIRY, main)]
     widening = [at for at in grants if at not in narrowing and at not in empties]
     clear = _block_spans(main, r"\bfunction\s+chatClearSite\s*\([^)]*\)\s*\{")
-    if len(emptied) != 1 or len(empties) != 1:
-        problems.append('every status reply must start with `root.chatFreshSites = []`, before anything that can break')
+    emptied_at = [match.start(1) for match in re.finditer(
+        r'case\s+"status"\s*:\s*case\s+"leave-status"\s*:\s*root\.(chatFreshSites)\s*=\s*\[\s*\]', main)]
+    if len(emptied) != 1 or len(expiry) != 1 or sorted(empties) != sorted(emptied_at + expiry):
+        problems.append('every status reply must start with `root.chatFreshSites = []`, before anything that can break; '
+                        'the only other empty is chatFreshTimer\'s')
+    # L1-r: the expiry runs from every ok prepare reply and is never held off.
+    restarts = [match.start() for match in re.finditer(r"\bchatFreshTimer\s*\.\s*restart\s*\(\s*\)", main)]
+    if len(restarts) != 1 or not _in_prepare_reply_after_ok(main, restarts[0]) \
+            or len(_hits(r"\bchatFreshTimer\b", main)) != 2 \
+            or len(_hits(r"(?m)^\s*property\s+int\s+chatFreshWait\s*:\s*3000\s*$", main)) != 1 \
+            or len(_hits(r"\bchatFreshWait\b", main)) != 2:
+        problems.append("chatFreshTimer (interval chatFreshWait: 3000) must be restarted only in the ok prepare reply, "
+                        "and touched nowhere else")
     if len(narrowing) != 1 or len(clear) != 1 or not clear[0][0] <= narrowing[0] < clear[0][1]:
         problems.append("chatFreshSites may shrink only in chatClearSite")
     if len(widening) != 1 or not _in_prepare_reply_after_ok(main, widening[0]) \
@@ -1167,6 +1186,18 @@ def test_saved_profiles_only_for_prepared_sites():
      "        root.chatFreshSites = root.chatFreshSites.concat([siteId])\n"),
     (FULL_REPRESENTATION, "onSiteProfileWanted: (siteId) => root.chatSiteWanted(siteId)",
      "onSiteProfileWanted: (siteId) => root.chatClearSite(siteId)"),
+    # L1-r: the expiry gone, held off, made longer, or another empty.
+    (MAIN_QML, "                chatFreshTimer.restart()\n", ""),
+    (MAIN_QML, "        onTriggered: root.chatFreshSites = []\n", "        onTriggered: {}\n"),
+    (MAIN_QML, "    property int chatFreshWait: 3000\n", "    property int chatFreshWait: 300000\n"),
+    (MAIN_QML, "        repeat: false\n        onTriggered: root.chatFreshSites = []\n",
+     "        repeat: false\n        running: false\n        onTriggered: root.chatFreshSites = []\n"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { chatFreshTimer.stop() }\n    function chatNext() {"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { root.chatFreshWait = 600000 }\n    function chatNext() {"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { root.chatFreshSites = [] }\n    function chatNext() {"),
     (CHAT_STORAGE_JS, '    if (list === null || list === undefined || typeof list !== "object")\n        return false\n', ""),
     (CHAT_STORAGE_JS, "        if (list[index] === value)", "        if (list[index] == value)"),
 ])
@@ -2389,10 +2420,110 @@ def _lock_wait_problems(code):
     spans = [span for name in ("chatSiteReleased", "chatFinish")
              for span in _block_spans(code, rf"\bfunction\s+{name}\s*\([^)]*\)\s*\{{")]
     unlock = [match.start() for match in re.finditer(r'\bchatEnqueue\(\s*root\.chatPendingClears\.map\(', code)]
-    if len(queued) != 2 or any(not any(lo <= at < hi for lo, hi in spans) for at in queued) \
-            or len([at for at in queued if at in unlock]) != 1:
-        problems.append("remove-site is queued only by chatSiteReleased and by the unlock's owed deletes")
+    # L2-r: the busy retry, after a delete that already followed a wait.
+    retry = [match.start(1) for match in re.finditer(REMOVE_RETRY_TIMER, code)]
+    first = [at for at in queued if at not in retry]
+    if len(queued) != 3 or len(retry) != 1 or retry[0] not in queued \
+            or any(not any(lo <= at < hi for lo, hi in spans) for at in first) \
+            or len([at for at in first if at in unlock]) != 1:
+        problems.append("remove-site is queued only by chatSiteReleased, by the unlock's owed deletes and by "
+                        "chatRemoveRetryTimer (busy retry)")
     return problems
+
+
+# L2-r: the retry timer re-queues only the sites waiting for it, and only in
+# the state its retry began in; group 1 is the queueing call.
+REMOVE_RETRY_TIMER = (
+    r"Timer\s*\{\s*id\s*:\s*chatRemoveRetryTimer\s+interval\s*:\s*root\.chatRemoveRetryWait\s+repeat\s*:\s*false\s+"
+    r"onTriggered\s*:\s*\{\s*var\s+sites\s*=\s*root\.chatRemoveWaiting\s+root\.chatRemoveWaiting\s*=\s*\[\s*\]\s+"
+    r"if\s*\(\s*root\.chatRemoveRetryScope\s*!==\s*root\.chatRemoveScope\s*\|\|\s*sites\.length\s*===\s*0\s*\)\s*return\s+"
+    r'root\.(chatEnqueue\(\s*sites\.map\(\s*function\s*\(\s*\)\s*\{\s*return\s+"remove-site"\s*\}\s*\)\s*\))\s*\}\s*\}'
+)
+REMOVE_SCOPE = (
+    r"readonly\s+property\s+string\s+chatRemoveScope\s*:\s*\[\s*root\.chatStorageMode\s*,\s*root\.chatVaultState\s*,\s*"
+    r"root\.chatVaultHold\s*,\s*root\.chatPrivateSession\s*,\s*root\.chatGeneration\s*\]\s*\.join\(\s*\" \"\s*\)"
+)
+STOP_REMOVE_RETRY_BODY = (
+    '{ chatRemoveRetryTimer.stop() root.chatRemoveRetryScope = "" root.chatRemoveWaiting = [] '
+    "root.chatRemoveBusySince = ({}) }"
+)
+
+
+def _remove_retry_problems(code):
+    """L2-r: a busy remove-site is tried again only in the state (mode, vault
+    state, hold, private session, generation) it ran in; any change stops the
+    retry at once, and a busy reply to a step started in another state isn't
+    retried. Only an ok reply ends the debt; past the limit it is a failure."""
+    problems = []
+    if len(re.findall(REMOVE_SCOPE, code)) != 1 or len(_hits(r"\bchatRemoveScope\s*:", code)) != 1:
+        problems.append("chatRemoveScope must be exactly mode, vault state, hold, private session and generation")
+    if len(re.findall(REMOVE_RETRY_TIMER, code)) != 1:
+        problems.append("chatRemoveRetryTimer must re-queue only the waiting sites, and only in the scope it began in")
+    if len(_hits(r"(?m)^\s*onChatRemoveScopeChanged\s*:\s*root\.chatStopRemoveRetry\(\)\s*$", code)) != 1:
+        problems.append("onChatRemoveScopeChanged must be `root.chatStopRemoveRetry()`")
+    body = _function_body(code, "chatStopRemoveRetry")
+    if body is None or _squashed(body) != STOP_REMOVE_RETRY_BODY:
+        problems.append(f"chatStopRemoveRetry must be exactly `{STOP_REMOVE_RETRY_BODY}`")
+    if len(_hits(r"\bchatRemoveRetryTimer\s*\.\s*start\s*\(", code)) != 1 \
+            or len(_hits(r"\bchatRemoveRetryTimer\s*\.\s*restart\s*\(", code)) != 0:
+        problems.append("chatRemoveRetryTimer is started only in chatRemoveBusy")
+    busy = _function_body(code, "chatRemoveBusy") or ""
+    if not re.match(r"\{\s*if\s*\(\s*root\.chatOpScope\s*!==\s*root\.chatRemoveScope\s*\)\s*\{\s*"
+                    r"root\.chatRemoveTried\s*=\s*root\.chatRemoveTried\.concat\(\s*\[\s*siteId\s*\]\s*\)\s*"
+                    r"return\s+true\s*\}", busy) \
+            or not re.search(r"if\s*\(\s*now\s*<\s*since\s*\|\|\s*now\s*-\s*since\s*>=\s*root\.chatRemoveRetryLimit\s*\)"
+                             r"\s*return\s+false\b", busy) \
+            or not re.search(r"root\.chatRemoveRetryScope\s*=\s*root\.chatRemoveScope\s+chatRemoveRetryTimer\.start\(\)", busy):
+        problems.append("chatRemoveBusy: no retry for a step from another state, false past the limit, "
+                        "the timer started with the current scope")
+    grows = [match.start() for match in re.finditer(r"\bchatRemoveWaiting\s*=(?!=)(?!\s*\[\s*\])", code)]
+    spans = _block_spans(code, r"\bfunction\s+chatRemoveBusy\s*\([^)]*\)\s*\{")
+    if len(grows) != 1 or len(spans) != 1 or not spans[0][0] <= grows[0] < spans[0][1]:
+        problems.append("chatRemoveWaiting may grow only in chatRemoveBusy")
+    if len(_hits(r"(?m)^\s*root\.chatOpScope\s*=\s*root\.chatRemoveScope\s*$", code)) != 1 \
+            or len(_hits(r"\bchatOpScope\s*=(?!=)", code)) != 1:
+        problems.append("chatOpScope is set only when a step starts, to chatRemoveScope")
+    if not re.search(r'case\s+"remove-site"\s*:[^}]*?if\s*\(\s*reply\.ok\s*\)\s*root\.chatWritePendingClears\([^\n]*\n\s*'
+                     r'else\s+if\s*\(\s*reply\.error\s*===\s*"busy"\s*&&\s*removed\s*!==\s*""\s*&&\s*'
+                     r"root\.chatRemoveBusy\(\s*removed\s*\)\s*\)\s*break\s+else\s*\{\s*"
+                     r"root\.chatRemoveTried\s*=\s*root\.chatRemoveTried\.concat\(\s*\[\s*removed\s*\]\s*\)\s*"
+                     r'root\.chatStorageNotice\s*=\s*"site-remove-failed"', code):
+        problems.append('remove-site: ok ends the debt; only "busy" may be retried; anything else is tried and told')
+    if not re.search(r"(?m)^\s*property\s+int\s+chatRemoveRetryWait\s*:\s*2000\s*$", code) \
+            or not re.search(r"(?m)^\s*property\s+int\s+chatRemoveRetryLimit\s*:\s*30000\s*$", code) \
+            or _hits(r"\bchatRemoveRetry(Wait|Limit)\s*=(?!=)", code):
+        problems.append("chatRemoveRetryWait 2000 and chatRemoveRetryLimit 30000, never changed by the widget")
+    return problems
+
+
+def test_busy_site_delete_is_retried_only_in_its_own_state():
+    problems = _remove_retry_problems(_read_code(MAIN_QML))
+    assert not problems, f"{_rel(MAIN_QML)}: {problems}"
+
+
+REMOVE_RETRY_MUTATIONS = {
+    "scope without the vault state": ("root.chatStorageMode, root.chatVaultState,\n", "root.chatStorageMode,\n"),
+    "scope without the generation": (", root.chatGeneration].join", "].join"),
+    "scope change keeps the retry": ("    onChatRemoveScopeChanged: root.chatStopRemoveRetry()\n", ""),
+    "stop leaves the timer": ("        chatRemoveRetryTimer.stop()\n        root.chatRemoveRetryScope", "        root.chatRemoveRetryScope"),
+    "retry into another state": ("        if (root.chatOpScope !== root.chatRemoveScope) {\n", "        if (false) {\n"),
+    "no time limit": ("        if (now < since || now - since >= root.chatRemoveRetryLimit)\n            return false\n", ""),
+    "timer ignores the scope": ("            if (root.chatRemoveRetryScope !== root.chatRemoveScope || sites.length === 0)",
+                                "            if (sites.length === 0)"),
+    "any error retried": ('            else if (reply.error === "busy" && removed !== "" && root.chatRemoveBusy(removed))',
+                          '            else if (removed !== "" && root.chatRemoveBusy(removed))'),
+    "busy ends the debt": ('            else if (reply.error === "busy" && removed !== "" && root.chatRemoveBusy(removed))\n                break\n',
+                           '            else if (reply.error === "busy")\n                root.chatWritePendingClears([])\n'),
+    "longer limit": ("    property int chatRemoveRetryLimit: 30000\n", "    property int chatRemoveRetryLimit: 3000000\n"),
+    "other waiting": ("    function chatNext() {", "    function x() { root.chatRemoveWaiting = root.chatPendingClears }\n    function chatNext() {"),
+    "other start": ("    function chatNext() {", "    function x() { chatRemoveRetryTimer.start() }\n    function chatNext() {"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(REMOVE_RETRY_MUTATIONS))
+def test_proof_remove_retry_rule_catches(name):
+    old, new = REMOVE_RETRY_MUTATIONS[name]
+    assert _remove_retry_problems(_mutated(MAIN_QML, old, new))
 
 
 def _site_release_problems(web, view, full_representation):
@@ -2467,6 +2598,10 @@ def test_every_lock_waits_for_the_profile_to_close():
     ("        if (!root.chatRemovalPending(siteId) || !root.chatStorageReady)\n            return\n        var owed",
      "        var owed"),
     ("    function chatNext() {", "    function x() { root.chatEnqueue([\"wait\", \"remove-site\"]) }\n    function chatNext() {"),
+    # L2-r: the retry timer queues something else, or ignores the state.
+    ('            root.chatEnqueue(sites.map(function () { return "remove-site" }))',
+     '            root.chatEnqueue(sites.map(function () { return "remove-site" }).concat(["remove-site"]))'),
+    ("            if (root.chatRemoveRetryScope !== root.chatRemoveScope || sites.length === 0)\n                return\n", ""),
 ])
 def test_proof_lock_wait_rule_catches(old, new):
     assert _lock_wait_problems(_mutated(MAIN_QML, old, new))

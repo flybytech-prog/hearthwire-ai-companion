@@ -200,8 +200,13 @@ PlasmoidItem {
     // that prepare also verified the mount again. Only these may get a new
     // saved profile; every status reply empties the list, so a site opened
     // later is prepared (and the mount verified) once more first. They count
-    // only while chatPreparedGeneration is the current generation.
+    // only while chatPreparedGeneration is the current generation. The list
+    // also expires chatFreshWait after the latest prepare's answer: a shown
+    // site's view takes its profile as the answer arrives, so a site still
+    // without one then (the pane moved on) is prepared again when opened.
     property var chatFreshSites: []
+    // Plain properties, not readonly, so the tests can shorten them (ms).
+    property int chatFreshWait: 3000
     // Shown sites the Chat tab asked a fresh prepare for (siteWanted).
     property var chatWantedSites: []
     // The sites the shown panes need a folder for (split view: both).
@@ -230,6 +235,22 @@ PlasmoidItem {
     property var chatRemoveTried: []
     // The site the running remove-site deletes.
     property string chatRemoveSite: ""
+    // remove-site answers busy while Chromium still has files open below the
+    // site's folder (seen up to ~21 s after the profile went under heavy
+    // writes): the site is tried again every chatRemoveRetryWait, until
+    // chatRemoveRetryLimit after its first busy, then counts as failed.
+    property int chatRemoveRetryWait: 2000
+    property int chatRemoveRetryLimit: 30000
+    // Sites waiting for that retry, and {siteId: ms} of each one's first busy.
+    property var chatRemoveWaiting: []
+    property var chatRemoveBusySince: ({})
+    // What a retry belongs to: a lock, an unlock, a mode or generation change
+    // ends every retry (see chatStopRemoveRetry), never carried across.
+    readonly property string chatRemoveScope: [root.chatStorageMode, root.chatVaultState,
+        root.chatVaultHold, root.chatPrivateSession, root.chatGeneration].join(" ")
+    // chatRemoveScope when the running step started, and when the retry timer did.
+    property string chatOpScope: ""
+    property string chatRemoveRetryScope: ""
     // Sites the running prepare creates.
     property var chatOpSites: []
     // How long a destroyed profile gets to write and close its files before
@@ -838,6 +859,7 @@ PlasmoidItem {
         }
         root.chatOp = step
         root.chatOpGeneration = root.chatGeneration
+        root.chatOpScope = root.chatRemoveScope
         root.chatOpSource = command
         storageSource.connectSource(command)
     }
@@ -846,10 +868,61 @@ PlasmoidItem {
         return root.chatPendingClears.indexOf(siteId) >= 0
     }
 
-    // The first pending site not yet tried this round; "" when none.
+    // The first pending site not yet tried this round and not waiting for
+    // its busy retry; "" when none.
     function chatNextRemoval() {
-        var left = root.chatPendingClears.filter(function (id) { return root.chatRemoveTried.indexOf(id) < 0 })
+        var left = root.chatPendingClears.filter(function (id) {
+            return root.chatRemoveTried.indexOf(id) < 0 && root.chatRemoveWaiting.indexOf(id) < 0
+        })
         return left.length > 0 ? left[0] : ""
+    }
+
+    // remove-site answered busy for siteId. true: handled here, without a
+    // notice (tried again shortly, or the state changed while it ran);
+    // false: past the time limit, a failure like any other.
+    function chatRemoveBusy(siteId) {
+        if (root.chatOpScope !== root.chatRemoveScope) {
+            // Locked, unlocked or the mode changed meanwhile: no retry into
+            // the new state. Still owed; the next unlock deletes it.
+            root.chatRemoveTried = root.chatRemoveTried.concat([siteId])
+            return true
+        }
+        var now = Date.now()
+        var since = root.chatRemoveBusySince[siteId]
+        if (typeof since !== "number") {
+            since = now
+            var marks = Object.assign({}, root.chatRemoveBusySince)
+            marks[siteId] = now
+            root.chatRemoveBusySince = marks
+        }
+        // A clock set back counts as past the limit too.
+        if (now < since || now - since >= root.chatRemoveRetryLimit)
+            return false
+        if (root.chatRemoveWaiting.indexOf(siteId) < 0)
+            root.chatRemoveWaiting = root.chatRemoveWaiting.concat([siteId])
+        if (!chatRemoveRetryTimer.running) {
+            root.chatRemoveRetryScope = root.chatRemoveScope
+            chatRemoveRetryTimer.start()
+        }
+        return true
+    }
+
+    // Forgets siteId's first busy (its delete worked or finally failed).
+    function chatRemoveBusyDone(siteId) {
+        if (!Object.prototype.hasOwnProperty.call(root.chatRemoveBusySince, siteId))
+            return
+        var marks = Object.assign({}, root.chatRemoveBusySince)
+        delete marks[siteId]
+        root.chatRemoveBusySince = marks
+    }
+
+    // Ends every busy retry. The sites stay pending (and their panes
+    // waiting); a later round's remove-site deletes them.
+    function chatStopRemoveRetry() {
+        chatRemoveRetryTimer.stop()
+        root.chatRemoveRetryScope = ""
+        root.chatRemoveWaiting = []
+        root.chatRemoveBusySince = ({})
     }
 
     // Stores the pending list at once; false when it can't be stored.
@@ -961,6 +1034,8 @@ PlasmoidItem {
                 root.chatWantedSites = root.chatWantedSites.filter(function (id) {
                     return root.chatFreshSites.indexOf(id) < 0
                 })
+                // The shown sites' views took their profiles just now.
+                chatFreshTimer.restart()
                 if (first) {
                     // Old generations of this widget (e.g. after Clear, or the
                     // old shared profile after the update) go away, then
@@ -984,14 +1059,19 @@ PlasmoidItem {
         case "remove-site":
             // Only an ok reply ends the debt. On failure the site stays
             // pending and closed until a later unlock's delete works.
+            // A busy reply (files still open below the folder) is tried
+            // again, until the time limit; nothing was deleted then.
             var removed = root.chatRemoveSite
             root.chatRemoveSite = ""
             if (reply.ok)
                 root.chatWritePendingClears(root.chatPendingClears.filter(function (id) { return id !== removed }))
+            else if (reply.error === "busy" && removed !== "" && root.chatRemoveBusy(removed))
+                break
             else {
                 root.chatRemoveTried = root.chatRemoveTried.concat([removed])
                 root.chatStorageNotice = "site-remove-failed"
             }
+            root.chatRemoveBusyDone(removed)
             root.chatPrepareMissing()
             break
         case "remove":
@@ -1626,6 +1706,32 @@ PlasmoidItem {
         }
     }
 
+    // L1-r: the prepares' say ends a moment after the latest one answered.
+    // A view that has its profile keeps it; one made later needs a new
+    // prepare (siteWanted → chatPrepareMissing). Fails closed: at worst
+    // one prepare more.
+    Timer {
+        id: chatFreshTimer
+        interval: root.chatFreshWait
+        repeat: false
+        onTriggered: root.chatFreshSites = []
+    }
+
+    // Tries the sites whose delete answered busy again, through the queue
+    // (its guards apply); a changed state stopped it already, this checks too.
+    Timer {
+        id: chatRemoveRetryTimer
+        interval: root.chatRemoveRetryWait
+        repeat: false
+        onTriggered: {
+            var sites = root.chatRemoveWaiting
+            root.chatRemoveWaiting = []
+            if (root.chatRemoveRetryScope !== root.chatRemoveScope || sites.length === 0)
+                return
+            root.chatEnqueue(sites.map(function () { return "remove-site" }))
+        }
+    }
+
     // Rechecks the folder shortly after the saved profile is built; a busy
     // reply keeps things as they are.
     Timer {
@@ -1749,6 +1855,8 @@ PlasmoidItem {
     }
 
     onChatStorageModeChanged: root.chatModeChanged()
+    // A lock, an unlock, a mode or generation change: no busy retry goes on.
+    onChatRemoveScopeChanged: root.chatStopRemoveRetry()
     // A settings dialog opened earlier may write back an old generation.
     onChatConfiguredGenerationChanged: {
         if (root.chatGeneration >= 0 && root.chatConfiguredGeneration !== root.chatGeneration)

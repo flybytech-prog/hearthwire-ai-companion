@@ -14,6 +14,14 @@ from hearthwire import cli
 from hearthwire.core import vault, webdata
 
 
+@pytest.fixture(autouse=True)
+def _empty_proc(tmp_path_factory, monkeypatch):
+    """remove-site's open-file scan never reads the host's /proc: an empty fake one."""
+    proc = tmp_path_factory.mktemp("proc")
+    monkeypatch.setattr(webdata, "PROC_ROOT", str(proc))
+    return proc
+
+
 @pytest.fixture
 def data(tmp_path, monkeypatch):
     base = tmp_path / "data"
@@ -667,7 +675,23 @@ def test_unexpected_exception_is_a_bare_code(data, capsys, monkeypatch):
 
 @pytest.mark.parametrize("value", ["0", "1", "2147483648"])
 def test_integer_arguments_accept_zero_to_two_pow_31(data, capsys, mounted, value):
-    assert prepare(capsys, value, value) == {"ok": True}
+    # The applet id starts at 1 (below); the generation may be 0.
+    assert prepare(capsys, value if value != "0" else "1", value) == {"ok": True}
+
+
+@pytest.mark.parametrize("operation", ["prepare", "prune", "remove-site", "remove"])
+def test_applet_zero_is_refused_like_usage_history(data, capsys, mounted, operation):
+    argv = ["--web-data", operation, "--store", "encrypted", "--applet", "0"]
+    argv += {"prepare": ["--generation", "0"], "prune": ["--generation", "0", "--known", "claude"],
+             "remove-site": ["--generation", "0", "--site", "claude"], "remove": []}[operation]
+    make_container(mounted, 0, 0, sites=("claude",))
+    with pytest.raises(SystemExit) as raised:
+        cli.main(argv)
+    assert raised.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--applet must be from 1 to 2147483648" in captured.err
+    assert names(mounted / "web" / "applet-0-g0") == ["Cookies", "site-claude"]
 
 
 _PREPARE = ["--web-data", "prepare", "--store", "encrypted"]
@@ -1395,3 +1419,248 @@ def test_a_repeated_option_is_named_without_its_value(data, capsys):
         cli.main(["--data", "secret-settings-text", "--data", "more-secret-text"])
     err = capsys.readouterr().err
     assert "--data" in err and "secret" not in err
+
+
+# --- L2-r: remove-site refuses with "busy" while a file in the site folder is open -----------
+
+
+def fake_process(proc, pid, fds=(), maps=()):
+    """A fake /proc/<pid>: ``fd/<n>`` links to ``fds`` and a ``maps`` file mapping ``maps``."""
+    process = proc / str(pid)
+    (process / "fd").mkdir(parents=True)
+    for number, target in enumerate(fds):
+        (process / "fd" / str(number)).symlink_to(target)
+    lines = ["00400000-00452000 r-xp 00000000 08:02 173521 /usr/bin/plasmashell",
+             "7f0000000000-7f0000021000 rw-p 00000000 00:00 0 ",
+             "7ffd00000000-7ffd00021000 rw-p 00000000 00:00 0 [stack]"]
+    lines += [f"7f1000000000-7f1000001000 r--s 00000000 00:2a 4242 {path}" for path in maps]
+    (process / "maps").write_text("\n".join(lines) + "\n")
+    return process
+
+
+def site_path(mounted, site="claude"):
+    return os.path.join(os.path.realpath(mounted), "web", "applet-1-g0", f"site-{site}")
+
+
+def test_remove_site_is_busy_while_a_file_in_it_is_open(data, capsys, mounted, _empty_proc):
+    container = make_container(mounted, sites=("claude", "gemini"), root_files=())
+    (container / "site-claude" / "IndexedDB").mkdir()
+    fake_process(_empty_proc, 4242, fds=["/dev/null", "socket:[1234]",
+                                        site_path(mounted) + "/IndexedDB/LOCK"])
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    # Nothing at all was deleted.
+    assert names(container) == ["site-claude", "site-gemini"]
+    assert names(container / "site-claude") == ["Cookies", "IndexedDB"]
+    # Another site of the same generation is not held up.
+    assert web_op(capsys, "remove-site", site="gemini") == {"ok": True}
+    # Once the file is closed, the delete works.
+    shutil.rmtree(_empty_proc / "4242")
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == []
+
+
+def test_remove_site_is_busy_while_the_folder_itself_is_open(data, capsys, mounted, _empty_proc):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    fake_process(_empty_proc, 7, fds=[site_path(mounted)])
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    assert names(container) == ["site-claude"]
+
+
+def test_remove_site_is_not_busy_for_files_elsewhere(data, capsys, mounted, _empty_proc):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    other_generation = make_container(mounted, 1, 1, sites=("claude",), root_files=())
+    fake_process(_empty_proc, 10, fds=["/dev/null", "pipe:[99]", "anon_inode:[eventfd]",
+                                      os.path.join(os.path.realpath(other_generation), "site-claude", "Cookies"),
+                                      os.path.join(os.path.realpath(container), "LOG")],
+                 maps=["/usr/lib/libQt6WebEngineCore.so.6"])
+    (_empty_proc / "self").symlink_to("10")
+    (_empty_proc / "meminfo").write_text("")
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == []
+    assert names(other_generation) == ["site-claude"]
+
+
+# Not "site-claude (deleted)": the kernel writes that for the deleted folder
+# itself, so it counts (see below); no such sibling can exist (prune drops it).
+@pytest.mark.parametrize("sibling", ["site-claude2", "site-claude-x", "site-claude.old", "site-claud"])
+def test_a_sibling_with_the_same_prefix_does_not_count(data, capsys, mounted, _empty_proc, sibling):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    base = os.path.join(os.path.realpath(container), sibling)
+    fake_process(_empty_proc, 11, fds=[base, base + "/Cookies"], maps=[base + "/Cookies"])
+    assert webdata.site_folder_in_use(site_path(mounted), proc_root=str(_empty_proc)) is False
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == []
+
+
+def test_a_sibling_site_id_is_not_busy_through_its_prefix(data, capsys, mounted, _empty_proc):
+    # site-user-0000000c and site-user-0000000c0 can't both exist, but the
+    # match must still stop at a path separator.
+    container = make_container(mounted, sites=("claude", "chatgpt"), root_files=())
+    fake_process(_empty_proc, 12, fds=[site_path(mounted, "chatgpt") + "/Cookies"])
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert web_op(capsys, "remove-site", site="chatgpt") == {"ok": False, "error": "busy"}
+    assert names(container) == ["site-chatgpt"]
+
+
+@pytest.mark.parametrize("where", ["fd", "maps"])
+def test_a_deleted_but_still_open_file_counts(data, capsys, mounted, _empty_proc, where):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    held = site_path(mounted) + "/IndexedDB/000003.log (deleted)"
+    fake_process(_empty_proc, 13, **{"fds" if where == "fd" else "maps": [held]})
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    assert names(container) == ["site-claude"]
+
+
+def test_a_deleted_site_folder_itself_counts(data, capsys, mounted, _empty_proc):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    fake_process(_empty_proc, 14, fds=[site_path(mounted) + " (deleted)"])
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    assert names(container) == ["site-claude"]
+
+
+def test_a_file_named_like_a_deleted_one_still_counts(data, mounted, _empty_proc):
+    make_container(mounted, sites=("claude",), root_files=())
+    fake_process(_empty_proc, 15, fds=[site_path(mounted) + "/x (deleted) (deleted)"])
+    assert webdata.site_folder_in_use(site_path(mounted), proc_root=str(_empty_proc)) is True
+
+
+def test_a_mapped_file_alone_makes_it_busy(data, capsys, mounted, _empty_proc):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    fake_process(_empty_proc, 16, fds=["/dev/null"],
+                 maps=[site_path(mounted) + "/GPUCache/data 1"])
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    assert names(container) == ["site-claude"]
+
+
+def test_a_process_of_another_user_is_skipped(data, capsys, mounted, _empty_proc, monkeypatch):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    foreign = fake_process(_empty_proc, 17, fds=[site_path(mounted) + "/Cookies"],
+                           maps=[site_path(mounted) + "/Cookies"])
+    real_owner = webdata._process_owner
+    monkeypatch.setattr(webdata, "_process_owner",
+                        lambda process: os.getuid() + 1 if process == str(foreign) else real_owner(process))
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == []
+
+
+def test_the_owner_comes_from_the_proc_entry(data, mounted, _empty_proc):
+    make_container(mounted, sites=("claude",), root_files=())
+    fake_process(_empty_proc, 18, fds=[site_path(mounted) + "/Cookies"])
+    folder = site_path(mounted)
+    assert webdata.site_folder_in_use(folder, proc_root=str(_empty_proc)) is True
+    assert webdata.site_folder_in_use(folder, proc_root=str(_empty_proc), uid=os.getuid() + 1) is False
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
+def test_unreadable_processes_are_skipped(data, capsys, mounted, _empty_proc):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    held = site_path(mounted) + "/Cookies"
+    closed_fds = fake_process(_empty_proc, 19, fds=[held])
+    closed_maps = fake_process(_empty_proc, 20, maps=[held])
+    (closed_fds / "fd").chmod(0)
+    (closed_maps / "maps").chmod(0)
+    try:
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    finally:
+        (closed_fds / "fd").chmod(0o700)
+        (closed_maps / "maps").chmod(0o600)
+    assert names(container) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
+def test_an_unreadable_process_does_not_hide_a_busy_one(data, capsys, mounted, _empty_proc):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    held = site_path(mounted) + "/Cookies"
+    closed = fake_process(_empty_proc, 21, fds=[held])
+    (closed / "fd").chmod(0)
+    fake_process(_empty_proc, 22, maps=[held])
+    try:
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    finally:
+        (closed / "fd").chmod(0o700)
+    assert names(container) == ["site-claude"]
+
+
+def test_gone_or_odd_process_entries_are_skipped(data, capsys, mounted, _empty_proc):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    (_empty_proc / "30").mkdir()              # no fd, no maps: exited mid-scan
+    (_empty_proc / "31").write_text("")       # not a directory
+    dangling = fake_process(_empty_proc, 32)
+    (dangling / "fd" / "3").mkdir()           # not a link
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == []
+
+
+def test_an_unreadable_proc_root_fails_closed(data, capsys, mounted, _empty_proc, monkeypatch):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    monkeypatch.setattr(webdata, "PROC_ROOT", str(_empty_proc / "missing"))
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "os-error"}
+    assert names(container) == ["site-claude"]
+
+
+def test_a_missing_site_folder_is_success_without_a_scan(data, capsys, mounted, _empty_proc, monkeypatch):
+    monkeypatch.setattr(webdata, "PROC_ROOT", str(_empty_proc / "missing"))
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    container = make_container(mounted, root_files=())
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == []
+
+
+def test_a_symlinked_site_name_is_unlinked_without_a_scan(data, capsys, tmp_path, mounted, _empty_proc, monkeypatch):
+    target = outside_target(tmp_path)
+    container = make_container(mounted, root_files=())
+    (container / "site-claude").symlink_to(target)
+    fake_process(_empty_proc, 40, fds=[str(target / "precious")])
+    monkeypatch.setattr(webdata, "PROC_ROOT", str(_empty_proc / "missing"))
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == []
+    assert_target_intact(target)
+
+
+def test_the_scan_runs_right_before_the_delete(data, capsys, mounted, monkeypatch):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    calls = []
+    real_scan, real_remove = webdata.site_folder_in_use, webdata.remove_entry
+    monkeypatch.setattr(webdata, "site_folder_in_use",
+                        lambda folder, **kw: calls.append(("scan", folder)) or real_scan(folder, **kw))
+    monkeypatch.setattr(webdata, "remove_entry",
+                        lambda parent, name: calls.append(("delete", name)) or real_remove(parent, name))
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert calls == [("scan", site_path(mounted)), ("delete", "site-claude")]
+    assert names(container) == []
+
+
+@pytest.mark.parametrize("swap", ["other-folder", "gone"])
+def test_a_mismatched_container_path_deletes_nothing(data, capsys, tmp_path, mounted, monkeypatch, swap):
+    # The scan needs the generation folder's path; it must name the folder
+    # that is open, else nothing is deleted.
+    container = make_container(mounted, sites=("claude",), root_files=())
+    expected = str(container)
+    real_stat = os.stat
+
+    def stat_elsewhere(path, *args, **kwargs):
+        if path == expected:
+            if swap == "gone":
+                raise FileNotFoundError(path)
+            return real_stat(tmp_path, *args, **kwargs)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat_elsewhere)
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "os-error"}
+    assert names(container) == ["site-claude"]
+
+
+def test_busy_reply_never_contains_a_path(data, capsys, mounted, _empty_proc):
+    make_container(mounted, sites=("claude",), root_files=())
+    fake_process(_empty_proc, 50, fds=[site_path(mounted) + "/Cookies"])
+    assert cli.main(["--web-data", "remove-site", *_SITE_BASE, "--site", "claude"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == '{"ok":false,"error":"busy"}\n'
+    assert captured.err == ""
+
+
+def test_the_default_proc_root_is_the_real_proc():
+    import importlib.util
+
+    spec = importlib.util.find_spec("hearthwire.core.webdata")
+    assert 'PROC_ROOT = "/proc"' in Path(spec.origin).read_text(encoding="utf-8")

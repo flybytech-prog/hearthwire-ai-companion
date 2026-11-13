@@ -143,7 +143,7 @@ def parser() -> argparse.ArgumentParser:
         "--applet",
         type=_bounded_int,
         metavar="N",
-        help="Applet id for --web-data, --usage-history and --settings-backup (1 or more for the last two).",
+        help="Applet id (1 or more) for --web-data, --usage-history and --settings-backup.",
     )
     result.add_argument(
         "--generation", type=_bounded_int, metavar="G", help="Generation for --web-data prepare/prune/remove-site.",
@@ -353,6 +353,9 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
         return
     if args.store is None or args.applet is None:
         argument_parser.error("--web-data needs --store and --applet")
+    if args.applet < 1:
+        # Plasma applet ids start at 1, as for --usage-history.
+        argument_parser.error("--applet must be from 1 to 2147483648")
     if args.web_data == "remove":
         if args.generation is not None:
             argument_parser.error("--generation is not for --web-data remove")

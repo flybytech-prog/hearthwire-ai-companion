@@ -369,6 +369,114 @@ def _prune_encrypted(
             remove_entry(container, name)
 
 
+# --- remove-site: refuse while a process still has a file open in the site folder (L2-r) ----
+
+# Injectable for tests: a fake tree of <pid>/fd/<n> links and <pid>/maps files.
+PROC_ROOT = "/proc"
+# The kernel appends this to the link or maps path of a file that was unlinked.
+_DELETED_SUFFIX = " (deleted)"
+
+
+def _is_below(path: str, folder: str) -> bool:
+    """``folder`` itself or anything below it; ``site-claude2`` is not below ``site-claude``."""
+    return path == folder or path.startswith(folder + os.sep)
+
+
+def _names_folder(path: str, folder: str) -> bool:
+    if _is_below(path, folder):
+        return True
+    # An open file whose entry is gone (rmtree raced it, or Chromium replaced
+    # it) reads "<path> (deleted)". Stripped once: a file whose own name ends
+    # in " (deleted)" already matched above.
+    return path.endswith(_DELETED_SUFFIX) and _is_below(path[: -len(_DELETED_SUFFIX)], folder)
+
+
+def _process_owner(process: str) -> Optional[int]:
+    """The uid owning ``/proc/<pid>``, or None when it is gone or unreadable.
+
+    The kernel shows a non-dumpable process as root's; it is skipped like any
+    other user's process (its fds could not be read anyway).
+    """
+    try:
+        return os.stat(process, follow_symlinks=False).st_uid
+    except OSError:
+        return None
+
+
+def _fd_paths(process: str) -> Iterator[str]:
+    fd_dir = os.path.join(process, "fd")
+    try:
+        entries = os.listdir(fd_dir)
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            yield os.readlink(os.path.join(fd_dir, entry))
+        except OSError:
+            continue
+
+
+def _mapped_paths(process: str) -> Iterator[str]:
+    try:
+        with open(os.path.join(process, "maps"), "rb") as maps:
+            for line in maps:
+                # address perms offset dev inode [path]; the path may hold spaces.
+                fields = line.rstrip(b"\n").split(None, 5)
+                if len(fields) == 6 and fields[5].startswith(b"/"):
+                    yield os.fsdecode(fields[5])
+    except OSError:
+        return
+
+
+def site_folder_in_use(folder: str, *, proc_root: Optional[str] = None, uid: Optional[int] = None) -> bool:
+    """True when a process of ``uid`` (default: ours) has a file under ``folder`` open or mapped.
+
+    ``folder`` must be the resolved path; the kernel's fd links and maps
+    paths are resolved too. Processes of other users and processes (or single
+    entries) that can't be read are skipped. When ``proc_root`` itself can't
+    be listed nothing can be known, so that fails as os-error, not as free.
+    """
+    root = PROC_ROOT if proc_root is None else proc_root
+    owner = os.getuid() if uid is None else uid
+    try:
+        pids = [name for name in os.listdir(root) if name.isdigit()]
+    except OSError:
+        raise HelperError("os-error") from None
+    for pid in pids:
+        process = os.path.join(root, pid)
+        if _process_owner(process) != owner:
+            continue
+        for path in _fd_paths(process):
+            if _names_folder(path, folder):
+                return True
+        for path in _mapped_paths(process):
+            if _names_folder(path, folder):
+                return True
+    return False
+
+
+def _container_path(
+    applet: int,
+    generation: int,
+    container: int,
+    environ: Optional[Mapping[str, str]],
+) -> str:
+    """The resolved path of the open generation folder, checked against its fd."""
+    from . import vault
+
+    path = os.path.join(
+        vault.context(environ, find_tools=False).mountpoint, WEB_DIR, profile_name(applet, generation),
+    )
+    try:
+        by_path = os.stat(path)
+        by_fd = os.fstat(container)
+    except OSError:
+        raise HelperError("os-error") from None
+    if (by_path.st_dev, by_path.st_ino) != (by_fd.st_dev, by_fd.st_ino):
+        raise HelperError("os-error")
+    return os.path.realpath(path)
+
+
 def _remove_site_encrypted(
     applet: int,
     generation: int,
@@ -377,8 +485,22 @@ def _remove_site_encrypted(
 ) -> None:
     name = site_folder(site)
     with _existing_container(applet, generation, environ) as container:
-        if container is not None:
-            remove_entry(container, name)
+        if container is None:
+            return
+        if _is_real_directory(container, name):
+            # The site's profile object can be gone while its storage still
+            # has files open (heavy IndexedDB writes kept LevelDB files open
+            # ~20 s, review L2-r). Deleting then would leave the old store
+            # writing into "(deleted)" files, or into the re-created folder.
+            # So: refuse with "busy" and delete nothing; the widget retries.
+            # Remaining race: the scan runs right before the delete, but a
+            # process may still open a file in between (the vault lock does
+            # not bind Chromium). The widget asks only after the site's views
+            # and profile are destroyed, so nothing should open new files.
+            folder = os.path.join(_container_path(applet, generation, container, environ), name)
+            if site_folder_in_use(folder):
+                raise HelperError("busy")
+        remove_entry(container, name)
 
 
 def prepare(
@@ -423,7 +545,11 @@ def remove_site(
     site: str,
     environ: Optional[Mapping[str, str]] = None,
 ) -> None:
-    """Delete one site's folder inside one generation folder; missing is success."""
+    """Delete one site's folder inside one generation folder; missing is success.
+
+    Refused with ``busy`` (nothing deleted) while a process of this user has
+    a file under that folder open or mapped.
+    """
     if store != "encrypted":
         raise ValueError("Unsupported web data store.")
     _remove_site_encrypted(applet, generation, site, environ)

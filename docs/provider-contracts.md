@@ -489,7 +489,7 @@ at a time without following symlinks.
 | `--vault destroy` | Deletes the cipher directory, `vault-keys/` and the bare mountpoint, only while not unlocked, then the wallet entry when this folder had a wallet slot and the wallet holds it; nothing there is success | `{"ok":true}` |
 | `--web-data prepare --store encrypted --applet N --generation G [--sites IDS]` | Creates `web/applet-N-gG/` inside the verified mount and, for each id in `IDS`, `site-<id>/` inside it (all `0700`; an existing folder is reset to `0700` and keeps its contents). Without `--sites` only the generation folder is made. First, if the generation folder's root holds anything but `site-<id>` entries (rollback evidence, see below), it deletes everything in it, site folders first, then makes the listed ones empty. Run when a site is first opened | `{"ok":true}` |
 | `--web-data prune --store encrypted --applet N --generation G --known IDS` | Inside `applet-N-gG/` only, deletes every entry except a `site-<id>/` folder whose id is in `IDS`: unknown or removed sites, and a symlink or file wearing a known name (it is unlinked, never followed). If the root holds anything but `site-<id>` entries (rollback evidence, see below), it deletes every entry, known site folders included. Never touches other generations, other applets or anything else in `web/`. A missing `web/` or generation folder is success and nothing is created. The widget runs it only when its site list reads as valid, after each unlock's prepare and after an added site is removed | `{"ok":true}` |
-| `--web-data remove-site --store encrypted --applet N --generation G --site ID` | Deletes `applet-N-gG/site-<ID>` only (a symlink there is unlinked, never followed); a missing folder is success. Used by "Clear <site> data" after the site's profile is gone | `{"ok":true}` |
+| `--web-data remove-site --store encrypted --applet N --generation G --site ID` | Deletes `applet-N-gG/site-<ID>` only (a symlink there is unlinked, never followed); a missing folder is success. Right before the delete it scans `/proc/<pid>/fd` and `/proc/<pid>/maps` of every process of the calling user (other users' and unreadable processes are skipped): while any has a file in that folder open or mapped (resolved path equal to the folder or below it; a ` (deleted)` suffix is stripped once), it replies `busy` and deletes nothing, so the widget can try again. If `/proc` can't be listed it replies `os-error` and deletes nothing. A process may still open a file between the scan and the delete; the widget asks only after the site's views and profile are gone. Used by "Clear <site> data" after the site's profile is gone | `{"ok":true}`; `{"ok":false,"error":"busy"}` while a file in the folder is open |
 | `--web-data remove --store encrypted --applet N [--keep G]` | Deletes this widget's `applet-N-g*` folders, except generation `G` when given; nothing there is success. Unchanged by per-site folders: deleting a generation folder deletes its `site-*` folders with it | `{"ok":true}` |
 | `--web-data purge` | Deletes the encrypted folder and `vault-keys/` for `scripts/install.sh --uninstall-web-data`, then the wallet entry when `vault-keys/` held a wallet slot, kwallet-query and qdbus6 are there and the wallet holds it; refuses while anything is mounted at the mountpoint or from the cipher directory (also checks `/run/user/<uid>`); runs no other tool | `{"ok":true,"removed":[...]}` with any of `"vault"`, `"vault-keys"`, `"wallet-entry"` in that order (empty when nothing was there) |
 
@@ -678,7 +678,8 @@ Argument rules (argparse exits 2 with a usage message on stderr otherwise):
   usage error and nothing is touched.
 - `N` and `G` are plain decimal integers from 0 to 2147483648 (at most 10
   digits; no sign, leading zero, spaces, or underscores), and so is the
-  `--keep` and `--id` value.
+  `--keep` and `--id` value. `--applet 0` is refused for `--web-data` too
+  (Plasma applet ids start at 1), as for `--usage-history`.
 - Every option may be given at most once, under any of its names or
   abbreviations (`--site a --site b`, `--gen 0 --generation 1`); a repeat is a
   usage error that names the option but never its value.
@@ -745,7 +746,7 @@ A failure is `{"ok":false,"error":"<code>"}`:
 | `mount-failed` | `create`, `unlock`: the mount did not come up, or the mountpoint holds something other than leftover profile folders |
 | `not-verified` | The folder is not unlocked, or the mount failed the checks above (a failed check after mounting unmounts it again) |
 | `stale-mount` | A dead mount could not be cleaned up |
-| `busy` | The lock file is held by another job, the folder is mounted elsewhere, or `lock` found it still in use |
+| `busy` | The lock file is held by another job, the folder is mounted elsewhere, `lock` found it still in use, or `--web-data remove-site` found a file in the site's folder still open (nothing deleted) |
 | `not-locked` | `change-passphrase`, `destroy`, `purge`: the folder is unlocked (for `purge`: anything is mounted there) |
 | `symlink`, `not-directory`, `not-owned` | Something in the way is a symlink, not a folder, or not yours; nothing is followed and it is not deleted. `--web-data prune` and `remove` stop there; entries before it (in name order) may already be gone |
 | `not-set-up` | `unlock --method wallet`, `auto-unlock`: no usable wallet slot, or the wallet has no entry for it (gocryptfs exit 11 with `-config`, too) |

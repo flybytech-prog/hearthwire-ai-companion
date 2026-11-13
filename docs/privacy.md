@@ -411,7 +411,12 @@ In detail: the site is noted in the setting `chatPendingSiteClears`, and
 Plasma is asked to save the settings at once; if the note can't be saved,
 nothing is cleared. Then the site's pages and profile close, the widget waits
 about a second for them to finish writing, and deletes only that site's
-`site-<id>/` folder; the other sites stay signed in. The note goes only once
+`site-<id>/` folder; the other sites stay signed in. While any of your
+programs still has a file in that folder open (Qt WebEngine can keep its site
+storage open for a while after the profile closed), the helper answers
+`busy` and deletes nothing; to find out it reads only the open-file and
+mapped-file lists of your own processes under `/proc`, and its answer holds
+no path or name. The note goes only once
 the delete worked, and the site gets a new, empty folder the next time it is
 opened. If the delete fails, the Chat tab says so. Clear chat data clears the
 note only after its own delete worked; if that fails, the note stays.
