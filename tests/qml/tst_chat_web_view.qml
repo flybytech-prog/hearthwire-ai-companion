@@ -760,4 +760,144 @@ TestCase {
         tryVerify(function () { return states.length === 2 }, 3000)
         compare(states[1].site, "gemini")
     }
+
+    // --- task 005: added sites ------------------------------------------------
+
+    // Addresses where nothing is served (.invalid never resolves).
+    readonly property var added: [
+        { id: "user-3fa9c01b", name: "Le Chat", url: "https://lechat.invalid/chat" },
+        { id: "user-0000beef", name: "Pi", url: "https://pi.invalid/" }
+    ]
+
+    // A built-in and two added sites, each shown once (memory mode).
+    function addedSites() {
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        web.customUrls = testCase.nowhere
+        web.userSites = testCase.added
+        web.siteIds = ["claude", "user-3fa9c01b", "user-0000beef"]
+        web.siteId = "claude"
+        verify(web.currentView !== null)
+        web.siteId = "user-3fa9c01b"
+        verify(web.currentView !== null)
+        web.siteId = "user-0000beef"
+        verify(web.currentView !== null)
+        return web
+    }
+
+    // Each added site has a profile of its own: never a built-in's, never
+    // another added site's, never none.
+    function test_addedSiteGetsItsOwnProfile() {
+        var web = addedSites()
+        var claude = web.profileFor("claude")
+        var lechat = web.profileFor("user-3fa9c01b")
+        var pi = web.profileFor("user-0000beef")
+        verify(claude !== null && lechat !== null && pi !== null)
+        verify(lechat !== claude && pi !== claude && pi !== lechat)
+        compare(web.viewFor("user-3fa9c01b", "a").profile, lechat)
+        compare(web.viewFor("user-0000beef", "a").profile, pi)
+        verify(lechat.offTheRecord && pi.offTheRecord)
+        compare(Object.keys(web.profiles).sort(), ["claude", "user-0000beef", "user-3fa9c01b"])
+        // Its own address is its home.
+        compare(web.viewFor("user-3fa9c01b", "a").homeUrl, "https://lechat.invalid/chat")
+        compare(web.activeSiteName, "Pi")
+    }
+
+    // Without its entry an added id gets no view (its home is unknown).
+    function test_addedIdWithoutItsEntryLoadsNothing() {
+        var web = createTemporaryObject(webComponent, testCase, {})
+        web.customUrls = testCase.nowhere
+        web.siteIds = ["user-3fa9c01b"]
+        web.siteId = "user-3fa9c01b"
+        compare(web.currentView, null)
+        compare(web.profileFor("user-3fa9c01b"), null)
+        // Its entry arrives: now it opens.
+        web.userSites = testCase.added
+        web.syncViews()
+        verify(web.currentView !== null)
+        compare(web.currentView.homeUrl, "https://lechat.invalid/chat")
+    }
+
+    // The sign-in window of an added site uses that site's profile.
+    function test_addedSiteSignInWindowUsesItsProfile() {
+        var web = addedSites()
+        web.openOverlay({ openIn: function (view) {} }, "user-3fa9c01b", "https://lechat.invalid/")
+        verify(web.overlayOpen)
+        compare(web.overlayView.profile, web.profileFor("user-3fa9c01b"))
+        verify(web.overlayView.profile !== web.profileFor("claude"))
+        verify(web.overlayView.profile !== web.profileFor("user-0000beef"))
+        web.closeOverlay()
+    }
+
+    // Saved sign-ins: the saved path is site-user-…, and only once its
+    // folder is prepared.
+    function test_addedSiteSavedProfileSpec() {
+        var web = createTemporaryObject(webComponent, testCase, {
+            staySignedIn: true,
+            runtimeDir: "/nonexistent/run",
+            storageApplet: 3,
+            storageGeneration: 4
+        })
+        var wanted = []
+        web.siteWanted.connect(function (siteId) { wanted.push(siteId) })
+        web.userSites = testCase.added
+        web.siteIds = ["user-3fa9c01b"]
+        web.siteId = "user-3fa9c01b"
+        compare(web.currentView, null)
+        compare(web.siteProfileSpec("user-3fa9c01b"), null)
+        verify(wanted.indexOf("user-3fa9c01b") >= 0)
+        web.siteIds = []
+        web.preparedSites = ["user-3fa9c01b"]
+        compare(web.siteProfileSpec("user-3fa9c01b"), {
+            saved: true,
+            sitePath: "/nonexistent/run/hearthwire/vault/web/applet-3-g4/site-user-3fa9c01b",
+            siteName: "applet-3-g4-user-3fa9c01b"
+        })
+        compare(web.siteProfileSpec("user-0000beef"), null)
+        compare(Object.keys(web.profiles), [])
+    }
+
+    // Removal: clearSite drops the site's views and profile, then says it
+    // is released; also for a site that never had one.
+    function test_addedSiteClearAndRelease() {
+        var web = addedSites()
+        var released = []
+        web.siteReleased.connect(function (siteId) { released.push(siteId) })
+        var claude = web.profileFor("claude")
+        web.userSites = [testCase.added[1]]
+        web.siteIds = ["claude", "user-0000beef"]
+        web.clearSite("user-3fa9c01b")
+        compare(web.viewFor("user-3fa9c01b", "a"), null)
+        compare(web.profileFor("user-3fa9c01b"), null)
+        tryVerify(function () { return released.indexOf("user-3fa9c01b") >= 0 }, 3000)
+        // Not made again: it is no longer a site.
+        wait(50)
+        compare(web.profileFor("user-3fa9c01b"), null)
+        compare(web.profileFor("claude"), claude)
+        web.clearSite("user-00c0ffee")
+        tryVerify(function () { return released.indexOf("user-00c0ffee") >= 0 }, 3000)
+    }
+
+    // A download prompt names the added site that asked.
+    function test_downloadNamesTheAddedSite() {
+        var web = addedSites()
+        var cancelled = 0
+        web.handleDownload({ isSavePageDownload: false, downloadFileName: "notes.txt",
+                             view: { site: "user-3fa9c01b" }, cancel: function () { cancelled++ } })
+        compare(web.pendingDownloadSite, "Le Chat")
+        compare(web.pendingDownloadSiteId, "user-3fa9c01b")
+        web.cancelDownload()
+        compare(cancelled, 1)
+    }
+
+    // A new address on the same host moves the open view home.
+    function test_addedSiteAddressChangeMovesHome() {
+        var web = addedSites()
+        var view = web.viewFor("user-3fa9c01b", "a")
+        var profile = web.profileFor("user-3fa9c01b")
+        web.userSites = [{ id: "user-3fa9c01b", name: "Le Chat", url: "https://lechat.invalid/other" },
+                         testCase.added[1]]
+        compare(view.homeUrl, "https://lechat.invalid/other")
+        compare(web.profileFor("user-3fa9c01b"), profile)
+    }
 }

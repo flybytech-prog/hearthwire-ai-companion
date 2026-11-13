@@ -69,6 +69,9 @@ Item {
     // Validated {siteId: url} custom addresses; set before siteId so the
     // first load already uses them.
     property var customUrls: ({})
+    // The added sites [{id, name, url}] (main.qml's ok-or-not read), set
+    // before siteId too; every ChatSites call gets them.
+    property var userSites: []
     // Only makes the owner check's helper source name unique.
     property int appletId: 0
     // Per-site zoom {siteId: factor}; a sign-in window uses its site's.
@@ -114,7 +117,7 @@ Item {
     readonly property bool pageCrashed: !!chatWeb.activeView && chatWeb.activeView.crashed
     readonly property bool canOpenExternally: !!chatWeb.activeView
         && ChatSites.isPageUrl(
-            ChatSites.effectiveSite(chatWeb.activeView.site, chatWeb.customUrls),
+            ChatSites.effectiveSite(chatWeb.activeView.site, chatWeb.customUrls, chatWeb.userSites),
             chatWeb.activeView.url.toString())
 
     // Title of the sign-in window: {kind: "page"|"opener"|"unknown", host}.
@@ -130,11 +133,12 @@ Item {
         ? ChatSites.offSiteHost({
             siteId: chatWeb.activeView.site,
             customUrls: chatWeb.customUrls,
+            userSites: chatWeb.userSites,
             url: chatWeb.activeView.url.toString()
         })
         : ({off: false, host: ""})
     readonly property string activeSiteName: {
-        var site = chatWeb.activeView ? ChatSites.byId(chatWeb.activeView.site) : null
+        var site = chatWeb.activeView ? ChatSites.byId(chatWeb.activeView.site, chatWeb.userSites) : null
         return site ? site.name : ""
     }
 
@@ -195,7 +199,7 @@ Item {
     function home() {
         if (chatWeb.overlayActive)
             chatWeb.closeOverlay()
-        var url = ChatSites.homeUrl(chatWeb.activeSiteId, chatWeb.customUrls)
+        var url = ChatSites.homeUrl(chatWeb.activeSiteId, chatWeb.customUrls, chatWeb.userSites)
         if (chatWeb.paneView && url !== "")
             chatWeb.paneView.url = url
     }
@@ -245,7 +249,8 @@ Item {
     // waits for the owner check; the request itself was already rejected.
     // pane: where a view created after the check goes ("a" or "b").
     function checkLocalOwner(view, url, form, create, pane) {
-        var port = ChatSites.localOwnerPort({ siteId: "local", customUrls: chatWeb.customUrls, url: url })
+        var port = ChatSites.localOwnerPort({ siteId: "local", customUrls: chatWeb.customUrls,
+                                              userSites: chatWeb.userSites, url: url })
         // A late answer of an earlier check must not count for this one.
         localOwner.cancel()
         chatWeb.ownerPending = { view: view, url: url, port: port, form: form, create: create,
@@ -319,6 +324,7 @@ Item {
         for (var index = 0; index < views.length; index++) {
             var view = views[index]
             if (ChatSites.localOwnerPort({ siteId: view.site, customUrls: chatWeb.customUrls,
+                                           userSites: chatWeb.userSites,
                                            url: view.url.toString() }) > 0)
                 view.url = "about:blank"
         }
@@ -347,7 +353,7 @@ Item {
             chatWeb.syncViews()
             return
         }
-        var url = ChatSites.homeUrl("local", chatWeb.customUrls)
+        var url = ChatSites.homeUrl("local", chatWeb.customUrls, chatWeb.userSites)
         var panes = [["a", chatWeb.siteId], ["b", chatWeb.splitActive ? chatWeb.siteIdB : ""]]
         for (var index = 0; index < panes.length; index++) {
             var view = panes[index][1] === "local" ? chatWeb.viewFor("local", panes[index][0]) : null
@@ -543,7 +549,7 @@ Item {
         chatWeb.pendingDownload = download
         chatWeb.pendingDownloadName = download.downloadFileName
         var siteId = download.view && typeof download.view.site === "string" ? download.view.site : ""
-        var source = siteId !== "" ? ChatSites.byId(siteId) : null
+        var source = siteId !== "" ? ChatSites.byId(siteId, chatWeb.userSites) : null
         chatWeb.pendingDownloadSite = source ? source.name : ""
         chatWeb.pendingDownloadSiteId = source ? siteId : ""
         downloadTimeout.restart()
@@ -695,13 +701,17 @@ Item {
             var wanted = pane === "b" ? chatWeb.siteIdB : chatWeb.siteId
             if (chatWeb.siteIds.indexOf(wanted) < 0 || chatWeb.viewFor(wanted, pane) !== null)
                 continue
+            // An added id without its entry is no site: no view, no profile.
+            var home = ChatSites.homeUrl(wanted, chatWeb.customUrls, chatWeb.userSites)
+            if (home === "")
+                continue
             if (!chatWeb.profileFor(wanted) && !chatWeb.siteProfileSpec(wanted)) {
                 if (chatWeb.staySignedIn && ChatStorage.isSiteId(wanted) && !chatWeb.siteRetiring(wanted))
                     chatWeb.siteWanted(wanted)
                 continue
             }
-            var home = ChatSites.homeUrl(wanted, chatWeb.customUrls)
             if (ChatSites.localOwnerPort({ siteId: wanted, customUrls: chatWeb.customUrls,
+                                           userSites: chatWeb.userSites,
                                            url: home }) === 0) {
                 if (chatWeb.ensureProfile(wanted))
                     visitedSites.append({ site: wanted, pane: pane })
@@ -720,7 +730,7 @@ Item {
             var view = pages.itemAt(index)
             if (!view || view.isOverlay)
                 continue
-            var url = ChatSites.homeUrl(view.site, chatWeb.customUrls)
+            var url = ChatSites.homeUrl(view.site, chatWeb.customUrls, chatWeb.userSites)
             if (url === "" || url === view.homeUrl)
                 continue
             if (chatWeb.overlayView && chatWeb.overlayView.site === view.site)
@@ -735,6 +745,8 @@ Item {
     onSiteIdsChanged: chatWeb.syncViews()
     onPreparedSitesChanged: chatWeb.syncViews()
     onCustomUrlsChanged: chatWeb.applyCustomUrls()
+    // An added site's address may have changed (same host: same profile).
+    onUserSitesChanged: chatWeb.applyCustomUrls()
     onSiteIdChanged: {
         if (chatWeb.overlayPane === "a")
             chatWeb.closeOverlay()
@@ -941,7 +953,8 @@ Item {
                     linkClicked: request.navigationType
                         === WebEngineNavigationRequest.LinkClickedNavigation,
                     siteId: page.site,
-                    customUrls: chatWeb.customUrls
+                    customUrls: chatWeb.customUrls,
+                    userSites: chatWeb.userSites
                 })
                 if (verdict === "allow") {
                     if (!request.isMainFrame)
@@ -954,6 +967,7 @@ Item {
                         isMainFrame: request.isMainFrame,
                         siteId: page.site,
                         customUrls: chatWeb.customUrls,
+                        userSites: chatWeb.userSites,
                         pass: page.ownerPass
                     })
                     if (gate !== "skip")
@@ -980,12 +994,14 @@ Item {
                     // A sign-in window opens only for a click.
                     userInitiated: request.userInitiated === true,
                     siteId: page.site,
-                    customUrls: chatWeb.customUrls
+                    customUrls: chatWeb.customUrls,
+                    userSites: chatWeb.userSites
                 })
                 // A Local window starting on this computer would skip the
                 // owner check: dropped.
                 if (verdict === "overlay" && ChatSites.localOwnerPort({
-                        siteId: page.site, customUrls: chatWeb.customUrls, url: url }) > 0)
+                        siteId: page.site, customUrls: chatWeb.customUrls,
+                        userSites: chatWeb.userSites, url: url }) > 0)
                     return
                 // A sign-in window cannot open another overlay on top of itself.
                 if (verdict === "overlay" && !page.isOverlay) {
@@ -1077,7 +1093,7 @@ Item {
                     page.ownerPassExpires = Date.now() + chatWeb.ownerPassLifetime
                     chatWeb.localCreatePass = ""
                 }
-                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)
+                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls, chatWeb.userSites)
                 if (page.homeUrl !== "")
                     page.url = page.homeUrl
             }

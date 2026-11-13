@@ -38,7 +38,8 @@ PlasmaExtras.Representation {
         fallback: ""
     }
 
-    // The chat site picker (fixed catalog names and icons).
+    // The chat site picker: catalog names and icons, and the added sites'
+    // names (plain text) with their letter badge.
     component SitePicker: PlasmaComponents.ComboBox {
         id: sitePicker
         Layout.fillWidth: true
@@ -55,11 +56,19 @@ PlasmaExtras.Representation {
             contentItem: RowLayout {
                 spacing: Kirigami.Units.smallSpacing
                 Kirigami.Icon {
-                    source: Qt.resolvedUrl("../images/" + siteDelegate.modelData.icon)
+                    visible: siteDelegate.modelData.user !== true
+                    source: siteDelegate.modelData.user === true ? ""
+                        : Qt.resolvedUrl("../images/" + siteDelegate.modelData.icon)
                     Layout.preferredWidth: Kirigami.Units.iconSizes.small
                     Layout.preferredHeight: Kirigami.Units.iconSizes.small
                     isMask: true
                     color: Kirigami.Theme.textColor
+                }
+                // An added site has no icon: the first letter of its name.
+                LetterBadge {
+                    visible: siteDelegate.modelData.user === true
+                    name: siteDelegate.modelData.user === true ? siteDelegate.modelData.name : ""
+                    size: Kirigami.Units.iconSizes.small
                 }
                 PlasmaComponents.Label {
                     Layout.fillWidth: true
@@ -575,6 +584,7 @@ PlasmaExtras.Representation {
                     siteIds: root.chatWebSiteIds
                     siteId: root.chatWebSiteId
                     customUrls: root.chatCustomUrls
+                    userSites: root.chatUserSites
                     appletId: Math.max(0, root.chatAppletId)
                     // Only while the popup is open and a web site is shown, so no
                     // web engine starts early or for Ollama alone.
@@ -592,6 +602,7 @@ PlasmaExtras.Representation {
                     onSiteDataClearRequested: (siteId) => root.chatClearSite(siteId)
                     onSiteDataReleased: (siteId) => root.chatSiteReleased(siteId)
                     onSiteProfileWanted: (siteId) => root.chatSiteWanted(siteId)
+                    onWebLoadedChanged: (loaded) => root.chatWebLoaded = loaded
                     card: root.chatCard
                     missingTools: root.chatVaultMissing
                     installDistro: root.installDistro
@@ -631,6 +642,17 @@ PlasmaExtras.Representation {
             UsageView {}
         }
     }
+
+    // Added sites removed in the settings: their views and profiles go.
+    Connections {
+        target: root
+        function onChatUserSitesRemoved(ids) {
+            chatView.dropSites(ids)
+        }
+    }
+
+    // Without this popup there is no web view either.
+    Component.onDestruction: root.chatWebLoaded = false
 
     Binding {
         target: root

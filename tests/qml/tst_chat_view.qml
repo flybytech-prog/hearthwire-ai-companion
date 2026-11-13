@@ -746,4 +746,78 @@ TestCase {
         }
         verify(found.indexOf("from Claude to Downloads?") >= 0, found)
     }
+
+    // --- task 005: added sites ------------------------------------------------
+
+    readonly property var addedSites: [{id: "user-3fa9c01b", name: "Le Chat", url: "https://chat.mistral.ai/chat"}]
+
+    // The web view gets the added sites, and the names come from them.
+    function test_addedSitesReachTheWebViewAndTheNames() {
+        var view = make({ current: true, siteIds: ["claude", "user-3fa9c01b"], siteId: "user-3fa9c01b",
+                          userSites: testCase.addedSites })
+        tryVerify(function () { return view.web !== null })
+        compare(view.web.userSites, testCase.addedSites)
+        compare(view.zoomSiteName, "Le Chat")
+        verify(view.canClearSiteFor("user-3fa9c01b"))
+        verify(!view.canClearSiteFor("user-00000001"), "an added id without its entry")
+        view.askClearSite()
+        compare(view.confirmingClearSite, "user-3fa9c01b")
+        compare(view.clearSiteName, "Le Chat")
+        // Without its entry it is no site at all.
+        view.userSites = []
+        compare(view.web.userSites, [])
+        verify(!view.canClearSiteFor("user-3fa9c01b"))
+        compare(view.zoomSiteName, "")
+    }
+
+    // Removed in the settings: each added site is cleared as with Clear
+    // <site> data (views, then profile, then siteReleased); never a
+    // built-in id or an odd one.
+    function test_dropSitesClearsEachAddedSite() {
+        var view = make({ current: true, siteIds: ["claude"], siteId: "claude", userSites: testCase.addedSites })
+        tryVerify(function () { return view.web !== null })
+        var released = []
+        view.siteDataReleased.connect(function (siteId) { released.push(siteId) })
+        view.confirmingClearSite = "user-3fa9c01b"
+        view.dropSites(["user-3fa9c01b", "user-0000beef", "claude", "toString", 7])
+        compare(view.web.clearedSites, ["user-3fa9c01b", "user-0000beef"])
+        compare(view.confirmingClearSite, "", "its question goes too")
+        tryVerify(function () { return released.length === 2 }, 3000)
+        compare(released, ["user-3fa9c01b", "user-0000beef"])
+        view.dropSites("user-3fa9c01b")
+        view.dropSites(undefined)
+        compare(view.web.clearedSites.length, 2)
+    }
+
+    // Without a web view nothing is dropped; webLoadedChanged says whether
+    // one exists (main.qml then releases the sites itself).
+    function test_webLoadedChanged() {
+        var states = []
+        var view = createTemporaryObject(viewComponent, testCase, {current: false})
+        view.webLoadedChanged.connect(function (loaded) { states.push(loaded) })
+        compare(view.web, null)
+        view.dropSites(["user-3fa9c01b"])
+        view.current = true
+        tryVerify(function () { return view.web !== null })
+        compare(states, [true])
+        view.current = false
+        view.stop()
+        compare(states, [true, false])
+        // At creation it is said at once.
+        testCase.shownAtCreation = false
+        var other = createTemporaryObject(loadedProbe, testCase, {})
+        verify(other !== null)
+        compare(other.said, [false])
+    }
+
+    Component {
+        id: loadedProbe
+        ChatView {
+            property var said: []
+            anchors.fill: parent
+            current: false
+            webSource: Qt.resolvedUrl("ChatWebStub.qml")
+            onWebLoadedChanged: (loaded) => said.push(loaded)
+        }
+    }
 }

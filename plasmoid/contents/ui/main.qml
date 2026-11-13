@@ -64,10 +64,29 @@ PlasmoidItem {
     readonly property bool tooltipShowsUsage: Plasmoid.configuration.tooltipShowsUsage !== false
     readonly property var tooltipChoice: TooltipLogic.parseTooltipMetrics(
         Plasmoid.configuration.tooltipMetrics, Catalog.providers)
-    // Web sites, then the built-in Ollama chat when it is on.
+    // Settings → Chat's added sites (chatUserSites), read strictly: ok only
+    // when the whole value is valid. chatUserSites holds its valid entries
+    // either way; only an ok read may ever remove or delete anything.
+    readonly property var chatUserSitesRead: ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)
+    readonly property var chatUserSites: root.chatUserSitesRead.sites
+    readonly property bool chatUserSitesOk: root.chatUserSitesRead.ok
+    // The added ids of the last ok read, runtime only; null until one.
+    property var chatUserSiteIdsSeen: null
+    // Added sites that were removed in the settings: the Chat tab drops
+    // their views and profiles (FullRepresentation → ChatView.dropSites).
+    signal chatUserSitesRemoved(var ids)
+    // The Chat tab has a web view (ChatView.webLoadedChanged); without one
+    // no site has a profile.
+    property bool chatWebLoaded: false
+    // Every chat id in the Settings → Chat order (chatSiteOrder).
+    readonly property var chatSiteOrder: ChatSites.orderedSites(root.chatUserSites,
+        Plasmoid.configuration.chatSiteOrder).map(function (site) { return site.id })
+    // The enabled web sites and the built-in Ollama chat when it is on, in
+    // that order.
     readonly property var chatSites: OllamaChat.menuEntries(
-        ChatSites.enabledSites(Plasmoid.configuration.chatSites),
-        Plasmoid.configuration.chatSites)
+        ChatSites.enabledSites(Plasmoid.configuration.chatSites, root.chatUserSites,
+            Plasmoid.configuration.chatSiteOrder),
+        Plasmoid.configuration.chatSites, root.chatSiteOrder)
     readonly property var chatSiteIds: root.chatSites.map(function (site) { return site.id })
     // The web chat only knows web sites. It keeps its last one while Ollama
     // is shown, so its pages stay as they were.
@@ -91,7 +110,7 @@ PlasmoidItem {
     // Per-site zoom {siteId: factor} for the web sites and Ollama. Read from
     // the configuration at start; Ctrl+= / Ctrl+- / Ctrl+0 change it here and
     // zoomWriteTimer stores it a moment later.
-    readonly property var chatZoomIds: ChatSites.siteIds().concat([OllamaChat.ENTRY.id])
+    readonly property var chatZoomIds: ChatSites.siteIds(root.chatUserSites).concat([OllamaChat.ENTRY.id])
     property var chatZoom: ({})
 
     // Settings → General → Keyboard shortcut opens.
@@ -99,7 +118,8 @@ PlasmoidItem {
         SettingsLogic.normalizeShortcutTarget(Plasmoid.configuration.shortcutOpens)
     // Settings → General → Middle-click opens.
     readonly property string middleClickTarget:
-        SettingsLogic.normalizeMiddleClick(Plasmoid.configuration.middleClickOpens, ChatSites.siteIds())
+        SettingsLogic.normalizeMiddleClick(Plasmoid.configuration.middleClickOpens,
+            ChatSites.siteIds(root.chatUserSites))
     // The shortcut opened the Ollama chat: its message box takes the focus.
     signal ollamaFocusRequested()
     // What the last shortcut press asked for: open (true) or closed.
@@ -224,9 +244,12 @@ PlasmoidItem {
     }
     // What the Chat tab may open a saved profile for.
     readonly property var chatReadySites: root.chatStorageReady ? root.chatFreshSites : []
-    // Every site id whose folder prune keeps: the built-ins (added sites
-    // join in a later version).
-    readonly property var chatKnownSites: ChatStorage.BUILTIN_SITE_IDS
+    // Every site id whose folder prune keeps: the built-ins and the added
+    // sites, but only from an ok read of chatUserSites. Otherwise none, so
+    // no prune command can be built and nothing is deleted.
+    readonly property var chatKnownSites: root.chatUserSitesOk
+        ? ChatStorage.BUILTIN_SITE_IDS.concat(root.chatUserSites.map(function (site) { return site.id }))
+        : []
     // Clear <site> data with saved sign-ins: the sites whose folder is still
     // to delete, stored (chatPendingSiteClears) so a restart can't open the
     // old data again. Such a site is never prepared before its delete worked.
@@ -1008,6 +1031,60 @@ PlasmoidItem {
         root.chatRemoveTried = root.chatRemoveTried.filter(function (id) { return id !== siteId })
         root.chatFreshSites = root.chatFreshSites.filter(function (id) { return id !== siteId })
         root.chatRemoveRewanted = root.chatRemoveRewanted.filter(function (id) { return id !== siteId })
+    }
+
+    // chatUserSites changed. Only an ok read counts: the ids it no longer
+    // has since the last ok read are removed (chatRemoveUserSites).
+    function chatSyncUserSites() {
+        var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)
+        if (!read.ok)
+            return
+        var now = read.sites.map(function (site) { return site.id })
+        var seen = root.chatUserSiteIdsSeen
+        root.chatUserSiteIdsSeen = now
+        if (seen === null)
+            return
+        var removed = seen.filter(function (id) { return now.indexOf(id) < 0 })
+        if (removed.length > 0)
+            root.chatRemoveUserSites(removed)
+    }
+
+    // Added sites removed in the settings (Apply): with Stay signed in their
+    // delete is stored as owed first, as for Clear <site> data, then the
+    // Chat tab drops their views and profiles; chatSiteReleased deletes
+    // each folder after the wait (now, or at the next unlock). Nothing here
+    // deletes anything itself.
+    function chatRemoveUserSites(ids) {
+        var removed = (Array.isArray(ids) ? ids : []).filter(function (id, index, all) {
+            return ChatSites.isUserSiteId(id) && all.indexOf(id) === index
+        })
+        if (removed.length === 0)
+            return
+        var gone = function (id) { return removed.indexOf(id) < 0 }
+        if (root.chatStorageMode === "encrypted") {
+            // Past the id cap it can't be stored: prune --known is the
+            // second net.
+            root.chatWritePendingClears(root.chatPendingClears.concat(removed.filter(function (id) {
+                return !root.chatRemovalPending(id)
+            })))
+            root.chatFreshSites = root.chatFreshSites.filter(gone)
+            root.chatWantedSites = root.chatWantedSites.filter(gone)
+            root.chatRemoveTried = root.chatRemoveTried.filter(gone)
+            root.chatRemoveRewanted = root.chatRemoveRewanted.filter(gone)
+        }
+        root.chatUserSitesRemoved(removed)
+        // No web view: no profile exists, so each one is released now.
+        if (!root.chatWebLoaded)
+            removed.forEach(function (id) { root.chatSiteReleased(id) })
+        // Their zoom goes too, stored only by zoomWriteTimer. The ids are
+        // read afresh: this may run before the bindings follow.
+        var kept = ChatSites.siteIds(ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites).sites)
+        var zoom = SettingsLogic.parseZoomMap(SettingsLogic.zoomMapToPersist(root.chatZoom, "", 1.0),
+            kept.concat([OllamaChat.ENTRY.id]))
+        if (JSON.stringify(zoom) !== JSON.stringify(root.chatZoom)) {
+            root.chatZoom = zoom
+            zoomWriteTimer.restart()
+        }
     }
 
     // The web view destroyed the cleared site's profile: after the wait its
@@ -1871,12 +1948,18 @@ PlasmoidItem {
         root.historyPayOwed()
         root.checkInstall()
         root.chatZoom = SettingsLogic.parseZoomMap(Plasmoid.configuration.chatSiteZoom, root.chatZoomIds)
+        if (root.chatUserSitesOk)
+            root.chatUserSiteIdsSeen = root.chatUserSites.map(function (site) { return site.id })
         // Plasma start, Unlock with KDE Wallet: open the folder silently when
         // the wallet is already open (the helper never prompts here). The
         // step is dropped unless status says locked with a wallet slot.
         if (root.chatStorageMode === "encrypted" && root.chatUnlockSetting === "wallet")
             root.chatEnqueue(["status", "auto-unlock"])
     }
+
+    // Settings → Chat added or removed sites (Apply, a backup Replace).
+    readonly property string configuredUserSites: Plasmoid.configuration.chatUserSites
+    onConfiguredUserSitesChanged: root.chatSyncUserSites()
 
     // The zoom map changed outside this widget (e.g. Defaults in the
     // settings); a write of our own still waiting wins.

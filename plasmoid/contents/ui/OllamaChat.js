@@ -52,12 +52,25 @@ function isEnabled(chatSitesJson) {
     }
 }
 
-// The Chat dropdown: web sites first, then Ollama when it is on.
-function menuEntries(webSites, chatSitesJson) {
+// The Chat dropdown: the web sites (in order) and Ollama when it is on, at
+// its place in order (the ids of ChatSites.orderedSites); last without one.
+function menuEntries(webSites, chatSitesJson, order) {
     var sites = Array.isArray(webSites) ? webSites : []
-    return sites.concat(isEnabled(chatSitesJson) ? [ENTRY] : [])
+    if (!isEnabled(chatSitesJson))
+        return sites.slice()
+    var ids = Array.isArray(order) ? order : []
+    var place = ids.indexOf(ENTRY.id)
+    if (place < 0)
+        return sites.concat([ENTRY])
+    var before = sites.filter(function (site) {
+        var at = ids.indexOf(site.id)
+        return at >= 0 && at < place
+    }).length
+    return sites.slice(0, before).concat([ENTRY], sites.slice(before))
 }
 
+// Every chat id for chatSites: the web ids (ChatSites.siteIds, added sites
+// included), then Ollama.
 function allSiteIds(webIds) {
     var ids = Array.isArray(webIds) ? webIds : []
     return ids.filter(function (id) { return id !== ENTRY.id }).concat([ENTRY.id])

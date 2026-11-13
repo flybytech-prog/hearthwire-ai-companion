@@ -81,11 +81,34 @@ TestCase {
         compare(OllamaChat.menuEntries(undefined, "[]").length, 0)
     }
 
+    // Task 005: Ollama takes its place in the Settings → Chat order.
+    function test_menuEntriesFollowTheOrder() {
+        var web = [{ id: "grok" }, { id: "claude" }, { id: "user-3fa9c01b" }]
+        var ids = function (list) { return list.map(function (entry) { return entry.id }) }
+        var json = '["claude","grok","user-3fa9c01b","ollama"]'
+        compare(ids(OllamaChat.menuEntries(web, json, ["grok", "ollama", "claude", "user-3fa9c01b"])),
+                ["grok", "ollama", "claude", "user-3fa9c01b"])
+        compare(ids(OllamaChat.menuEntries(web, json, ["ollama", "grok", "claude", "user-3fa9c01b"])),
+                ["ollama", "grok", "claude", "user-3fa9c01b"])
+        compare(ids(OllamaChat.menuEntries(web, json, ["grok", "claude", "user-3fa9c01b", "ollama"])),
+                ["grok", "claude", "user-3fa9c01b", "ollama"])
+        // A disabled site before Ollama in the order changes nothing.
+        compare(ids(OllamaChat.menuEntries(web, json, ["gemini", "grok", "ollama", "claude"])),
+                ["grok", "ollama", "claude", "user-3fa9c01b"])
+        // No order, or Ollama not in it: last.
+        compare(ids(OllamaChat.menuEntries(web, json)), ["grok", "claude", "user-3fa9c01b", "ollama"])
+        compare(ids(OllamaChat.menuEntries(web, json, ["grok"])), ["grok", "claude", "user-3fa9c01b", "ollama"])
+        // Off: never there.
+        compare(ids(OllamaChat.menuEntries(web, '["claude"]', ["ollama", "grok"])), ["grok", "claude", "user-3fa9c01b"])
+        compare(web.length, 3)
+    }
+
     function test_allSiteIds() {
         compare(OllamaChat.allSiteIds(["claude", "local"]), ["claude", "local", "ollama"])
         compare(OllamaChat.allSiteIds([]), ["ollama"])
         compare(OllamaChat.allSiteIds(null), ["ollama"])
         compare(OllamaChat.allSiteIds(["ollama", "claude"]), ["claude", "ollama"])
+        compare(OllamaChat.allSiteIds(["claude", "user-3fa9c01b"]), ["claude", "user-3fa9c01b", "ollama"])
     }
 
     // --- address -------------------------------------------------------------

@@ -24,6 +24,8 @@ ColumnLayout {
     property string siteId: ""
     // Validated {siteId: url} custom addresses; runtime only.
     property var customUrls: ({})
+    // The added sites [{id, name, url}] (main.qml); runtime only.
+    property var userSites: []
     // True while the Chat tab is shown in the open popup.
     property bool current: false
     // Only makes the Local owner check's helper source name unique.
@@ -88,6 +90,9 @@ ColumnLayout {
     signal zoomRequested(int direction)
     // Ctrl+wheel in a page: store factor (a ZOOM_STEPS value) for siteId.
     signal siteZoomRequested(string siteId, real factor)
+    // Whether a web view exists now; without one no site has a profile
+    // (main.qml then releases removed added sites itself).
+    signal webLoadedChanged(bool loaded)
 
     property bool started: false
     property bool clearing: false
@@ -122,11 +127,11 @@ ColumnLayout {
     // while saved sign-ins exist, whose folder would stay).
     readonly property bool canClearSite: chatView.canClearSiteFor(chatView.zoomSiteId)
     readonly property string zoomSiteName: {
-        var site = ChatSites.byId(chatView.zoomSiteId)
+        var site = ChatSites.byId(chatView.zoomSiteId, chatView.userSites)
         return site ? site.name : ""
     }
     readonly property string clearSiteName: {
-        var site = ChatSites.byId(chatView.confirmingClearSite)
+        var site = ChatSites.byId(chatView.confirmingClearSite, chatView.userSites)
         return site ? site.name : ""
     }
     // Local web UI is shown in either pane: its owner problems and load
@@ -195,7 +200,8 @@ ColumnLayout {
     }
 
     function canClearSiteFor(siteId) {
-        return chatView.available && ChatStorage.isSiteId(siteId) && ChatSites.byId(siteId) !== null
+        return chatView.available && ChatStorage.isSiteId(siteId)
+            && ChatSites.byId(siteId, chatView.userSites) !== null
             && (!chatView.encrypted || (chatView.persistentActive && chatView.storageReady))
     }
 
@@ -220,6 +226,25 @@ ColumnLayout {
         }
         chatView.web.clearSite(siteId)
         chatView.focusLater()
+    }
+
+    // Added sites removed in the settings: their views and profiles go, as
+    // with Clear <site> data (main.qml stored their delete first, and
+    // deletes each folder once the web view released it). Without a web
+    // view there is nothing to drop.
+    function dropSites(ids) {
+        // A list from a signal may arrive as a C++ list, not a JS Array.
+        var list = ids !== null && typeof ids === "object" && typeof ids.length === "number"
+            && ids.length >= 0 && ids.length <= ChatStorage.MAX_SITE_IDS
+            ? Array.prototype.slice.call(ids) : []
+        if (list.indexOf(chatView.confirmingClearSite) >= 0)
+            chatView.confirmingClearSite = ""
+        if (!chatView.web)
+            return
+        list.forEach(function (siteId) {
+            if (ChatSites.isUserSiteId(siteId))
+                chatView.web.clearSite(siteId)
+        })
     }
 
     function lockSaved() {
@@ -439,6 +464,7 @@ ColumnLayout {
         }
     }
     onWebWantedChanged: chatView.syncLoader()
+    onAvailableChanged: chatView.webLoadedChanged(chatView.available)
     onProfileKeyChanged: chatView.syncLoader()
     onAutoLockArmedChanged: chatView.restartIdle()
     onAutoLockMinutesChanged: chatView.restartIdle()
@@ -454,6 +480,7 @@ ColumnLayout {
             chatView.focusLater()
         }
         chatView.syncLoader()
+        chatView.webLoadedChanged(chatView.available)
     }
 
     // Zoom keys, also while the page has the focus. Ctrl+wheel is Chromium's
@@ -881,11 +908,12 @@ ColumnLayout {
             anchors.fill: parent
             active: false
             onLoaded: {
-                // preparedSites and customUrls first: the first page load
-                // must already use them.
+                // preparedSites, customUrls and userSites first: the
+                // first page load must already use them.
                 webLoader.item.appletId = Qt.binding(function () { return chatView.appletId })
                 webLoader.item.preparedSites = Qt.binding(function () { return chatView.preparedSites })
                 webLoader.item.customUrls = Qt.binding(function () { return chatView.customUrls })
+                webLoader.item.userSites = Qt.binding(function () { return chatView.userSites })
                 webLoader.item.zoomMap = Qt.binding(function () { return chatView.zoomMap })
                 webLoader.item.siteIds = Qt.binding(function () { return chatView.siteIds })
                 webLoader.item.siteId = Qt.binding(function () { return chatView.siteId })

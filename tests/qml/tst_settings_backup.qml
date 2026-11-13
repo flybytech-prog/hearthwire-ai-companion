@@ -9,6 +9,7 @@ import "../../plasmoid/contents/ui/SettingsLogic.js" as SettingsLogic
 import "../../plasmoid/contents/ui/UsageLogic.js" as UsageLogic
 
 TestCase {
+    id: testCase
     name: "SettingsBackup"
 
     readonly property string stamp: "2026-11-06T00:10:29Z"
@@ -29,7 +30,7 @@ TestCase {
         alertLowEnabled: true,
         alertResetEnabled: true,
         alertLowPercent: 40,
-        chatSites: "[\"claude\",\"ollama\",\"local\"]",
+        chatSites: "[\"claude\",\"ollama\",\"local\",\"user-3fa9c01b\"]",
         chatDefaultSite: "ollama",
         chatOllamaUrl: "http://[::1]:11434",
         chatKeepOpen: true,
@@ -40,7 +41,9 @@ TestCase {
         shortcutOpens: "ollama",
         panelRing: "codex.spark_weekly",
         middleClickOpens: "mscopilot",
-        chatCustomUrls: "{\"claude\":\"https://claude.example.org/new?x=1\",\"local\":\"http://localhost:8080/\"}"
+        chatCustomUrls: "{\"claude\":\"https://claude.example.org/new?x=1\",\"local\":\"http://localhost:8080/\"}",
+        chatUserSites: "[{\"id\":\"user-3fa9c01b\",\"name\":\"Le Chat\",\"url\":\"https://chat.mistral.ai/chat\"}]",
+        chatSiteOrder: "[\"user-3fa9c01b\",\"claude\",\"ollama\"]"
     })
 
     function tools() {
@@ -49,7 +52,12 @@ TestCase {
             webSiteIds: ChatSites.siteIds(),
             ringPairs: UsageLogic.ringOptions(Catalog.providers).map(function (option) { return option.value }),
             validateCustomUrl: ChatSites.validateCustomUrl,
-            ollamaAddress: OllamaChat.checkedAddress
+            ollamaAddress: OllamaChat.checkedAddress,
+            userSiteIds: function (text) {
+                return ChatSites.parseUserSites(text).sites.map(function (site) { return site.id })
+            },
+            validateUserSite: ChatSites.validateUserSite,
+            serializeUserSites: ChatSites.serializeUserSites
         }
     }
 
@@ -74,7 +82,9 @@ TestCase {
     }
 
     function test_keyListsDoNotOverlap() {
-        compare(SettingsBackup.BACKUP_KEYS.length, 28)
+        compare(SettingsBackup.BACKUP_KEYS.length, 30)
+        // Task 005's two keys come last, as in the helper.
+        compare(SettingsBackup.BACKUP_KEYS.slice(-2), ["chatUserSites", "chatSiteOrder"])
         SettingsBackup.EXCLUDED_KEYS.forEach(function (key) {
             verify(SettingsBackup.BACKUP_KEYS.indexOf(key) < 0, key)
         })
@@ -154,7 +164,7 @@ TestCase {
         compare(SettingsBackup.parseReply("status", 0, ""), bad, "empty")
         compare(SettingsBackup.parseReply("status", 0, "{"), bad, "json")
         compare(SettingsBackup.parseReply("status", 0, "[]"), bad, "array")
-        compare(SettingsBackup.parseReply("status", 0, "{\"ok\":true,\"exists\":false}" + new Array(70000).join(" ")), bad, "oversized")
+        compare(SettingsBackup.parseReply("status", 0, "{\"ok\":true,\"exists\":false}" + new Array(530000).join(" ")), bad, "oversized")
         compare(reply("status", {ok: 1, exists: false}), bad, "ok truthy")
         compare(reply("status", {ok: true}), bad, "no exists")
         compare(reply("status", {ok: true, exists: "no"}), bad, "exists type")
@@ -182,8 +192,169 @@ TestCase {
     function test_planKeepsEveryGoodKey() {
         var result = plan(good, 0)
         compare(result.settings, good)
-        compare(result.applied, 28)
+        compare(result.applied, 30)
         compare(result.dropped, 0)
+    }
+
+    // --- task 005: added sites and the site order ---------------------------
+
+    function site(id, name, url) {
+        return {id: id, name: name, url: url}
+    }
+
+    function sitesText(list) {
+        return JSON.stringify(list)
+    }
+
+    readonly property var mistral: ({id: "user-3fa9c01b", name: "Le Chat", url: "https://chat.mistral.ai/chat"})
+    readonly property var deepseek: ({id: "user-00c0ffee", name: "DeepSeek", url: "https://chat.deepseek.com/"})
+
+    function test_replyBoundFollowsTheHelperFile() {
+        compare(SettingsBackup.MAX_REPLY_CHARS, 512 * 1024 + 1024)
+        compare(SettingsBackup.MAX_USER_SITES, ChatSites.MAX_USER_SITES)
+        compare(SettingsBackup.MAX_USER_SITES_CHARS, ChatSites.MAX_USER_SITES_CHARS)
+        var padded = function (length) {
+            var head = "{\"ok\":true,\"exists\":false}"
+            return head + new Array(length - head.length + 1).join(" ")
+        }
+        compare(SettingsBackup.parseReply("status", 0, padded(SettingsBackup.MAX_REPLY_CHARS)),
+                {ok: true, exists: false, exportedAt: ""})
+        compare(SettingsBackup.parseReply("status", 0, padded(SettingsBackup.MAX_REPLY_CHARS + 1)), bad)
+    }
+
+    // Kept as the widget writes it: keys in id, name, url order.
+    function test_planUserSitesCanonical() {
+        var result = plan({chatUserSites: "[{\"url\":\"https://chat.mistral.ai/chat\",\"name\":\"Le Chat\",\"id\":\"user-3fa9c01b\"}]"})
+        compare(result.settings.chatUserSites, sitesText([mistral]))
+        compare(result.dropped, 0)
+        compare(plan({chatUserSites: "[]"}).settings.chatUserSites, "[]")
+    }
+
+    // One odd entry drops the whole setting, counted once.
+    function test_planUserSitesStrict_data() {
+        var extra = function (key, value) {
+            var entry = Object.assign({}, mistral)
+            entry[key] = value
+            return sitesText([entry])
+        }
+        return [
+            {tag: "local key", value: extra("local", true)},
+            {tag: "local_kind key", value: extra("local_kind", "loopback")},
+            {tag: "site_hosts key", value: extra("site_hosts", ["evil.example"])},
+            {tag: "auth_hosts key", value: extra("auth_hosts", ["evil.example"])},
+            {tag: "icon key", value: extra("icon", "x.svg")},
+            {tag: "missing url", value: sitesText([{id: mistral.id, name: mistral.name}])},
+            {tag: "bad id", value: sitesText([site("user-3FA9C01B", "A", "https://a.example/")])},
+            {tag: "built-in id", value: sitesText([site("claude", "A", "https://a.example/")])},
+            {tag: "duplicate id", value: sitesText([mistral, site(mistral.id, "Other", "https://o.example/")])},
+            {tag: "name taken by another", value: sitesText([mistral, site("user-00000002", "le chat", "https://o.example/")])},
+            {tag: "built-in name", value: sitesText([site("user-00000002", "CLAUDE", "https://o.example/")])},
+            {tag: "Ollama name", value: sitesText([site("user-00000002", "ollama", "https://o.example/")])},
+            {tag: "untrimmed name", value: sitesText([site("user-00000002", " A", "https://o.example/")])},
+            {tag: "bidi name", value: sitesText([site("user-00000002", "A\u202eB", "https://o.example/")])},
+            {tag: "markup name", value: sitesText([site("user-00000002", "<b>A</b>", "https://o.example/")])},
+            {tag: "http", value: sitesText([site("user-00000002", "A", "http://a.example/")])},
+            {tag: "loopback", value: sitesText([site("user-00000002", "A", "https://localhost/")])},
+            {tag: "ip literal", value: sitesText([site("user-00000002", "A", "https://8.8.8.8/")])},
+            {tag: "not a list", value: JSON.stringify(mistral)},
+            {tag: "not JSON", value: "[{"},
+            {tag: "not text", value: 7}
+        ]
+    }
+
+    function test_planUserSitesStrict(data) {
+        var result = plan({chatUserSites: data.value, popupSize: "large"})
+        verify(result.settings.chatUserSites === undefined, data.tag)
+        compare(result.applied, 1)
+        compare(result.dropped, 1)
+    }
+
+    function manySites(count) {
+        var list = []
+        for (var index = 0; index < count; index++) {
+            var hex = ("0000000" + index.toString(16)).slice(-8)
+            list.push(site("user-" + hex, "Site " + index, "https://s" + index + ".example.org/"))
+        }
+        return list
+    }
+
+    function test_planUserSitesCaps() {
+        var full = sitesText(manySites(200))
+        compare(plan({chatUserSites: full}).settings.chatUserSites, full)
+        compare(plan({chatUserSites: sitesText(manySites(201))}).dropped, 1)
+        // Past the char cap: dropped, whatever it holds.
+        var long = sitesText([site("user-00000001", "A", "https://a.example/?" + new Array(2030).join("x"))])
+        compare(plan({chatUserSites: long}).settings.chatUserSites, long)
+        compare(plan({chatUserSites: long + new Array(ChatSites.MAX_USER_SITES_CHARS).join(" ")}).dropped, 1)
+    }
+
+    // 200 added ids fit chatSites and chatSiteOrder (4096 characters).
+    function test_planTwoHundredAddedIdsFit() {
+        var list = manySites(200)
+        var ids = ChatSites.siteIds().concat(list.map(function (entry) { return entry.id }), ["ollama"])
+        var text = JSON.stringify(ids)
+        verify(text.length <= SettingsBackup.MAX_STRING_CHARS, text.length)
+        var result = plan({chatUserSites: sitesText(list), chatSites: text, chatSiteOrder: text})
+        compare(result.settings.chatSites, text)
+        compare(result.settings.chatSiteOrder, text)
+        compare(result.dropped, 0)
+    }
+
+    function test_planSiteOrder() {
+        compare(plan({chatSiteOrder: ""}).settings.chatSiteOrder, "")
+        compare(plan({chatSiteOrder: "[\"ollama\",\"grok\"]"}).settings.chatSiteOrder, "[\"ollama\",\"grok\"]")
+        compare(plan({chatSiteOrder: "[\"grok\",\"grok\"]"}).dropped, 1, "an id twice")
+        compare(plan({chatSiteOrder: "[\"grok\",\"devin\"]"}).dropped, 1, "unknown id")
+        compare(plan({chatSiteOrder: "{}"}).dropped, 1, "not a list")
+        compare(plan({chatSiteOrder: 3}).dropped, 1, "not text")
+    }
+
+    // The four keys that may name an added id: only one the same import's
+    // chatUserSites keeps.
+    function test_planCrossKey_data() {
+        return [
+            {tag: "chatSites", key: "chatSites", known: "[\"claude\",\"user-3fa9c01b\"]",
+             unknown: "[\"claude\",\"user-00000009\"]"},
+            {tag: "chatSiteOrder", key: "chatSiteOrder", known: "[\"user-3fa9c01b\",\"claude\"]",
+             unknown: "[\"user-00000009\",\"claude\"]"},
+            {tag: "chatDefaultSite", key: "chatDefaultSite", known: "user-3fa9c01b", unknown: "user-00000009"},
+            {tag: "middleClickOpens", key: "middleClickOpens", known: "user-3fa9c01b", unknown: "user-00000009"}
+        ]
+    }
+
+    function test_planCrossKey(data) {
+        var users = sitesText([mistral])
+        var settings = {chatUserSites: users}
+        settings[data.key] = data.known
+        var kept = plan(settings)
+        compare(kept.settings[data.key], data.known)
+        compare(kept.dropped, 0)
+        settings[data.key] = data.unknown
+        var dropped = plan(settings)
+        verify(dropped.settings[data.key] === undefined)
+        compare(dropped.settings.chatUserSites, users)
+        compare(dropped.dropped, 1)
+        // No chatUserSites (or a dropped one): no added id at all.
+        var alone = {}
+        alone[data.key] = data.known
+        compare(plan(alone).dropped, 1)
+        var broken = {chatUserSites: sitesText([Object.assign({local: true}, mistral)])}
+        broken[data.key] = data.known
+        compare(plan(broken).dropped, 2)
+        compare(plan(broken).applied, 0)
+        // The page's own added sites never count.
+        var tools = testCase.tools()
+        tools.userSiteIds = function () { return [] }
+        compare(SettingsBackup.importPlan(settings, 0, tools).dropped, 1)
+    }
+
+    function test_planWithoutUserSiteToolsDropsThem() {
+        var result = SettingsBackup.importPlan({chatUserSites: sitesText([mistral])}, 0, {
+            providers: Catalog.providers, webSiteIds: ChatSites.siteIds(), ringPairs: [],
+            validateCustomUrl: ChatSites.validateCustomUrl, ollamaAddress: OllamaChat.checkedAddress
+        })
+        compare(result.dropped, 1)
+        compare(result.applied, 0)
     }
 
     function test_planCanonicalizes() {
@@ -317,7 +488,9 @@ TestCase {
             webSiteIds: ChatSites.siteIds(),
             parseCustomUrls: ChatSites.parseCustomUrls,
             effectiveUrl: ChatSites.homeUrl,
-            shownText: UsageLogic.shownText
+            shownText: UsageLogic.shownText,
+            parseUserSites: ChatSites.parseUserSites,
+            hostOf: function (url) { return ChatSites.shortHost(ChatSites.displayHost(url)) }
         }
     }
 
@@ -370,6 +543,30 @@ TestCase {
         compare(changes({chatCustomUrls: "{", chatOllamaUrl: 3}, {chatCustomUrls: "{}"}), [])
         compare(changes({}, {chatOllamaUrl: "http://[::1]:11434"}),
                 [{id: "ollama", from: "", to: "http://[::1]:11434"}])
+    }
+
+    // Added sites: adds with their host, address changes by id, then
+    // removes (applying deletes their data); before Ollama.
+    function test_addressChangesListAddedSites() {
+        var moved = site(deepseek.id, "DeepSeek", "https://www.deepseek.com/chat")
+        var fresh = site("user-0000beef", "Pi", "https://pi.ai/talk")
+        var result = changes({chatCustomUrls: "{}", chatOllamaUrl: "http://127.0.0.1:11434",
+                              chatUserSites: sitesText([mistral, deepseek])},
+                             {chatUserSites: sitesText([moved, fresh]), chatOllamaUrl: "http://[::1]:11434"})
+        compare(result, [
+            {id: deepseek.id, name: "DeepSeek", from: "https://chat.deepseek.com/", to: "https://www.deepseek.com/chat"},
+            {kind: "add", id: fresh.id, name: "Pi", host: "pi.ai"},
+            {kind: "remove", id: mistral.id, name: "Le Chat"},
+            {id: "ollama", from: "http://127.0.0.1:11434", to: "http://[::1]:11434"}
+        ])
+        // The same list (any key order): nothing.
+        compare(changes({chatUserSites: sitesText([mistral])},
+                        {chatUserSites: "[{\"url\":\"https://chat.mistral.ai/chat\",\"id\":\"user-3fa9c01b\",\"name\":\"Le Chat\"}]"}), [])
+        // A dropped list is not applied, so not listed.
+        compare(changes({chatUserSites: sitesText([mistral])},
+                        {chatUserSites: sitesText([Object.assign({icon: "x"}, deepseek)])}), [])
+        // No list in the backup: the added sites stay.
+        compare(changes({chatUserSites: sitesText([mistral])}, {popupSize: "large"}), [])
     }
 
     function test_maxShownChanges() {

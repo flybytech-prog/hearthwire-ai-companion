@@ -51,6 +51,11 @@ KCM.SimpleKCM {
     property int cfg_chatProfileLayoutDefault: 0
     property string cfg_chatPendingSiteClears: ""
     property string cfg_chatPendingSiteClearsDefault: ""
+    // Written only on Settings → Chat and by a backup Replace (applyBackup).
+    property string cfg_chatUserSites: "[]"
+    property string cfg_chatUserSitesDefault: "[]"
+    property string cfg_chatSiteOrder: ""
+    property string cfg_chatSiteOrderDefault: ""
     property int cfg_chatAutoLockMinutes: 0
     property int cfg_chatAutoLockMinutesDefault: 0
     property string cfg_chatVaultUnlock: "passphrase"
@@ -127,15 +132,26 @@ KCM.SimpleKCM {
         { value: "ollama", text: i18n("Ollama message box") },
         { value: "usage", text: i18n("Usage") }
     ]
-    // Refresh, the Usage tab, Ollama or a web site, enabled or not: a site
-    // that is off acts as a normal click (SettingsLogic.middleClickPlan).
+    // The added sites this page holds (a backup Replace may change them).
+    readonly property var userSites: ChatSites.parseUserSites(page.cfg_chatUserSites).sites
+    // Refresh, the Usage tab, Ollama or a web site (in the Settings → Chat
+    // order), enabled or not: a site that is off acts as a normal click
+    // (SettingsLogic.middleClickPlan).
     readonly property var middleClickChoices: [
-        { value: "refresh", text: i18n("Refresh usage") },
-        { value: "usage", text: i18n("Usage") },
-        { value: "ollama", text: i18n("Ollama message box") }
-    ].concat(ChatSites.sites.map(function (site) {
-        return { value: site.id, text: site.name }
+        { value: "refresh", text: i18n("Refresh usage"), icon: "", user: false },
+        { value: "usage", text: i18n("Usage"), icon: "", user: false },
+        { value: "ollama", text: i18n("Ollama message box"), icon: "", user: false }
+    ].concat(ChatSites.orderedSites(page.userSites, page.cfg_chatSiteOrder).filter(function (site) {
+        return site.id !== OllamaChat.ENTRY.id
+    }).map(function (site) {
+        return { value: site.id, text: site.name, icon: site.icon, user: site.user === true }
     }))
+    // Added sites the applied settings have and this page no longer does (a
+    // backup Replace): applying signs them out and deletes their site data.
+    readonly property var removedUserSiteIds: ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)
+        .sites.map(function (site) { return site.id }).filter(function (id) {
+            return page.userSites.every(function (site) { return site.id !== id })
+        })
     readonly property var alertChoices: SettingsLogic.ALERT_PERCENTS.map(function (percent) {
         return { value: percent, text: i18n("%1%", percent) }
     })
@@ -443,7 +459,13 @@ KCM.SimpleKCM {
             webSiteIds: ChatSites.siteIds(),
             ringPairs: UsageLogic.ringOptions(Catalog.providers).map(function (option) { return option.value }),
             validateCustomUrl: ChatSites.validateCustomUrl,
-            ollamaAddress: OllamaChat.checkedAddress
+            ollamaAddress: OllamaChat.checkedAddress,
+            // Only the import's own chatUserSites names added ids.
+            userSiteIds: function (text) {
+                return ChatSites.parseUserSites(text).sites.map(function (site) { return site.id })
+            },
+            validateUserSite: ChatSites.validateUserSite,
+            serializeUserSites: ChatSites.serializeUserSites
         })
         page.backupDropped = plan.dropped
         if (plan.applied === 0) {
@@ -452,11 +474,14 @@ KCM.SimpleKCM {
         }
         page.backupPlan = plan
         page.backupAddressChanges = SettingsBackup.addressChanges(
-            {chatCustomUrls: page.cfg_chatCustomUrls, chatOllamaUrl: page.cfg_chatOllamaUrl}, plan, {
+            {chatCustomUrls: page.cfg_chatCustomUrls, chatOllamaUrl: page.cfg_chatOllamaUrl,
+             chatUserSites: page.cfg_chatUserSites}, plan, {
                 webSiteIds: ChatSites.siteIds(),
                 parseCustomUrls: ChatSites.parseCustomUrls,
                 effectiveUrl: ChatSites.homeUrl,
-                shownText: UsageLogic.shownText
+                shownText: UsageLogic.shownText,
+                parseUserSites: ChatSites.parseUserSites,
+                hostOf: function (url) { return ChatSites.shortHost(ChatSites.displayHost(url)) }
             })
         page.backupExportedAt = reply.exportedAt
         page.confirmingImport = true
@@ -470,8 +495,17 @@ KCM.SimpleKCM {
             return ""
         var lines = [i18np("This changes %1 chat address:", "This changes %1 chat addresses:", list.length)]
         list.slice(0, SettingsBackup.MAX_SHOWN_CHANGES).forEach(function (change) {
+            if (change.kind === "add") {
+                lines.push(i18nc("an added chat site: name, host", "Adds %1 (%2)", change.name, change.host))
+                return
+            }
+            if (change.kind === "remove") {
+                lines.push(i18nc("a removed chat site: name", "Removes %1 and deletes its site data when you apply",
+                                 change.name))
+                return
+            }
             var site = change.id === SettingsBackup.OLLAMA_ID ? null : ChatSites.byId(change.id)
-            var name = site ? site.name : i18n("Ollama")
+            var name = typeof change.name === "string" ? change.name : site ? site.name : i18n("Ollama")
             lines.push(i18nc("a chat address: site, old address, new address", "%1: %2 → %3",
                              name, change.from, change.to))
         })
@@ -518,6 +552,8 @@ KCM.SimpleKCM {
         if (values.panelRing !== undefined) page.cfg_panelRing = values.panelRing
         if (values.middleClickOpens !== undefined) page.cfg_middleClickOpens = values.middleClickOpens
         if (values.chatCustomUrls !== undefined) page.cfg_chatCustomUrls = values.chatCustomUrls
+        if (values.chatUserSites !== undefined) page.cfg_chatUserSites = values.chatUserSites
+        if (values.chatSiteOrder !== undefined) page.cfg_chatSiteOrder = values.chatSiteOrder
         page.backupMessage = "applied"
     }
 
@@ -840,8 +876,39 @@ KCM.SimpleKCM {
                 valueRole: "value"
                 model: page.middleClickChoices
                 currentIndex: page.choiceIndex(page.middleClickChoices,
-                    SettingsLogic.normalizeMiddleClick(page.cfg_middleClickOpens, ChatSites.siteIds()), 0)
+                    SettingsLogic.normalizeMiddleClick(page.cfg_middleClickOpens, ChatSites.siteIds(page.userSites)), 0)
                 onActivated: page.cfg_middleClickOpens = currentValue
+                delegate: QQC2.ItemDelegate {
+                    id: middleDelegate
+                    required property var modelData
+                    required property int index
+                    width: ListView.view ? ListView.view.width : implicitWidth
+                    highlighted: ListView.isCurrentItem
+                    contentItem: RowLayout {
+                        spacing: Kirigami.Units.smallSpacing
+                        Kirigami.Icon {
+                            visible: middleDelegate.modelData.icon !== ""
+                            source: middleDelegate.modelData.icon !== ""
+                                ? Qt.resolvedUrl("../images/" + middleDelegate.modelData.icon) : ""
+                            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                            isMask: true
+                            color: Kirigami.Theme.textColor
+                        }
+                        // An added site: the first letter of its name.
+                        LetterBadge {
+                            visible: middleDelegate.modelData.user === true
+                            name: middleDelegate.modelData.user === true ? middleDelegate.modelData.text : ""
+                            size: Kirigami.Units.iconSizes.small
+                        }
+                        QQC2.Label {
+                            Layout.fillWidth: true
+                            textFormat: Text.PlainText
+                            text: middleDelegate.modelData.text
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
             }
             Kirigami.ContextualHelpButton {
                 toolTipText: i18n("A mouse action; the keyboard shortcut is in the Keyboard Shortcuts tab. A tab or site closes the popup if it is already showing it. While that tab is hidden or that site is off, the middle-click acts as a normal click.")
@@ -1422,6 +1489,20 @@ KCM.SimpleKCM {
             wrapMode: Text.WordWrap
             textFormat: Text.PlainText
             text: i18n("Settings left out: %1", page.backupDropped)
+            Layout.preferredWidth: page.wrappedTextWidth
+        }
+
+        // A loaded backup drops added sites: said until Apply or Cancel.
+        QQC2.Label {
+            objectName: "removalWarning"
+            Layout.fillWidth: true
+            visible: page.removedUserSiteIds.length > 0
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            color: Kirigami.Theme.negativeTextColor
+            text: i18np("When you apply, %1 removed site is signed out and its site data is deleted.",
+                        "When you apply, %1 removed sites are signed out and their site data is deleted.",
+                        page.removedUserSiteIds.length)
             Layout.preferredWidth: page.wrappedTextWidth
         }
     }

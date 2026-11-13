@@ -3,6 +3,12 @@
 // Chat tab websites. Kept here only; the usage catalog (ProviderCatalog.js)
 // is unrelated. Hosts match exactly or as a dot-suffix, case-insensitively;
 // a user's custom address adds only its exact host.
+//
+// Sites the user added (Settings → Chat, chatUserSites) are passed in as
+// userSites, a list of {id, name, url}; nothing here stores them. Without
+// userSites an added id is unknown, so it resolves to nothing and is
+// blocked. Their hosts and class are derived from the address on every
+// call, never read from the stored entry.
 var sites = [
     {
         id: "claude",
@@ -80,16 +86,36 @@ var sites = [
 
 var MAX_CUSTOM_URL_LENGTH = 2048
 
-function siteIds() {
-    return sites.map(function (site) { return site.id })
+// The built-in Ollama chat's entry, the same as OllamaChat.ENTRY (a test
+// keeps them equal); this file stays a library without imports.
+var OLLAMA_ENTRY = Object.freeze({
+    id: "ollama",
+    name: "Ollama",
+    icon: "provider-local.svg",
+    native: true,
+    default_on: false
+})
+
+// Added sites: at most this many (plus the 7 built-ins: ChatStorage's
+// MAX_SITE_IDS), this long as stored (UTF-16 units), names this long.
+var MAX_USER_SITES = 200
+var MAX_USER_SITES_CHARS = 458752
+var MAX_USER_SITE_NAME = 40
+
+// The built-in web sites, then the valid added ones in their own order.
+function siteIds(userSites) {
+    return sites.map(function (site) { return site.id }).concat(
+        validUserSites(userSites).map(function (site) { return site.id }))
 }
 
-function byId(siteId) {
+// A built-in site as in the catalog, an added one as effectiveSite builds
+// it; null when unknown.
+function byId(siteId, userSites) {
     for (var index = 0; index < sites.length; index++) {
         if (sites[index].id === siteId)
             return sites[index]
     }
-    return null
+    return isUserSiteId(siteId) ? userSite(siteId, userSites) : null
 }
 
 // Sites that are on unless the user turns them off.
@@ -98,9 +124,10 @@ function defaultSiteIds() {
         .map(function (site) { return site.id })
 }
 
-// Sites enabled by the chatSites config JSON, always in catalog order.
-// Unreadable config falls back to the default-on sites only.
-function enabledSites(json) {
+// Web sites enabled by the chatSites config JSON, in the chatSiteOrder
+// order (orderedSites). Unreadable config falls back to the default-on
+// built-in sites only.
+function enabledSites(json, userSites, orderText) {
     var wanted = null
     try {
         var parsed = JSON.parse(json || "")
@@ -110,7 +137,9 @@ function enabledSites(json) {
     }
     if (wanted === null)
         wanted = defaultSiteIds()
-    return sites.filter(function (site) { return wanted.indexOf(site.id) >= 0 })
+    return orderedSites(userSites, orderText).filter(function (site) {
+        return site.id !== OLLAMA_ENTRY.id && wanted.indexOf(site.id) >= 0
+    })
 }
 
 function initialSite(enabledIds, configuredDefault) {
@@ -357,7 +386,10 @@ function serializeCustomUrls(map) {
 
 // The site with the user's custom address applied, or null when unknown.
 // The address is re-validated on every call; invalid falls back to built-in.
-function effectiveSite(siteId, customUrls) {
+// An added site (userSites) is rebuilt from its name and address alone.
+function effectiveSite(siteId, customUrls, userSites) {
+    if (isUserSiteId(siteId))
+        return userSite(siteId, userSites)
     var site = byId(siteId)
     if (!site)
         return null
@@ -385,8 +417,8 @@ function effectiveSite(siteId, customUrls) {
     }
 }
 
-function homeUrl(siteId, customUrls) {
-    var site = effectiveSite(siteId, customUrls)
+function homeUrl(siteId, customUrls, userSites) {
+    var site = effectiveSite(siteId, customUrls, userSites)
     return site ? site.url : ""
 }
 
@@ -418,13 +450,14 @@ function isPageUrl(site, url) {
 
 // "allow" | "external" | "block" for a WebEngine navigation request.
 // request.customUrls is optional; without it the built-in addresses apply.
+// request.userSites: the added sites (see the top of this file).
 function classifyNavigation(request) {
     var info = request || {}
     // Only an explicit subframe gets the looser rules; missing info is
     // treated as the main frame.
     if (info.isMainFrame === false)
         return classifySubframe(info)
-    var site = effectiveSite(info.siteId, info.customUrls)
+    var site = effectiveSite(info.siteId, info.customUrls, info.userSites)
     if (!site)
         return "block"
     if (isAboutBlank(info.url))
@@ -433,6 +466,8 @@ function classifyNavigation(request) {
     if (parsed === null)
         return "block"
     if (parsed.host !== "" && !site.local && isLocalAddress(parsed.host))
+        return "block"
+    if (site.user === true && parsed.host !== "" && isPrivateLiteral(parsed.host))
         return "block"
     if (parsed.scheme === "https") {
         if (info.linkClicked && !knownHost(site, parsed.host))
@@ -444,6 +479,340 @@ function classifyNavigation(request) {
     return "block"
 }
 
+// --- Added sites (Settings → Chat) --------------------------------------------
+
+// Names an added site may not take, in any case: the built-ins and Ollama.
+var USER_SITE_KEYS = ["id", "name", "url"]
+var NAME_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/
+var LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?:[^\ud800-\udbff]|^)[\udc00-\udfff]/
+// Markup, and invisible or bidi formatting that could spoof the table or a
+// prompt (M3).
+var NAME_FORBIDDEN = /[<>&\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/
+var URL_CHARS = /[^\x21-\x7e]|["\\<>`{}|^]/
+
+function isUserSiteId(id) {
+    return typeof id === "string" && /^user-[0-9a-f]{8}$/.test(id)
+}
+
+// A new added-site id: user- and 8 hex digits from random (a () => [0,1)
+// function, Math.random in the page), never one in excluded (the page's
+// ids, those it opened with and those still owing a delete). "" when no
+// free one turned up.
+function newUserSiteId(excluded, random) {
+    var taken = Array.isArray(excluded) ? excluded : []
+    var next = typeof random === "function" ? random : Math.random
+    for (var attempt = 0; attempt < 1000; attempt++) {
+        var id = "user-"
+        for (var digit = 0; digit < 8; digit++) {
+            var value = Math.floor(Number(next()) * 16)
+            id += (isFinite(value) && value >= 0 && value < 16 ? value : 0).toString(16)
+        }
+        if (taken.indexOf(id) < 0)
+            return id
+    }
+    return ""
+}
+
+function nameOf(other) {
+    if (typeof other === "string")
+        return other
+    return other !== null && typeof other === "object" && typeof other.name === "string" ? other.name : ""
+}
+
+// "" when name may be stored, else name-empty, name-too-long, name-chars or
+// name-taken (first failure wins). The name is checked as stored: leading
+// or trailing whitespace is name-chars (the editor trims). others: the
+// other added sites (or their names).
+function userSiteNameError(name, others) {
+    if (typeof name !== "string" || name.trim() === "")
+        return "name-empty"
+    if (name.length > MAX_USER_SITE_NAME)
+        return "name-too-long"
+    if (name.trim() !== name || NAME_CONTROLS.test(name) || LONE_SURROGATE.test(name)
+            || NAME_FORBIDDEN.test(name))
+        return "name-chars"
+    var lowered = name.toLowerCase()
+    var taken = sites.map(function (site) { return site.name }).concat([OLLAMA_ENTRY.name])
+    if (Array.isArray(others))
+        taken = taken.concat(others.map(nameOf))
+    for (var index = 0; index < taken.length; index++) {
+        if (taken[index] !== "" && taken[index].toLowerCase() === lowered)
+            return "name-taken"
+    }
+    return ""
+}
+
+// "" for an address an added site may have (https to a public DNS name in
+// 005), else its code; checked in this order, first failure wins.
+function userSiteUrlError(url) {
+    if (typeof url !== "string" || url === "")
+        return "url-empty"
+    if (url.length > MAX_CUSTOM_URL_LENGTH)
+        return "too-long"
+    if (/[\s\u0000-\u001f\u007f]/.test(url))
+        return "whitespace"
+    if (URL_CHARS.test(url))
+        return "url-chars"
+    var authorityMatch = /^[A-Za-z][A-Za-z0-9+.\-]*:\/\/([^\/?#]*)/.exec(url)
+    if (authorityMatch && authorityMatch[1].indexOf("@") >= 0)
+        return "userinfo"
+    var schemeMatch = /^([A-Za-z][A-Za-z0-9+.\-]*):/.exec(url)
+    if (!schemeMatch)
+        return "malformed"
+    var scheme = schemeMatch[1].toLowerCase()
+    if (scheme === "http")
+        return "http-not-allowed"
+    if (scheme !== "https")
+        return "scheme"
+    var parsed = parseUrl(url)
+    if (parsed === null || parsed.host === "")
+        return "malformed"
+    if (isLocalAddress(parsed.host))
+        return "loopback-not-allowed"
+    var labels = normalizeHost(parsed.host).split(".")
+    if (/^(0x[0-9a-f]*|[0-9]+)$/.test(labels[labels.length - 1]))
+        return "ip-literal"
+    return ""
+}
+
+// The only place that classifies an added site's address: "public" or ""
+// in 005 (006 adds loopback and private).
+function addressClass(url) {
+    return userSiteUrlError(url) === "" ? "public" : ""
+}
+
+// An IPv4 literal (any form) in 10/8, 172.16/12, 192.168/16, 169.254/16 or
+// 0/8. Added sites never reach one; isLocalAddress covers loopback.
+function isPrivateLiteral(host) {
+    var normalized = normalizeHost(host)
+    var labels = normalized.split(".")
+    if (!/^(0x[0-9a-f]*|[0-9]+)$/.test(labels[labels.length - 1]))
+        return false
+    var value = ipv4Value(normalized)
+    if (value < 0)
+        return true
+    var first = Math.floor(value / 16777216)
+    var second = Math.floor(value / 65536) % 256
+    return first === 10 || first === 0 || (first === 172 && second >= 16 && second <= 31)
+        || (first === 192 && second === 168) || (first === 169 && second === 254)
+}
+
+// {ok, error} for one stored entry: exactly id, name and url, an id not in
+// others, a valid name and address. others: the other added sites.
+function validateUserSite(entry, others) {
+    var fail = function (code) { return { ok: false, error: code } }
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry))
+        return fail("entry")
+    var keys = Object.keys(entry)
+    if (keys.length !== USER_SITE_KEYS.length || !USER_SITE_KEYS.every(function (key) {
+        return keys.indexOf(key) >= 0
+    }))
+        return fail("entry")
+    if (!isUserSiteId(entry.id))
+        return fail("id")
+    var list = Array.isArray(others) ? others : []
+    for (var index = 0; index < list.length; index++) {
+        if (list[index] && list[index].id === entry.id)
+            return fail("id-taken")
+    }
+    var nameError = userSiteNameError(entry.name, list)
+    if (nameError !== "")
+        return fail(nameError)
+    var urlError = userSiteUrlError(entry.url)
+    if (urlError !== "")
+        return fail(urlError)
+    return { ok: true, error: "" }
+}
+
+// chatUserSites as {ok, sites}: sites are the valid entries in order (at
+// most MAX_USER_SITES, as {id, name, url}); ok only when the text is a JSON
+// array within MAX_USER_SITES_CHARS and every entry is valid and unique.
+// Only an ok read may ever remove or delete anything.
+function parseUserSites(text) {
+    var result = { ok: false, sites: [] }
+    if (typeof text !== "string" || text.length > MAX_USER_SITES_CHARS)
+        return result
+    var parsed = null
+    try {
+        parsed = JSON.parse(text)
+    } catch (error) {
+        return result
+    }
+    if (!Array.isArray(parsed))
+        return result
+    var ok = parsed.length <= MAX_USER_SITES
+    for (var index = 0; index < parsed.length; index++) {
+        if (result.sites.length >= MAX_USER_SITES)
+            break
+        var entry = parsed[index]
+        if (!validateUserSite(entry, result.sites).ok) {
+            ok = false
+            continue
+        }
+        result.sites.push({ id: entry.id, name: entry.name, url: entry.url })
+    }
+    result.ok = ok
+    return result
+}
+
+// The text to store for the list, keys in id, name, url order; "" (don't
+// write) when any entry is invalid or a cap is passed.
+function serializeUserSites(list) {
+    if (!Array.isArray(list) || list.length > MAX_USER_SITES)
+        return ""
+    var clean = []
+    for (var index = 0; index < list.length; index++) {
+        if (!validateUserSite(list[index], clean).ok)
+            return ""
+        clean.push({ id: list[index].id, name: list[index].name, url: list[index].url })
+    }
+    var text = JSON.stringify(clean)
+    return text.length > MAX_USER_SITES_CHARS ? "" : text
+}
+
+// The valid entries of a userSites list as {id, name, url}, in order; an id
+// or name (any case) seen before is left out, as are entries past
+// MAX_USER_SITES. Anything that isn't a list is none.
+function validUserSites(userSites) {
+    var list = userSites !== null && typeof userSites === "object" && typeof userSites.length === "number"
+        ? userSites : []
+    var valid = []
+    var ids = Object.create(null)
+    var names = Object.create(null)
+    for (var index = 0; index < list.length && valid.length < MAX_USER_SITES; index++) {
+        var entry = list[index]
+        if (!validateUserSite(entry, []).ok)
+            continue
+        var lowered = entry.name.toLowerCase()
+        if (ids[entry.id] === true || names[lowered] === true)
+            continue
+        ids[entry.id] = true
+        names[lowered] = true
+        valid.push({ id: entry.id, name: entry.name, url: entry.url })
+    }
+    return valid
+}
+
+// The site object of a valid entry. Only name and url come from it; the
+// hosts and class are built here, never read from the stored entry.
+function userSiteFrom(entry) {
+    return {
+        id: entry.id,
+        name: entry.name,
+        url: entry.url,
+        icon: "",
+        user: true,
+        site_hosts: [],
+        auth_hosts: [],
+        exact_hosts: [normalizeHost(parseUrl(entry.url).host)],
+        local: false,
+        local_kind: addressClass(entry.url),
+        default_on: true,
+        http_origin: ""
+    }
+}
+
+// The site object of an added id, or null.
+function userSite(siteId, userSites) {
+    var valid = validUserSites(userSites)
+    for (var index = 0; index < valid.length; index++) {
+        if (valid[index].id === siteId)
+            return userSiteFrom(valid[index])
+    }
+    return null
+}
+
+// --- Site order (chatSiteOrder) ---------------------------------------------
+
+// The default order: built-ins, the added sites in their own order, Ollama.
+function defaultOrder(userSites) {
+    return siteIds(userSites).concat([OLLAMA_ENTRY.id])
+}
+
+// The stored order as a list of ids, or null for "" and for anything
+// damaged (not a JSON array of strings, or an id twice).
+function parseSiteOrder(orderText) {
+    if (typeof orderText !== "string" || orderText === "" || orderText.length > 65536)
+        return null
+    var parsed = null
+    try {
+        parsed = JSON.parse(orderText)
+    } catch (error) {
+        return null
+    }
+    if (!Array.isArray(parsed))
+        return null
+    for (var index = 0; index < parsed.length; index++) {
+        if (typeof parsed[index] !== "string" || parsed.indexOf(parsed[index]) !== index)
+            return null
+    }
+    return parsed
+}
+
+// Every web site (built-in and added) and the Ollama entry, each once, in
+// the stored order: unknown ids dropped, missing ones appended in default
+// order, a missing Ollama always last. A damaged order counts as "".
+function orderedSites(userSites, orderText) {
+    var valid = validUserSites(userSites)
+    var known = defaultOrder(valid)
+    var stored = parseSiteOrder(orderText) || []
+    var ids = stored.filter(function (id) { return known.indexOf(id) >= 0 })
+    known.forEach(function (id) {
+        if (id !== OLLAMA_ENTRY.id && ids.indexOf(id) < 0)
+            ids.push(id)
+    })
+    if (ids.indexOf(OLLAMA_ENTRY.id) < 0)
+        ids.push(OLLAMA_ENTRY.id)
+    return ids.map(function (id) {
+        if (id === OLLAMA_ENTRY.id)
+            return OLLAMA_ENTRY
+        for (var index = 0; index < valid.length; index++) {
+            if (valid[index].id === id)
+                return userSiteFrom(valid[index])
+        }
+        return byId(id)
+    })
+}
+
+// The text to store for an order: "" when it is the default order (so the
+// default stays "" in backups and diffs), else the full list.
+function serializeSiteOrder(ids, userSites) {
+    var valid = validUserSites(userSites)
+    var order = orderedSites(valid, JSON.stringify(Array.isArray(ids) ? ids : []))
+        .map(function (site) { return site.id })
+    return order.join(",") === defaultOrder(valid).join(",") ? "" : JSON.stringify(order)
+}
+
+// ids with id moved delta places (clamped); a copy, unchanged when id is
+// not in it.
+function moveInOrder(ids, id, delta) {
+    var list = Array.isArray(ids) ? ids.slice() : []
+    var from = list.indexOf(id)
+    var step = Number(delta)
+    if (from < 0 || !isFinite(step) || Math.floor(step) !== step)
+        return list
+    var to = Math.max(0, Math.min(list.length - 1, from + step))
+    list.splice(from, 1)
+    list.splice(to, 0, id)
+    return list
+}
+
+// The letter an added site's badge shows: the first code point of the
+// trimmed name, upper-cased; "?" when there is none.
+function badgeLetter(name) {
+    var text = typeof name === "string" ? name.trim() : ""
+    if (text === "")
+        return "?"
+    var first = text.charAt(0)
+    var code = text.charCodeAt(0)
+    if (code >= 0xd800 && code <= 0xdbff && text.length > 1) {
+        var low = text.charCodeAt(1)
+        if (low >= 0xdc00 && low <= 0xdfff)
+            first = text.slice(0, 2)
+    }
+    return first.toUpperCase()
+}
+
 // --- Local web UI owner check -------------------------------------------------
 
 // The port whose owner the helper must vouch for (self or system) before
@@ -452,7 +821,7 @@ function classifyNavigation(request) {
 // about:blank, unreadable addresses; those are blocked by classifyNavigation).
 function localOwnerPort(request) {
     var info = request || {}
-    var site = effectiveSite(info.siteId, info.customUrls)
+    var site = effectiveSite(info.siteId, info.customUrls, info.userSites)
     if (!site || site.local !== true)
         return 0
     var parsed = parseUrl(info.url)
@@ -613,7 +982,7 @@ function shortHost(host) {
 // host is shortHost(displayHost(url)), "" when unreadable (still off).
 function offSiteHost(request) {
     var info = request || {}
-    var site = effectiveSite(info.siteId, info.customUrls)
+    var site = effectiveSite(info.siteId, info.customUrls, info.userSites)
     var url = info.url === undefined || info.url === null ? "" : String(info.url)
     if (!site || !/^https?:/i.test(url))
         return { off: false, host: "" }
@@ -642,14 +1011,21 @@ function overlayHost(request) {
 // host and about:, blob:, data: or srcdoc content, but never this computer
 // unless the site is Local, and Local frames get plain http only for the
 // exact origin of its address. Unreadable http(s) addresses are blocked.
-function classifySubframe(info) {
+// Added sites' frames never reach a private or link-local IPv4 literal
+// either; an added id without its entry gets no frame at all.
+function classifySubframe(request) {
+    var info = request || {}
+    if (isUserSiteId(info.siteId) && effectiveSite(info.siteId, info.customUrls, info.userSites) === null)
+        return "block"
     var url = info.url === undefined || info.url === null ? "" : String(info.url)
     var parsed = parseUrl(url)
     if (parsed === null)
         return /^https?:/i.test(url) ? "block" : "allow"
     if (parsed.scheme !== "http" && parsed.scheme !== "https")
         return "allow"
-    var site = effectiveSite(info.siteId, info.customUrls)
+    var site = effectiveSite(info.siteId, info.customUrls, info.userSites)
+    if (site !== null && site.user === true)
+        return isLocalAddress(parsed.host) || isPrivateLiteral(parsed.host) ? "block" : "allow"
     if (site === null || site.local !== true)
         return isLocalAddress(parsed.host) ? "block" : "allow"
     if (parsed.scheme === "http")
@@ -663,12 +1039,14 @@ function classifySubframe(info) {
 // blocked.
 function classifyNewWindow(request) {
     var info = request || {}
-    var site = effectiveSite(info.siteId, info.customUrls)
+    var site = effectiveSite(info.siteId, info.customUrls, info.userSites)
     if (!site)
         return "block"
     var url = info.url === undefined || info.url === null ? "" : String(info.url)
     var parsed = parseUrl(url)
     if (parsed !== null && parsed.host !== "" && !site.local && isLocalAddress(parsed.host))
+        return "block"
+    if (site.user === true && parsed !== null && parsed.host !== "" && isPrivateLiteral(parsed.host))
         return "block"
     var https = isHttpsUrl(url)
     var clicked = info.userInitiated === true

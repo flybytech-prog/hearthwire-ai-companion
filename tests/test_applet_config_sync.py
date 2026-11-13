@@ -77,6 +77,12 @@ def test_every_backup_default_passes_the_backup_rules():
      ""),                                                                       # a removed key
     ('<entry name="chatPendingSiteClears" type="String">\n            <default></default>\n        </entry>\n',
      ""),
+    ('<entry name="chatUserSites" type="String">\n            <default>[]</default>\n        </entry>\n',
+     ""),                                                                       # task 005
+    ('<entry name="chatUserSites" type="String">\n            <default>[]</default>',
+     '<entry name="chatUserSites" type="String">\n            <default></default>'),
+    ('<entry name="chatSiteOrder" type="String">\n            <default></default>',
+     '<entry name="chatSiteOrder" type="String">\n            <default>[]</default>'),
     ('<entry name="chatProfileLayout" type="Int">\n            <default>0</default>',
      '<entry name="chatProfileLayout" type="Int">\n            <default>1</default>'),
     ("    </group>", '        <entry name="newKey" type="String">\n            <default>x</default>\n'

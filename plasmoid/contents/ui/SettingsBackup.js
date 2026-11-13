@@ -14,7 +14,8 @@ var BACKUP_KEYS = [
     "alertLowEnabled", "alertResetEnabled", "alertLowPercent",
     "chatSites", "chatDefaultSite", "chatOllamaUrl", "chatKeepOpen",
     "showUsageTab", "showChatTab", "popupDefaultTab", "popupSize", "shortcutOpens",
-    "panelRing", "middleClickOpens", "chatCustomUrls"
+    "panelRing", "middleClickOpens", "chatCustomUrls",
+    "chatUserSites", "chatSiteOrder"
 ]
 // Sign-ins, the encrypted folder, zoom, first-run state and the history opt-in.
 var EXCLUDED_KEYS = [
@@ -33,12 +34,15 @@ var BAD_REPLY = "bad-reply"
 var MAX_STRING_CHARS = 4096
 var MAX_CUSTOM_URLS_CHARS = 32768
 var MAX_CUSTOM_URL_LENGTH = 2048
+// ChatSites.MAX_USER_SITES and MAX_USER_SITES_CHARS (the helper's too).
+var MAX_USER_SITES = 200
+var MAX_USER_SITES_CHARS = 458752
 // The same bound as ChatStorage.MAX_INT and the helper's --applet.
 var MAX_APPLET = 2147483648
 // The address changes an import confirmation lists one by one.
 var MAX_SHOWN_CHANGES = 8
-// The helper's file limit (64 KiB) and room for the reply's other fields.
-var MAX_REPLY_CHARS = 65536 + 1024
+// The helper's file limit (512 KiB) and room for the reply's other fields.
+var MAX_REPLY_CHARS = 524288 + 1024
 
 var REFRESH_INTERVALS = [60, 300, 900, 1800, 3600]
 var WARN_PERCENTS = [50, 55, 60, 65, 70, 75, 80, 85, 90]
@@ -205,10 +209,13 @@ function bool(value) {
 }
 
 // Every value checked, one key: the value to store, or null to drop it.
-function checkedValue(key, value, tools) {
+// added: the added-site ids the same import keeps (chatUserSites); chatSites,
+// chatSiteOrder, chatDefaultSite and middleClickOpens may name only those.
+function checkedValue(key, value, tools, added) {
     var providers = tools.providers
     var providerIds = providers.map(function (provider) { return provider.provider_id })
-    var chatIds = tools.webSiteIds.concat([OLLAMA_ID])
+    var addedIds = Array.isArray(added) ? added : []
+    var chatIds = tools.webSiteIds.concat([OLLAMA_ID], addedIds)
     switch (key) {
     case "trackedProviders":
         return jsonIdList(value, providerIds)
@@ -255,11 +262,36 @@ function checkedValue(key, value, tools) {
     case "panelRing":
         return value === "off" || value === "auto" || tools.ringPairs.indexOf(value) >= 0 ? value : null
     case "middleClickOpens":
-        return choice(value, ["refresh", "usage", OLLAMA_ID].concat(tools.webSiteIds))
+        return choice(value, ["refresh", "usage", OLLAMA_ID].concat(tools.webSiteIds, addedIds))
     case "chatCustomUrls":
         return customUrls(value, tools)
+    case "chatUserSites":
+        return userSites(value, tools)
+    case "chatSiteOrder":
+        return value === "" ? "" : jsonIdList(value, chatIds)
     }
     return null
+}
+
+// The added sites as the widget writes them (tools.serializeUserSites), by
+// its own rule (tools.validateUserSite): a list of exactly {id, name, url}
+// entries; one odd entry, a repeated id or name, more than MAX_USER_SITES
+// entries or more than MAX_USER_SITES_CHARS drops the whole setting, as the
+// helper does.
+function userSites(value, tools) {
+    if (typeof tools.validateUserSite !== "function" || typeof tools.serializeUserSites !== "function"
+            || typeof value !== "string" || value.length > MAX_USER_SITES_CHARS)
+        return null
+    var parsed = embedded(value, MAX_USER_SITES_CHARS)
+    if (!Array.isArray(parsed) || parsed.length > MAX_USER_SITES)
+        return null
+    for (var index = 0; index < parsed.length; index++) {
+        var checked = tools.validateUserSite(parsed[index], parsed.slice(0, index))
+        if (!checked || checked.ok !== true)
+            return null
+    }
+    var text = tools.serializeUserSites(parsed)
+    return typeof text === "string" && text !== "" ? text : null
 }
 
 // {siteId: url} as canonical JSON by the widget's own address rule; one odd
@@ -288,14 +320,21 @@ function customUrls(value, tools) {
 // What Replace would apply: {settings: {key: value}, applied, dropped}.
 // settings holds only BACKUP_KEYS that pass the widget's check; dropped adds
 // up what the helper dropped, what this check dropped and any other key.
-// tools: {providers, webSiteIds, ringPairs, validateCustomUrl, ollamaAddress}.
+// tools: {providers, webSiteIds, ringPairs, validateCustomUrl, ollamaAddress,
+// userSiteIds, validateUserSite, serializeUserSites}; userSiteIds(text)
+// gives the ids of a checked chatUserSites value. The added ids other keys
+// may name come only from this import's own chatUserSites, never the page.
 function importPlan(settings, helperDropped, tools) {
     var source = isObject(settings) ? settings : {}
     var plan = { settings: {}, applied: 0, dropped: isCount(helperDropped) ? helperDropped : 0 }
     var names = Object.keys(source)
+    var kept = has(source, "chatUserSites") ? checkedValue("chatUserSites", source.chatUserSites, tools) : null
+    var added = kept !== null && typeof tools.userSiteIds === "function" ? tools.userSiteIds(kept) : []
+    if (!Array.isArray(added))
+        added = []
     names.forEach(function (name) {
         // Null for anything that isn't a backup key, excluded ones included.
-        var value = checkedValue(name, source[name], tools)
+        var value = checkedValue(name, source[name], tools, added)
         if (value === null) {
             plan.dropped += 1
             return
@@ -320,12 +359,16 @@ function dropPair(plan, first, second, allowed) {
 }
 
 // What Replace would change in the chat addresses: [{id, from, to}] in site
-// order, Ollama last, each value capped by tools.shownText; [] when the plan
-// leaves them alone. A custom address map replaces the whole map, so a site
-// the backup has no address for goes back to its built-in one; both sides
-// are the address the site would really open. current holds the page's
-// chatCustomUrls and chatOllamaUrl. tools: {webSiteIds, parseCustomUrls,
-// effectiveUrl, shownText}.
+// order, then the added sites, Ollama last, each value capped by
+// tools.shownText; [] when the plan leaves them alone. A custom address map
+// replaces the whole map, so a site the backup has no address for goes back
+// to its built-in one; both sides are the address the site would really
+// open. An added-site list replaces the whole list: {kind: "add", id, name,
+// host} for a new site, {id, name, from, to} for a new address of the same
+// id and {kind: "remove", id, name} for a site it no longer has (applying
+// deletes its data). current holds the page's chatCustomUrls, chatOllamaUrl
+// and chatUserSites. tools: {webSiteIds, parseCustomUrls, effectiveUrl,
+// shownText, parseUserSites, hostOf}.
 function addressChanges(current, plan, tools) {
     var now = isObject(current) ? current : {}
     var next = isObject(plan) && isObject(plan.settings) ? plan.settings : {}
@@ -340,7 +383,37 @@ function addressChanges(current, plan, tools) {
                 result.push({id: id, from: tools.shownText(from), to: tools.shownText(to)})
         })
     }
+    if (has(next, "chatUserSites") && typeof tools.parseUserSites === "function")
+        result = result.concat(userSiteChanges(tools.parseUserSites(now.chatUserSites).sites,
+            tools.parseUserSites(next.chatUserSites).sites, tools))
     if (has(next, "chatOllamaUrl") && next.chatOllamaUrl !== now.chatOllamaUrl)
         result.push({id: OLLAMA_ID, from: tools.shownText(now.chatOllamaUrl), to: tools.shownText(next.chatOllamaUrl)})
+    return result
+}
+
+function userSiteChanges(before, after, tools) {
+    var find = function (list, id) {
+        for (var index = 0; index < list.length; index++) {
+            if (list[index].id === id)
+                return list[index]
+        }
+        return null
+    }
+    var host = function (url) {
+        return tools.shownText(typeof tools.hostOf === "function" ? tools.hostOf(url) : "")
+    }
+    var result = []
+    after.forEach(function (site) {
+        var old = find(before, site.id)
+        if (old === null)
+            result.push({kind: "add", id: site.id, name: tools.shownText(site.name), host: host(site.url)})
+        else if (old.url !== site.url)
+            result.push({id: site.id, name: tools.shownText(site.name), from: tools.shownText(old.url),
+                         to: tools.shownText(site.url)})
+    })
+    before.forEach(function (site) {
+        if (find(after, site.id) === null)
+            result.push({kind: "remove", id: site.id, name: tools.shownText(site.name)})
+    })
     return result
 }

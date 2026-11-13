@@ -15,6 +15,7 @@ Item {
     property bool splitShown: splitActive && width >= 600
     property string activeSiteId: siteId
     property var customUrls: ({})
+    property var userSites: []
     property var zoomMap: ({})
     property bool dialogOpen: false
     property bool canGoBack: false

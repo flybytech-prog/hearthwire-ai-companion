@@ -53,11 +53,15 @@ GOOD = {
     "panelRing": "codex.spark_weekly",
     "middleClickOpens": "mscopilot",
     "chatCustomUrls": '{"local":"http://localhost:8080/","claude":"https://claude.example.org/new?x=1"}',
+    "chatUserSites": '[{"name":"Le Chat","url":"https://chat.example.org/chat","id":"user-3fa9c01b"}]',
+    "chatSiteOrder": '["ollama","claude","local"]',
 }
-# What the checks keep of GOOD: canonical JSON (catalog order), lower-case colors.
+# What the checks keep of GOOD: canonical JSON (catalog order, added sites' keys
+# in id, name, url order), lower-case colors.
 GOOD_KEPT = dict(GOOD, usageNormalColor="#00aaff",
                  tooltipMetrics='{"claude":["weekly"],"codex":[]}',
-                 chatCustomUrls='{"claude":"https://claude.example.org/new?x=1","local":"http://localhost:8080/"}')
+                 chatCustomUrls='{"claude":"https://claude.example.org/new?x=1","local":"http://localhost:8080/"}',
+                 chatUserSites='[{"id":"user-3fa9c01b","name":"Le Chat","url":"https://chat.example.org/chat"}]')
 
 
 @pytest.fixture
@@ -185,6 +189,12 @@ def test_the_site_ids_match_chat_sites_js_and_the_ollama_entry():
     assert re.search(r"var MAX_CUSTOM_URL_LENGTH = %d\n" % backup.MAX_CUSTOM_URL_LENGTH, js_text("ChatSites.js"))
 
 
+def test_the_site_names_match_chat_sites_js_and_the_ollama_entry():
+    sites = js_text("ChatSites.js").split("var sites = [", 1)[1].split("\n]\n", 1)[0]
+    assert tuple(re.findall(r'^        name: "([^"\\]*)",?$', sites, re.M)) == backup.WEB_SITE_NAMES
+    assert re.search(r'^    name: "%s",$' % backup.OLLAMA_SITE_NAME, js_text("OllamaChat.js"), re.M)
+
+
 def js_list(text, name):
     match = re.search(r"var %s = \[([^\]]*)\]" % name, text)
     return tuple(json.loads("[" + match.group(1) + "]"))
@@ -239,6 +249,10 @@ GOOD_VALUES = [
     ("middleClickOpens", "refresh"), ("middleClickOpens", "usage"), ("middleClickOpens", "ollama"),
     ("middleClickOpens", "local"), ("chatCustomUrls", "{}"),
     ("chatCustomUrls", '{"gemini":"https://gemini.example.com:8443/app#x"}'),
+    ("chatUserSites", "[]"), ("chatUserSites", " [ ] "),
+    ("chatUserSites", '[{"id":"user-00000000","name":"A","url":"https://a.example.com"}]'),
+    ("chatSiteOrder", ""), ("chatSiteOrder", "[]"), ("chatSiteOrder", '["ollama"]'),
+    ("chatSiteOrder", '["ollama","local","mscopilot","copilot","gemini","grok","chatgpt","claude"]'),
 ]
 
 
@@ -298,7 +312,7 @@ def test_bad_values_are_dropped_and_counted(key, value):
 def test_strings_with_controls_or_over_4096_characters_are_dropped(key):
     for bad in ("\x00", "\x1b", "\x7f", "\x85", "\x9f", "\ud800"):
         assert backup.validate_settings({key: GOOD[key] + bad}) == ({}, 1)
-    if key not in ("chatCustomUrls",):
+    if key not in ("chatCustomUrls", "chatUserSites"):
         assert backup.validate_settings({key: GOOD[key] + " " * (4097 - len(GOOD[key]))}) == ({}, 1)
 
 
@@ -376,13 +390,17 @@ TestCase {
 """
 
 
-def test_the_port_gives_the_same_codes_as_chat_sites_js(tmp_path):
-    """Runs the widget's own validateCustomUrl on every case (skipped without qmltestrunner)."""
+def chat_sites_js_results(tmp_path, qml):
+    """What ``qml`` (a TestCase that logs ``PARITY <json>``) prints against the widget's ChatSites.js.
+
+    Skipped without qmltestrunner or QtTest.
+    """
     runner = shutil.which("qmltestrunner", path="/usr/lib/qt6/bin:/usr/bin:/bin")
     if runner is None:
         pytest.skip("qmltestrunner is not installed")
-    shutil.copy2(UI / "ChatSites.js", tmp_path / "ChatSites.js")
-    (tmp_path / "tst_parity.qml").write_text(PARITY_QML % json.dumps(URL_CASES), encoding="utf-8")
+    for script in UI.glob("*.js"):  # ChatSites.js and the scripts it imports.
+        shutil.copy2(script, tmp_path / script.name)
+    (tmp_path / "tst_parity.qml").write_text(qml, encoding="utf-8")
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "LANG": "C.UTF-8", "QT_QPA_PLATFORM": "offscreen",
            "XDG_RUNTIME_DIR": str(tmp_path), "TMPDIR": str(tmp_path)}
     completed = subprocess.run([runner, "-input", str(tmp_path / "tst_parity.qml")], env=env, cwd=tmp_path,
@@ -392,7 +410,379 @@ def test_the_port_gives_the_same_codes_as_chat_sites_js(tmp_path):
     if match is None and "module \"QtTest\" is not installed" in output:
         pytest.skip("QtTest is not installed")
     assert match is not None, output
-    assert [backup.custom_url_error(site, url) for site, url in URL_CASES] == json.loads(match.group(1))
+    return json.loads(match.group(1))
+
+
+def test_the_port_gives_the_same_codes_as_chat_sites_js(tmp_path):
+    """Runs the widget's own validateCustomUrl on every case (skipped without qmltestrunner)."""
+    codes = chat_sites_js_results(tmp_path, PARITY_QML % json.dumps(URL_CASES))
+    assert [backup.custom_url_error(site, url) for site, url in URL_CASES] == codes
+
+
+# --- chatUserSites and chatSiteOrder: the ChatSites.js port (task 005) ----------------------------
+
+# (name, the other added sites' names, code). Lengths count UTF-16 units, as JS .length.
+NAME_CASES = [
+    ("Le Chat", (), ""), ("A", (), ""), ("Le Chat (beta) #1", (), ""), ("Claude2", (), ""), ("Mistral", ("Other",), ""),
+    ("a" * 40, (), ""), ("a" * 41, (), "name-too-long"),
+    ("\U0001f600" * 20, (), ""), ("\U0001f600" * 20 + "a", (), "name-too-long"), ("a" + "\U0001f600" * 20, (), "name-too-long"),
+    ("\u00e9" * 40, (), ""), ("e\u0301" * 20, (), ""), ("e\u0301" * 20 + "x", (), "name-too-long"),
+    ("\u4e2d" * 40, (), ""), ("\u4e2d" * 41, (), "name-too-long"),
+    ("", (), "name-empty"), (" ", (), "name-empty"), ("\t\n", (), "name-empty"), ("\u3000\ufeff\u00a0", (), "name-empty"),
+    ("\u2028\u2029", (), "name-empty"), (" " * 41, (), "name-empty"),
+    (" Le Chat", (), "name-chars"), ("Le Chat ", (), "name-chars"), ("Le Chat\u00a0", (), "name-chars"),
+    ("\ufeffLe Chat", (), "name-chars"), ("Le Chat\u2029", (), "name-chars"), ("Le Chat\n", (), "name-chars"),
+    (" " + "a" * 40, (), "name-too-long"),
+    ("Le\u3000Chat", (), ""), ("Le\u00a0Chat", (), ""), ("Le\tChat", (), "name-chars"),
+    ("Le\x00Chat", (), "name-chars"), ("Le\x1bChat", (), "name-chars"), ("Le\x7fChat", (), "name-chars"),
+    ("Le\x85Chat", (), "name-chars"), ("Le\x9fChat", (), "name-chars"),
+    ("Le\ud800Chat", (), "name-chars"), ("Le\udc00Chat", (), "name-chars"), ("Le Chat\ud83d", (), "name-chars"),
+    ("<b>x</b>", (), "name-chars"), ("a&b", (), "name-chars"), ("a>b", (), "name-chars"), ("a<b", (), "name-chars"),
+    ("a\"b'c", (), ""), ("a/b\\c", (), ""),
+    # Invisible and bidi formatting (M3), every listed point and range end.
+    *[("Le" + chr(point) + "Chat", (), "name-chars") for point in (
+        0x00AD, 0x061C, 0x180E, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2028, 0x2029, 0x202A, 0x202B, 0x202C,
+        0x202D, 0x202E, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0x2066, 0x2067, 0x2068, 0x2069, 0xFEFF)],
+    ("Le\u200aChat", (), ""), ("Le\u2030Chat", (), ""), ("Le\u2065Chat", (), ""), ("Le\u206aChat", (), ""),
+    # Taken: a built-in name, Ollama or another added site, in any case.
+    ("Claude", (), "name-taken"), ("claude", (), "name-taken"), ("CHATGPT", (), "name-taken"),
+    ("grok", (), "name-taken"), ("Gemini", (), "name-taken"), ("github copilot", (), "name-taken"),
+    ("Microsoft COPILOT", (), "name-taken"), ("Local web UI (open webui)", (), "name-taken"),
+    ("Ollama", (), "name-taken"), ("OLLAMA", (), "name-taken"), ("Copilot", (), ""), ("Local web UI", (), ""),
+    ("Mistral", ("mistral",), "name-taken"), ("mistral", ("Other", "MISTRAL"), "name-taken"),
+    ("\u00c4", ("\u00e4",), "name-taken"), ("\u0130", ("i\u0307",), "name-taken"),
+    # Qt's JS engine lowers per code point (no final-sigma rule), and so does the port.
+    ("\u03a3\u0391\u03a3", ("\u03c3\u03b1\u03c2",), ""), ("\u03a3\u0391\u03a3", ("\u03c3\u03b1\u03c3",), "name-taken"),
+    ("Claude ", (), "name-chars"),
+]
+
+# (address, code), checked in the order of plan section 2.1.
+USER_URL_CASES = [
+    ("https://chat.example.org/chat", ""), ("https://a.example.com", ""), ("HTTPS://A.Example.COM:8443/x?q=1#f", ""),
+    ("https://nas.local/", ""), ("https://nas.lan", ""), ("https://example.com1/", ""), ("https://a.example.com./", ""),
+    ("https://a.example.com/@x", ""), ("https://a.example.com/%41'~!$()*,;=", ""), ("https://xn--mnchen-3ya.example/", ""),
+    ("", "url-empty"),
+    ("https://a.example.com/" + "a" * 2026, ""), ("https://a.example.com/" + "a" * 2027, "too-long"),
+    ("https://a.example.com/" + "\U0001f600" * 1014, "too-long"),
+    ("https://a.example.com/ x", "whitespace"), ("https://a.example.com/\t", "whitespace"),
+    ("https://a.example.com/\u00a0", "whitespace"), ("https://a.example.com/\u2028", "whitespace"),
+    ("https://a.example.com/\u3000", "whitespace"), ("https://a.example.com/\ufeff", "whitespace"),
+    ("https://a.example.com/\x00", "whitespace"), ("https://a.example.com/\x7f", "whitespace"),
+    (" https://a.example.com/", "whitespace"), ("https://user@a.example.com/ ", "whitespace"),
+    ("https://a.example.com/\x85", "url-chars"), ("https://a.example.com/\u00fc", "url-chars"),
+    ("https://ex\u00e4mple.com/", "url-chars"), ("https://a.example.com/\U0001f600", "url-chars"),
+    ("https://a.example.com/\u200b", "url-chars"), ("https://a.example.com/\u202e", "url-chars"),
+    ("https://a.example.com/\ud800", "url-chars"), ("https://user@a.example.com/\u00fc", "url-chars"),
+    *[("https://a.example.com/" + char, "url-chars") for char in '"\\<>`{}|^'],
+    ("https://user@a.example.com/", "userinfo"), ("https://a:b@a.example.com/", "userinfo"),
+    ("http://user@a.example.com/", "userinfo"), ("ftp://user@a.example.com/", "userinfo"),
+    ("https://@a.example.com/", "userinfo"),
+    ("a.example.com", "malformed"), ("//a.example.com/", "malformed"), ("1https://a.example.com/", "malformed"),
+    ("http://a.example.com/", "http-not-allowed"), ("HTTP://a.example.com/", "http-not-allowed"),
+    ("http://localhost/", "http-not-allowed"), ("http:x", "http-not-allowed"),
+    ("ftp://a.example.com/", "scheme"), ("javascript:alert(1)", "scheme"), ("data:text/html,x", "scheme"),
+    ("about:blank", "scheme"), ("file:///etc/passwd", "scheme"), ("httpss://a.example.com/", "scheme"),
+    ("https:a.example.com", "malformed"), ("https:///x", "malformed"), ("https://", "malformed"),
+    ("https://[fd00::1]/", "malformed"), ("https://[::2]/", "malformed"), ("https://a_b.example.com/", "malformed"),
+    ("https://a.example.com%2f/", "malformed"), ("https://.a.example.com/", "malformed"),
+    ("https://a..example.com/", "malformed"), ("https://a.example.com:0/", "malformed"),
+    ("https://a.example.com:65536/", "malformed"), ("https://a.example.com:/", "malformed"),
+    ("https://[::1]/", "loopback-not-allowed"), ("https://localhost/", "loopback-not-allowed"),
+    ("https://LOCALHOST./", "loopback-not-allowed"), ("https://intranet/", "loopback-not-allowed"),
+    ("https://a.localhost/", "loopback-not-allowed"), ("https://a.localhost.localdomain/", "loopback-not-allowed"),
+    ("https://ip6-loopback/", "loopback-not-allowed"), ("https://127.0.0.1/", "loopback-not-allowed"),
+    ("https://127.1/", "loopback-not-allowed"), ("https://0x7f000001/", "loopback-not-allowed"),
+    ("https://017700000001/", "loopback-not-allowed"), ("https://0x7f.1/", "loopback-not-allowed"),
+    ("https://0/", "loopback-not-allowed"), ("https://0.0.0.0/", "loopback-not-allowed"),
+    ("https://1.2.3.256/", "loopback-not-allowed"), ("https://1.2.3.08/", "loopback-not-allowed"),
+    ("https://1.2.3.4.5/", "loopback-not-allowed"), ("https://example.0x/", "loopback-not-allowed"),
+    ("https://example.123/", "loopback-not-allowed"), ("https://0x08080808/", "loopback-not-allowed"),
+    ("https://134744072/", "loopback-not-allowed"),
+    # M2: every IPv4 literal is refused in 005, private, link-local and public alike.
+    ("https://10.0.0.1/", "ip-literal"), ("https://172.16.0.1/", "ip-literal"), ("https://192.168.1.1/", "ip-literal"),
+    ("https://169.254.169.254/", "ip-literal"), ("https://1.2.3.4/", "ip-literal"), ("https://8.8.8.8./", "ip-literal"),
+    ("https://0x8.0x8.0x8.0x8/", "ip-literal"), ("https://8.8.2056/", "ip-literal"), ("https://10.1/", "ip-literal"),
+    ("https://0xa.0.0.1:8443/", "ip-literal"),
+]
+
+
+@pytest.mark.parametrize(("name", "others", "code"), NAME_CASES)
+def test_user_site_name_codes(name, others, code):
+    assert backup.user_site_name_error(name, others) == code
+
+
+@pytest.mark.parametrize(("url", "code"), USER_URL_CASES)
+def test_user_site_url_codes(url, code):
+    assert backup.user_site_url_error(url) == code
+    assert backup.address_class(url) == ("public" if code == "" else "")
+
+
+def test_the_user_site_lists_have_no_repeated_case():
+    assert len({(name, others) for name, others, _ in NAME_CASES}) == len(NAME_CASES)
+    assert len({url for url, _ in USER_URL_CASES}) == len(USER_URL_CASES)
+
+
+USER_SITE_PARITY_QML = """import QtQuick
+import QtTest
+import "ChatSites.js" as ChatSites
+
+TestCase {
+    name: "UserSiteParity"
+    function code(result) {
+        return typeof result === "string" ? result : result.error
+    }
+    function test_dump() {
+        var names = %s
+        var urls = %s
+        var results = names.map(function (item) {
+            var others = item[1].map(function (name, index) {
+                return { id: "user-0000000" + index, name: name, url: "https://other.example.com/" }
+            })
+            return code(ChatSites.userSiteNameError(item[0], others))
+        }).concat(urls.map(function (url) {
+            return code(ChatSites.userSiteUrlError(url))
+        })).concat(urls.map(function (url) {
+            return ChatSites.addressClass(url)
+        }))
+        console.log("PARITY " + JSON.stringify(results))
+    }
+}
+"""
+
+
+def test_the_user_site_port_gives_the_same_codes_as_chat_sites_js(tmp_path):
+    """userSiteNameError (others as added-site entries), userSiteUrlError and addressClass, case by case."""
+    names = [[name, list(others)] for name, others, _ in NAME_CASES]
+    urls = [url for url, _ in USER_URL_CASES]
+    results = chat_sites_js_results(tmp_path, USER_SITE_PARITY_QML % (json.dumps(names), json.dumps(urls)))
+    expected = ([backup.user_site_name_error(name, others) for name, others, _ in NAME_CASES]
+                + [backup.user_site_url_error(url) for url in urls] + [backup.address_class(url) for url in urls])
+    assert results == expected
+
+
+SITE_A = {"id": "user-3fa9c01b", "name": "Le Chat", "url": "https://chat.example.org/chat"}
+SITE_B = {"id": "user-00ff00aa", "name": "\u00dcn\u00efcode \U0001f600", "url": "https://b.example.net/x?y=1"}
+
+
+def user_sites(*entries):
+    """A chatUserSites value as the widget writes it (JSON.stringify)."""
+    return json.dumps(list(entries), ensure_ascii=False, separators=(",", ":"))
+
+
+def numbered_site(index):
+    return {"id": f"user-{index:08x}", "name": f"Site {index}", "url": f"https://s{index}.example.com/"}
+
+
+def test_user_sites_are_kept_in_key_order_with_non_ascii_kept():
+    text = '[{"url":"https://b.example.net/x?y=1","id":"user-00ff00aa","name":"\\u00dcn\\u00efcode \\ud83d\\ude00"},' \
+           ' {"id":"user-3fa9c01b","url":"https://chat.example.org/chat","name":"Le Chat"}]'
+    kept, dropped = backup.validate_settings({"chatUserSites": text})
+    assert (kept, dropped) == ({"chatUserSites": user_sites(SITE_B, SITE_A)}, 0)
+    assert "\U0001f600" in kept["chatUserSites"]
+    assert backup.user_site_ids(kept["chatUserSites"]) == ("user-00ff00aa", "user-3fa9c01b")
+
+
+def entry_with(**changes):
+    return dict(SITE_A, **changes)
+
+
+BAD_USER_SITES = [
+    "", "{}", "null", '"x"', "1", '{"id":"user-3fa9c01b","name":"Le Chat","url":"https://chat.example.org/chat"}',
+    "[null]", "[[]]", '["user-3fa9c01b"]', "[", '[{"id":"user-3fa9c01b"}]',
+    *[user_sites(dict(SITE_A, **{key: value})) for key, value in (
+        ("local", False), ("local", True), ("local_kind", "public"), ("site_hosts", []), ("auth_hosts", []),
+        ("icon", ""), ("user", True), ("exact_hosts", []), ("default_on", True), ("Id", "user-3fa9c01b"))],
+    *[user_sites({key: value for key, value in SITE_A.items() if key != missing}) for missing in ("id", "name", "url")],
+    *[user_sites(entry_with(id=bad)) for bad in (
+        "user-3FA9C01B", "user-3fa9c01", "user-3fa9c01bb", "USER-3fa9c01b", "user_3fa9c01b", "claude", "ollama",
+        "user-3fa9c01g", " user-3fa9c01b", "user-3fa9c01b\n", "", 1, None, ["user-3fa9c01b"])],
+    user_sites(SITE_A, entry_with(name="Other")),                                   # the same id twice
+    user_sites(SITE_A, dict(SITE_B, name="le chat")),                               # the same name, other case
+    user_sites(SITE_A, dict(SITE_B, name="LE CHAT")),
+    *[user_sites(entry_with(name=name)) for name, others, code in NAME_CASES if code and not others],
+    *[user_sites(entry_with(url=url)) for url, code in USER_URL_CASES if code],
+    user_sites(entry_with(name=1)), user_sites(entry_with(name=None)), user_sites(entry_with(url=["https://a.example.com/"])),
+    '[{"id":"user-3fa9c01b","name":"Le Chat","url":"https://chat.example.org/chat","id":"user-3fa9c01c"}]',
+    '[{"id":"user-3fa9c01b","name":"Le Chat","url":"https://chat.example.org/chat"}' + "\x00]",
+    [SITE_A], {"sites": [SITE_A]},
+]
+
+
+@pytest.mark.parametrize("value", BAD_USER_SITES)
+def test_a_bad_user_site_entry_drops_the_whole_setting(value):
+    assert backup.validate_settings({"chatUserSites": value}) == ({}, 1)
+
+
+def test_200_user_sites_are_kept_and_201_dropped():
+    sites = [numbered_site(index) for index in range(201)]
+    assert backup.validate_settings({"chatUserSites": user_sites(*sites[:200])}) == \
+        ({"chatUserSites": user_sites(*sites[:200])}, 0)
+    assert backup.validate_settings({"chatUserSites": user_sites(*sites)}) == ({}, 1)
+
+
+def test_the_user_sites_char_cap_counts_utf16_units():
+    assert backup.MAX_USER_SITES_CHARS == 458752
+    emoji = entry_with(name="\U0001f600" * 20)
+    compact = user_sites(emoji)
+    room = backup.MAX_USER_SITES_CHARS - len(compact.encode("utf-16-le")) // 2
+    at_cap = "[" + " " * room + compact[1:]
+    assert backup.validate_settings({"chatUserSites": at_cap}) == ({"chatUserSites": compact}, 0)
+    over = "[ " + " " * room + compact[1:]
+    assert len(over) < backup.MAX_USER_SITES_CHARS  # Python counts the emoji once, JS .length twice.
+    assert backup.validate_settings({"chatUserSites": over}) == ({}, 1)
+
+
+def test_the_longest_user_sites_stay_under_the_char_cap():
+    sites = [{"id": f"user-{index:08x}", "name": chr(0x4E00 + index) + '"' * 39,
+              "url": "https://a.example.com/" + "a" * 2026} for index in range(200)]
+    value = user_sites(*sites)
+    assert len(value.encode("utf-16-le")) // 2 <= backup.MAX_USER_SITES_CHARS
+    assert backup.validate_settings({"chatUserSites": value}) == ({"chatUserSites": value}, 0)
+
+
+SITE_ORDER_CASES = [
+    ("", ""), ("[]", "[]"), (" [ \"ollama\" ] ", '["ollama"]'), ('["local","claude"]', '["local","claude"]'),
+    ('["claude","claude"]', None), ('["nope"]', None), ('["Claude"]', None), ('["user-deadbeef"]', None),
+    ('["refresh"]', None), ('["usage"]', None), ("{}", None), ("null", None), ('"claude"', None), ("[1]", None),
+    ("[", None), (["claude"], None), (None, None),
+]
+
+
+@pytest.mark.parametrize(("value", "kept"), SITE_ORDER_CASES)
+def test_site_order_values(value, kept):
+    expected = ({"chatSiteOrder": kept}, 0) if kept is not None else ({}, 1)
+    assert backup.validate_settings({"chatSiteOrder": value}) == expected
+
+
+# --- the cross-key check (task 005) ---------------------------------------------------------------
+
+A_ID, B_ID = SITE_A["id"], SITE_B["id"]
+CROSS_KEY_VALUES = {
+    "chatSites": (f'["claude","{A_ID}","ollama"]', f'["claude","{B_ID}"]'),
+    "chatSiteOrder": (f'["{A_ID}","ollama","claude"]', f'["{B_ID}"]'),
+    "chatDefaultSite": (A_ID, B_ID),
+    "middleClickOpens": (A_ID, B_ID),
+}
+
+
+@pytest.mark.parametrize("key", sorted(CROSS_KEY_VALUES))
+def test_an_added_id_is_kept_with_its_site(key):
+    known, _ = CROSS_KEY_VALUES[key]
+    kept, dropped = backup.validate_settings({"chatUserSites": user_sites(SITE_A), key: known})
+    assert (kept, dropped) == ({key: known, "chatUserSites": user_sites(SITE_A)}, 0)
+    assert list(kept) == [name for name in backup.BACKUP_KEYS if name in kept]
+
+
+@pytest.mark.parametrize("key", sorted(CROSS_KEY_VALUES))
+def test_an_unknown_added_id_drops_that_setting(key):
+    _, unknown = CROSS_KEY_VALUES[key]
+    assert backup.validate_settings({"chatUserSites": user_sites(SITE_A), key: unknown}) == \
+        ({"chatUserSites": user_sites(SITE_A)}, 1)
+    assert backup.validate_settings({key: unknown}) == ({}, 1)                # no chatUserSites at all
+
+
+@pytest.mark.parametrize("key", sorted(CROSS_KEY_VALUES))
+def test_a_dropped_user_sites_drops_what_names_its_ids(key):
+    known, _ = CROSS_KEY_VALUES[key]
+    bad = user_sites(SITE_A, entry_with(name="Other"))                       # a repeated id
+    assert backup.validate_settings({"chatUserSites": bad, key: known}) == ({}, 2)
+
+
+def test_every_reference_goes_with_a_dropped_user_sites_and_built_ins_stay():
+    references = {key: known for key, (known, _) in CROSS_KEY_VALUES.items()}
+    value = dict(GOOD, chatUserSites=user_sites(dict(SITE_A, local=True)), **references)
+    kept, dropped = backup.validate_settings(value)
+    assert dropped == 5
+    assert kept == {key: item for key, item in GOOD_KEPT.items() if key not in references and key != "chatUserSites"}
+    built_in = dict(GOOD, chatUserSites=user_sites(dict(SITE_A, local=True)))
+    assert backup.validate_settings(built_in) == (
+        {key: item for key, item in GOOD_KEPT.items() if key != "chatUserSites"}, 1)
+
+
+def test_the_cross_key_check_uses_only_the_kept_ids():
+    # B's id is in the file but B's entry is bad: only A's id may be named.
+    value = {"chatUserSites": user_sites(SITE_A, dict(SITE_B, url="http://b.example.net/")),
+             "chatSites": f'["{A_ID}"]'}
+    assert backup.validate_settings(value) == ({}, 2)
+    good = {"chatUserSites": user_sites(SITE_A, SITE_B), "chatSites": f'["{B_ID}","{A_ID}"]',
+            "chatSiteOrder": f'["{B_ID}"]', "chatDefaultSite": B_ID, "middleClickOpens": A_ID}
+    assert backup.validate_settings(good) == ({key: good[key] for key in backup.BACKUP_KEYS if key in good}, 0)
+
+
+def test_200_added_ids_fit_in_chat_sites_and_site_order():
+    sites = [numbered_site(index) for index in range(200)]
+    ids = list(backup.CHAT_SITE_IDS) + [site["id"] for site in sites]
+    listed = json.dumps(ids, separators=(",", ":"))
+    assert len(listed) <= backup.MAX_STRING_CHARS
+    value = {"chatUserSites": user_sites(*sites), "chatSites": listed, "chatSiteOrder": listed}
+    assert backup.validate_settings(value) == ({key: value[key] for key in backup.BACKUP_KEYS if key in value}, 0)
+    assert backup.MAX_USER_SITES + len(backup.WEB_SITE_IDS) == backup.MAX_USER_SITES + 7
+
+
+# --- the worst case: 200 added sites at their longest (task 005) ----------------------------------
+
+
+def longest_settings():
+    """Every backup key at its longest (each value valid, so nothing is dropped)."""
+    sites = [{"id": f"user-{index:08x}", "name": chr(0x4E00 + index) + "\u4e2d" * 39,
+              "url": f"https://s{index:03d}.example.com/" + "a" * (2048 - len("https://s000.example.com/"))}
+             for index in range(200)]
+    added = [site["id"] for site in sites]
+    custom = {site: ("http://localhost:65535/" if site in backup.LOCAL_SITE_IDS else "https://a.example.com/")
+              for site in backup.WEB_SITE_IDS}
+    custom = {site: url + "a" * (2048 - len(url)) for site, url in custom.items()}
+    metrics = {entry.provider_id: list(entry.supported_metrics) for entry in PROVIDER_CATALOG}
+    ring = max(backup.RING_PAIRS, key=len)
+    settings = {
+        "trackedProviders": json.dumps(list(backup.PROVIDER_IDS), separators=(",", ":")),
+        "providerMetrics": json.dumps(metrics, separators=(",", ":")),
+        "providerOrder": json.dumps(list(backup.PROVIDER_IDS), separators=(",", ":")),
+        "usageMode": "remaining", "refreshInterval": 3600, "tooltipShowsUsage": False,
+        "tooltipMetrics": json.dumps(metrics, separators=(",", ":")), "usageCompact": False,
+        "usageWarnPercent": 90, "usageCriticalPercent": 95,
+        "usageNormalColor": "#aaaaaa", "usageWarnColor": "#bbbbbb", "usageCriticalColor": "#cccccc",
+        "alertLowEnabled": False, "alertResetEnabled": False, "alertLowPercent": 50,
+        "chatSites": json.dumps(list(backup.CHAT_SITE_IDS) + added, separators=(",", ":")),
+        "chatDefaultSite": added[-1], "chatOllamaUrl": "http://127.0.0.1:65535", "chatKeepOpen": False,
+        "showUsageTab": False, "showChatTab": False, "popupDefaultTab": "usage", "popupSize": "compact",
+        "shortcutOpens": "ollama", "panelRing": ring, "middleClickOpens": added[-1],
+        "chatCustomUrls": json.dumps(custom, separators=(",", ":")),
+        "chatUserSites": user_sites(*sites),
+        "chatSiteOrder": json.dumps(added + list(reversed(backup.CHAT_SITE_IDS)), separators=(",", ":")),
+    }
+    assert list(settings) == list(backup.BACKUP_KEYS)
+    return settings
+
+
+def test_the_longest_settings_export_fits_512_kib_and_import(config, capsys):
+    settings = longest_settings()
+    assert exported(settings) == {"ok": True, "saved": len(backup.BACKUP_KEYS), "dropped": 0}
+    path = config / "settings-backup.json"
+    size = path.stat().st_size
+    assert 400 * 1024 < size <= backup.MAX_FILE_BYTES
+    assert run("import") == {"ok": True, "exported_at": STAMP, "settings": settings, "dropped": 0}
+    # The widget's reply cap (SettingsBackup.MAX_REPLY_CHARS, UTF-16 units) holds the import reply.
+    assert cli.main(["--settings-backup", "import"]) == 0
+    out = capsys.readouterr().out
+    assert json.loads(out)["settings"] == settings
+    assert len(out.encode("utf-16-le")) // 2 <= backup.MAX_FILE_BYTES + 1024
+    # Padded to the limit it still imports; one byte more is too large.
+    data = path.read_bytes()
+    path.write_bytes(data[:-1] + b" " * (backup.MAX_FILE_BYTES - size) + b"\n")
+    assert path.stat().st_size == backup.MAX_FILE_BYTES
+    assert run("import")["settings"] == settings
+    path.write_bytes(data[:-1] + b" " * (backup.MAX_FILE_BYTES + 1 - size) + b"\n")
+    assert run("import") == {"ok": False, "error": "too-large"}
+    assert run("status") == {"ok": False, "error": "too-large"}
+
+
+def test_added_sites_round_trip_through_the_rc_file(config):
+    settings = {"chatUserSites": user_sites(SITE_A, SITE_B), "chatSites": f'["{B_ID}","claude"]',
+                "chatSiteOrder": f'["{B_ID}","{A_ID}"]', "chatDefaultSite": A_ID, "middleClickOpens": B_ID}
+    assert exported(settings)["dropped"] == 0
+    imported = run("import")["settings"]
+    assert {key: imported[key] for key in settings} == settings
+    assert "\U0001f600" in (config / "settings-backup.json").read_text(encoding="utf-8")
 
 
 # --- strict JSON ----------------------------------------------------------------------------------
@@ -690,11 +1080,12 @@ def test_a_missing_top_level_key_is_invalid(config):
     assert run("import") == {"ok": False, "error": "invalid"}
 
 
-def test_a_file_over_64_kib_is_too_large(config):
+def test_a_file_over_512_kib_is_too_large(config):
+    assert backup.MAX_FILE_BYTES == 512 * 1024  # Task 005: 200 added sites fit.
     text = json.dumps(document())
-    write_backup(config, text + " " * (65536 - len(text)))
+    write_backup(config, text + " " * (backup.MAX_FILE_BYTES - len(text)))
     assert run("import")["ok"] is True
-    write_backup(config, text + " " * (65537 - len(text)))
+    write_backup(config, text + " " * (backup.MAX_FILE_BYTES + 1 - len(text)))
     assert run("import") == {"ok": False, "error": "too-large"}
 
 

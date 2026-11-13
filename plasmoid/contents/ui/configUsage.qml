@@ -45,6 +45,11 @@ KCM.ScrollViewKCM {
     property int cfg_chatProfileLayoutDefault: 0
     property string cfg_chatPendingSiteClears: ""
     property string cfg_chatPendingSiteClearsDefault: ""
+    // Written only on Settings → Chat and by a backup Replace (General).
+    property string cfg_chatUserSites: "[]"
+    property string cfg_chatUserSitesDefault: "[]"
+    property string cfg_chatSiteOrder: ""
+    property string cfg_chatSiteOrderDefault: ""
     property int cfg_chatAutoLockMinutes: 0
     property int cfg_chatAutoLockMinutesDefault: 0
     property string cfg_chatVaultUnlock: "passphrase"

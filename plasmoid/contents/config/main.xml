@@ -44,6 +44,12 @@
         <entry name="chatPendingSiteClears" type="String">
             <default></default>
         </entry>
+        <entry name="chatUserSites" type="String">
+            <default>[]</default>
+        </entry>
+        <entry name="chatSiteOrder" type="String">
+            <default></default>
+        </entry>
         <entry name="chatAutoLockMinutes" type="Int">
             <default>0</default>
         </entry>

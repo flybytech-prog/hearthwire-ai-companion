@@ -1,8 +1,12 @@
 import QtQuick
 import QtTest
 import "../../plasmoid/contents/ui/ChatSites.js" as ChatSites
+import "../../plasmoid/contents/ui/ChatStorage.js" as ChatStorage
+import "../../plasmoid/contents/ui/OllamaChat.js" as OllamaChat
+import "ChatSitesGolden.js" as Golden
 
 TestCase {
+    id: testCase
     name: "ChatSites"
 
     function nav(url, siteId, linkClicked, isMainFrame, customUrls) {
@@ -32,6 +36,493 @@ TestCase {
 
     function checkUrl(siteId, text) {
         return ChatSites.validateCustomUrl(siteId, text)
+    }
+
+    // Task 005 golden table: every built-in answer recorded before added
+    // sites existed must stay the same, with or without request.userSites.
+    function test_builtinGoldenTable() {
+        var added = [
+            { id: "user-3fa9c01b", name: "Le Chat", url: "https://chat.mistral.ai/chat" },
+            { id: "user-00000001", name: "Claude look-alike", url: "https://claude.ai/new" },
+            { id: "user-00000002", name: "Example", url: "https://example.com/page" }
+        ]
+        var variants = [undefined, [], added]
+        var keys = Object.keys(Golden.EXPECTED)
+        compare(keys.length, Golden.SITE_IDS.length * Golden.ADDRESSES.length * 2)
+        for (var v = 0; v < variants.length; v++) {
+            var now = Golden.table(ChatSites, variants[v])
+            compare(Object.keys(now).length, keys.length)
+            for (var index = 0; index < keys.length; index++)
+                compare(now[keys[index]], Golden.EXPECTED[keys[index]], "variant " + v + ": " + keys[index])
+        }
+    }
+
+    // --- task 005: added sites -----------------------------------------------
+
+    readonly property var mistral: ({id: "user-3fa9c01b", name: "Le Chat", url: "https://chat.mistral.ai/chat"})
+    readonly property var pi: ({id: "user-0000beef", name: "Pi", url: "https://pi.ai/talk"})
+    readonly property var added: [mistral, pi]
+
+    // userSites: the added sites, all of them when left out (arguments
+    // count, so an explicit undefined stays undefined).
+    function userNav(url, linkClicked, isMainFrame, userSites) {
+        return ChatSites.classifyNavigation({
+            url: url, siteId: "user-3fa9c01b", linkClicked: !!linkClicked,
+            isMainFrame: isMainFrame === undefined ? true : isMainFrame,
+            userSites: arguments.length > 3 ? userSites : testCase.added
+        })
+    }
+
+    function userPopup(url, isDialog, clicked, userSites) {
+        return ChatSites.classifyNewWindow({
+            url: url, siteId: "user-3fa9c01b", isDialog: !!isDialog, userInitiated: clicked !== false,
+            userSites: arguments.length > 3 ? userSites : testCase.added
+        })
+    }
+
+    // ChatSites.js has no imports: its copy of Ollama's entry stays equal.
+    function test_ollamaEntryMirrorsOllamaChat() {
+        compare(ChatSites.OLLAMA_ENTRY, OllamaChat.ENTRY)
+        compare(Object.keys(ChatSites.OLLAMA_ENTRY), Object.keys(OllamaChat.ENTRY))
+        verify(Object.isFrozen(ChatSites.OLLAMA_ENTRY))
+    }
+
+    function test_userSiteCaps() {
+        compare(ChatSites.MAX_USER_SITES, 200)
+        compare(ChatSites.MAX_USER_SITES_CHARS, 448 * 1024)
+        compare(ChatSites.MAX_USER_SITE_NAME, 40)
+        compare(ChatSites.MAX_USER_SITES + ChatSites.sites.length, ChatStorage.MAX_SITE_IDS)
+        compare(ChatSites.MAX_USER_SITES + 7, 207)
+    }
+
+    function test_isUserSiteId() {
+        verify(ChatSites.isUserSiteId("user-3fa9c01b"))
+        verify(!ChatSites.isUserSiteId("user-3FA9C01B"))
+        verify(!ChatSites.isUserSiteId("user-3fa9c01"))
+        verify(!ChatSites.isUserSiteId("user-3fa9c01bb"))
+        verify(!ChatSites.isUserSiteId("claude"))
+        verify(!ChatSites.isUserSiteId(" user-3fa9c01b"))
+        verify(!ChatSites.isUserSiteId(undefined))
+        // No built-in id looks like an added one.
+        ChatSites.siteIds().forEach(function (id) { verify(id.indexOf("user-") !== 0, id) })
+    }
+
+    function test_newUserSiteId() {
+        var seq = function (values) {
+            var at = 0
+            return function () { return values[at++ % values.length] }
+        }
+        // Deterministic with an injected random: 8 hex digits.
+        compare(ChatSites.newUserSiteId([], seq([0])), "user-00000000")
+        compare(ChatSites.newUserSiteId([], seq([0.999])), "user-ffffffff")
+        compare(ChatSites.newUserSiteId([], seq([0.2, 0.25, 0.5, 0.75])), "user-348c348c")
+        // Never an excluded id: the next draw is taken.
+        var draws = [0, 0, 0, 0, 0, 0, 0, 0, 0.0625, 0, 0, 0, 0, 0, 0, 0]
+        compare(ChatSites.newUserSiteId(["user-00000000"], seq(draws)), "user-10000000")
+        // Nothing free: "".
+        compare(ChatSites.newUserSiteId(["user-00000000"], seq([0])), "")
+        // Odd random values give digits in range.
+        verify(ChatSites.isUserSiteId(ChatSites.newUserSiteId([], seq([NaN, -1, 2]))))
+        // The real one.
+        for (var index = 0; index < 20; index++)
+            verify(ChatSites.isUserSiteId(ChatSites.newUserSiteId([], Math.random)))
+    }
+
+    function test_userSiteNameError() {
+        var err = function (name, others) { return ChatSites.userSiteNameError(name, others) }
+        compare(err("Le Chat"), "")
+        compare(err(""), "name-empty")
+        compare(err("   "), "name-empty")
+        compare(err("　"), "name-empty")
+        compare(err(undefined), "name-empty")
+        compare(err(7), "name-empty")
+        compare(err(new Array(41).join("a")), "")
+        compare(err(new Array(42).join("a")), "name-too-long")
+        // UTF-16 units: an emoji is two.
+        compare(err(new Array(21).join("😀")), "")
+        compare(err(new Array(21).join("😀") + "a"), "name-too-long")
+        compare(err("é" + new Array(40).join("x")), "")
+        compare(err(" A"), "name-chars", "stored trimmed")
+        compare(err("A "), "name-chars")
+        compare(err("A\tB"), "name-chars")
+        compare(err("A\nB"), "name-chars")
+        compare(err("A\u0085B"), "name-chars", "C1")
+        compare(err("A<B"), "name-chars")
+        compare(err("A>B"), "name-chars")
+        compare(err("A&B"), "name-chars")
+        compare(err("A\ud800B"), "name-chars", "lone surrogate")
+        compare(err("A\udc00"), "name-chars")
+        ;["­", "؜", "᠎", "​", "‏", " ", "‮", "⁠",
+          "⁤", "⁦", "⁩", "﻿"].forEach(function (mark) {
+            compare(err("A" + mark + "B"), "name-chars", mark.charCodeAt(0).toString(16))
+        })
+        // Other spaces inside are fine.
+        compare(err("Le Chat"), "")
+        compare(err("Claude"), "name-taken")
+        compare(err("claude"), "name-taken")
+        compare(err("GITHUB COPILOT"), "name-taken")
+        compare(err("Local web UI (Open WebUI)"), "name-taken")
+        compare(err("ollama"), "name-taken")
+        compare(err("le chat", [testCase.mistral]), "name-taken")
+        compare(err("le chat", ["Le Chat"]), "name-taken")
+        compare(err("Le Chat", [testCase.pi]), "")
+        compare(err("Claude 2"), "")
+    }
+
+    function test_userSiteUrlError() {
+        var err = ChatSites.userSiteUrlError
+        compare(err("https://chat.mistral.ai/chat"), "")
+        compare(err("https://nas.local/"), "", "public in 005")
+        compare(err("https://nas.lan/"), "")
+        compare(err("https://xn--e1afmkfd.xn--p1ai/"), "")
+        compare(err("https://chat.example.org:8443/x?y=1#z"), "")
+        compare(err(""), "url-empty")
+        compare(err(undefined), "url-empty")
+        compare(err("https://a.example/" + new Array(2031).join("x")), "")
+        compare(err("https://a.example/" + new Array(2032).join("x")), "too-long")
+        compare(err("https://a.example/ x"), "whitespace")
+        compare(err("https://a.example/ "), "whitespace")
+        compare(err("https://a.example/\u0001"), "whitespace")
+        compare(err("https://a.example/\u0085"), "url-chars")
+        compare(err("https://пример.рф/"), "url-chars")
+        ;["\"", "\\", "<", ">", "`", "{", "}", "|", "^"].forEach(function (mark) {
+            compare(err("https://a.example/" + mark), "url-chars", mark)
+        })
+        compare(err("https://user:pw@a.example/"), "userinfo")
+        compare(err("https://a.example@evil.example/"), "userinfo")
+        compare(err("a.example/chat"), "malformed")
+        compare(err("http://a.example/"), "http-not-allowed")
+        compare(err("HTTP://a.example/"), "http-not-allowed")
+        compare(err("ftp://a.example/"), "scheme")
+        compare(err("javascript:alert(1)"), "scheme")
+        compare(err("https:a.example"), "malformed")
+        compare(err("https://"), "malformed")
+        compare(err("https://a..example/"), "malformed")
+        compare(err("https://a.example%2f/"), "malformed")
+        compare(err("https://[fd00::1]/"), "malformed")
+        compare(err("https://localhost/"), "loopback-not-allowed")
+        compare(err("https://[::1]/"), "loopback-not-allowed")
+        compare(err("https://intranet/"), "loopback-not-allowed")
+        compare(err("https://foo.localhost/"), "loopback-not-allowed")
+        compare(err("https://127.0.0.1/"), "loopback-not-allowed")
+        compare(err("https://127.1/"), "loopback-not-allowed")
+        compare(err("https://0x7f000001/"), "loopback-not-allowed")
+        compare(err("https://0.0.0.0/"), "loopback-not-allowed")
+        compare(err("https://8.8.8.8/"), "ip-literal", "M2: public literals too")
+        compare(err("https://10.0.0.1/"), "ip-literal")
+        compare(err("https://192.168.1.1/"), "ip-literal")
+        compare(err("https://169.254.169.254/"), "ip-literal")
+        compare(err("https://0300.0250.1.1/"), "ip-literal")
+        compare(err("https://0xa.1/"), "ip-literal")
+        // A numeric last label that can't be IPv4 counts as this computer.
+        compare(err("https://example.0x1/"), "loopback-not-allowed")
+        compare(err("https://example.1/"), "loopback-not-allowed")
+    }
+
+    function test_addressClass() {
+        compare(ChatSites.addressClass("https://chat.mistral.ai/"), "public")
+        compare(ChatSites.addressClass("https://nas.local/"), "public")
+        compare(ChatSites.addressClass("http://chat.mistral.ai/"), "")
+        compare(ChatSites.addressClass("https://localhost/"), "")
+        compare(ChatSites.addressClass("https://10.0.0.1/"), "")
+        compare(ChatSites.addressClass(""), "")
+    }
+
+    function test_validateUserSite() {
+        var ok = {ok: true, error: ""}
+        compare(ChatSites.validateUserSite(testCase.mistral, []), ok)
+        compare(ChatSites.validateUserSite(testCase.mistral), ok)
+        compare(ChatSites.validateUserSite(Object.assign({local: true}, testCase.mistral)).error, "entry")
+        compare(ChatSites.validateUserSite(Object.assign({auth_hosts: []}, testCase.mistral)).error, "entry")
+        compare(ChatSites.validateUserSite({id: testCase.mistral.id, name: "A"}).error, "entry")
+        compare(ChatSites.validateUserSite(null).error, "entry")
+        compare(ChatSites.validateUserSite([]).error, "entry")
+        compare(ChatSites.validateUserSite({id: "claude", name: "A", url: "https://a.example/"}).error, "id")
+        compare(ChatSites.validateUserSite(testCase.mistral, [testCase.mistral]).error, "id-taken")
+        compare(ChatSites.validateUserSite({id: "user-00000001", name: "Le chat", url: "https://a.example/"},
+                                           [testCase.mistral]).error, "name-taken")
+        compare(ChatSites.validateUserSite({id: "user-00000001", name: "A", url: "http://a.example/"}).error,
+                "http-not-allowed")
+    }
+
+    function test_parseUserSites() {
+        var text = JSON.stringify(testCase.added)
+        compare(ChatSites.parseUserSites(text), {ok: true, sites: testCase.added})
+        compare(ChatSites.parseUserSites("[]"), {ok: true, sites: []})
+        // Not ok, nothing shown.
+        compare(ChatSites.parseUserSites(""), {ok: false, sites: []})
+        compare(ChatSites.parseUserSites("{"), {ok: false, sites: []})
+        compare(ChatSites.parseUserSites("{}"), {ok: false, sites: []})
+        compare(ChatSites.parseUserSites(undefined), {ok: false, sites: []})
+        compare(ChatSites.parseUserSites(" " + text + new Array(ChatSites.MAX_USER_SITES_CHARS).join(" ")),
+                {ok: false, sites: []})
+        // Not ok, the good entries still shown in order.
+        var bad = JSON.stringify([testCase.mistral, {id: "user-00000001", name: "<b>", url: "https://a.example/"},
+                                  testCase.pi])
+        compare(ChatSites.parseUserSites(bad), {ok: false, sites: testCase.added})
+        var duplicate = JSON.stringify([testCase.mistral, testCase.pi, testCase.mistral])
+        compare(ChatSites.parseUserSites(duplicate), {ok: false, sites: testCase.added})
+        var extra = JSON.stringify([Object.assign({local: true}, testCase.mistral), testCase.pi])
+        compare(ChatSites.parseUserSites(extra), {ok: false, sites: [testCase.pi]})
+        // Never more than MAX_USER_SITES.
+        var many = []
+        for (var index = 0; index < 201; index++)
+            many.push({id: "user-" + ("0000000" + index.toString(16)).slice(-8), name: "S" + index,
+                       url: "https://s" + index + ".example.org/"})
+        var read = ChatSites.parseUserSites(JSON.stringify(many))
+        compare(read.ok, false)
+        compare(read.sites.length, 200)
+        compare(ChatSites.parseUserSites(JSON.stringify(many.slice(0, 200))).ok, true)
+        // Only the three keys are kept.
+        compare(Object.keys(ChatSites.parseUserSites(text).sites[0]), ["id", "name", "url"])
+    }
+
+    function test_serializeUserSites() {
+        var text = ChatSites.serializeUserSites([{url: testCase.mistral.url, name: testCase.mistral.name,
+                                                  id: testCase.mistral.id}])
+        compare(text, "[{\"id\":\"user-3fa9c01b\",\"name\":\"Le Chat\",\"url\":\"https://chat.mistral.ai/chat\"}]")
+        compare(ChatSites.serializeUserSites([]), "[]")
+        compare(ChatSites.serializeUserSites([{id: "user-00000001", name: "Ça va", url: "https://a.example/"}]),
+                "[{\"id\":\"user-00000001\",\"name\":\"Ça va\",\"url\":\"https://a.example/\"}]")
+        // Refusals.
+        compare(ChatSites.serializeUserSites([testCase.mistral, testCase.mistral]), "")
+        compare(ChatSites.serializeUserSites([Object.assign({local: false}, testCase.mistral)]), "")
+        compare(ChatSites.serializeUserSites([{id: "user-00000001", name: "", url: "https://a.example/"}]), "")
+        compare(ChatSites.serializeUserSites("nope"), "")
+        var many = []
+        for (var index = 0; index < 201; index++)
+            many.push({id: "user-" + ("0000000" + index.toString(16)).slice(-8), name: "S" + index,
+                       url: "https://s" + index + ".example.org/"})
+        compare(ChatSites.serializeUserSites(many), "")
+        verify(ChatSites.serializeUserSites(many.slice(0, 200)) !== "")
+        // 200 entries at their longest still fit the char cap.
+        var long = []
+        for (var at = 0; at < 200; at++)
+            long.push({id: "user-" + ("0000000" + at.toString(16)).slice(-8),
+                       name: "N" + at + new Array(38 - String(at).length + 1).join("é"),
+                       url: "https://s" + at + ".example.org/" + new Array(2048 - 22 - String(at).length).join("x")})
+        verify(long.every(function (entry) { return ChatSites.validateUserSite(entry).ok }))
+        var longest = ChatSites.serializeUserSites(long)
+        verify(longest !== "")
+        verify(longest.length <= ChatSites.MAX_USER_SITES_CHARS, longest.length)
+        compare(ChatSites.parseUserSites(longest).ok, true)
+    }
+
+    function test_effectiveSiteForAnAddedSite() {
+        var site = ChatSites.effectiveSite("user-3fa9c01b", {}, testCase.added)
+        compare(site, {
+            id: "user-3fa9c01b", name: "Le Chat", url: "https://chat.mistral.ai/chat", icon: "", user: true,
+            site_hosts: [], auth_hosts: [], exact_hosts: ["chat.mistral.ai"], local: false,
+            local_kind: "public", default_on: true, http_origin: ""
+        })
+        // Nothing from extra keys, even if a caller passed them.
+        compare(ChatSites.effectiveSite("user-3fa9c01b", {}, [Object.assign({local: true, auth_hosts: ["evil.example"]},
+                                                                           testCase.mistral)]), null)
+        // Custom addresses never apply to added sites.
+        compare(ChatSites.effectiveSite("user-3fa9c01b", {"user-3fa9c01b": "https://evil.example/"},
+                                        testCase.added).url, testCase.mistral.url)
+        // Unknown without userSites, or with an invalid entry.
+        compare(ChatSites.effectiveSite("user-3fa9c01b"), null)
+        compare(ChatSites.effectiveSite("user-3fa9c01b", {}, []), null)
+        compare(ChatSites.effectiveSite("user-3fa9c01b", {}, "nope"), null)
+        compare(ChatSites.effectiveSite("user-3fa9c01b", {}, [{id: "user-3fa9c01b", name: "A", url: "http://a.example/"}]),
+                null)
+        compare(ChatSites.byId("user-3fa9c01b", testCase.added).name, "Le Chat")
+        compare(ChatSites.byId("user-3fa9c01b"), null)
+        compare(ChatSites.homeUrl("user-0000beef", {}, testCase.added), "https://pi.ai/talk")
+        compare(ChatSites.homeUrl("user-0000beef"), "")
+        compare(ChatSites.siteIds(testCase.added),
+                ChatSites.siteIds().concat(["user-3fa9c01b", "user-0000beef"]))
+        // A second entry with the same id or name never resolves.
+        compare(ChatSites.siteIds([testCase.mistral, {id: "user-00000001", name: "le chat", url: "https://a.example/"}]),
+                ChatSites.siteIds().concat(["user-3fa9c01b"]))
+        // The built-ins are never touched.
+        compare(ChatSites.effectiveSite("claude", {}, testCase.added).site_hosts, ChatSites.byId("claude").site_hosts)
+    }
+
+    // Main frame: https anywhere public (redirects and SSO); a click off its
+    // own host goes to the browser; nothing on this computer or the home
+    // network, in any IPv4 form.
+    function test_addedSiteNavigation() {
+        compare(userNav("https://chat.mistral.ai/chat"), "allow")
+        compare(userNav("https://chat.mistral.ai/c/1", true), "allow")
+        compare(userNav("https://auth.mistral.ai/login"), "allow", "a redirect")
+        compare(userNav("https://accounts.google.com/o/oauth2"), "allow")
+        compare(userNav("https://auth.mistral.ai/login", true), "external")
+        compare(userNav("https://mistral.ai/", true), "external", "exact host only")
+        compare(userNav("about:blank"), "allow")
+        compare(userNav("http://chat.mistral.ai/"), "block")
+        compare(userNav("data:text/html,x"), "block")
+        compare(userNav("javascript:alert(1)"), "block")
+        compare(userNav("file:///etc/passwd"), "block")
+        compare(userNav("https://8.8.8.8/"), "allow", "a public literal by redirect")
+        var blocked = ["https://localhost/", "https://127.0.0.1/", "https://127.1/", "https://0x7f000001/",
+                       "https://017700000001/", "https://2130706433/", "https://[::1]/", "https://[fd00::1]/",
+                       "https://[fe80::1]/", "https://10.0.0.1/", "https://172.16.0.1/", "https://172.31.255.255/",
+                       "https://192.168.1.1/", "https://169.254.169.254/", "https://0.0.0.0/", "https://0.1.2.3/",
+                       "https://10.1/", "https://192.168.257/", "https://0300.0250.1.1/", "https://0xa.1/", "https://0xc0a80101/",
+                       "https://3232235777/", "https://foo.localhost/", "https://intranet/",
+                       "https://256.256.256.256/", "http://localhost:3000/", "https://user@chat.mistral.ai/"]
+        blocked.forEach(function (url) {
+            compare(userNav(url), "block", "main frame " + url)
+            compare(userNav(url, false, false), "block", "subframe " + url)
+            compare(userPopup(url, true), "block", "dialog " + url)
+            compare(userPopup(url, false), "block", "window " + url)
+        })
+        compare(userNav("https://1.2.3/"), "allow", "1.2.0.3")
+        compare(userNav("https://172.15.0.1/"), "allow")
+        compare(userNav("https://172.32.0.1/"), "allow")
+        compare(userNav("https://192.169.0.1/"), "allow")
+    }
+
+    function test_addedSiteSubframes() {
+        compare(userNav("https://ads.example.com/", true, false), "allow")
+        compare(userNav("http://cdn.example.com/", true, false), "allow")
+        compare(userNav("about:blank", false, false), "allow")
+        compare(userNav("blob:https://chat.mistral.ai/1", false, false), "allow")
+        compare(userNav("data:text/html,x", false, false), "allow")
+        compare(userNav("https://nas.local/", false, false), "allow")
+        // Built-ins keep their looser subframe rule (golden table).
+        compare(nav("https://10.0.0.1/", "claude", false, false), "allow")
+    }
+
+    function test_addedSiteNewWindow() {
+        // No sign-in hosts: a clicked dialog is the overlay, anything else
+        // https goes to the browser, a script-opened one is blocked.
+        compare(userPopup("https://auth.mistral.ai/", true, true), "overlay")
+        compare(userPopup("about:blank", true, true), "overlay")
+        compare(userPopup("https://auth.mistral.ai/", true, false), "block")
+        compare(userPopup("https://accounts.google.com/", false, true), "external")
+        compare(userPopup("https://chat.mistral.ai/x", false, true), "external")
+        compare(userPopup("http://chat.mistral.ai/x", false, true), "block")
+    }
+
+    // Without its entry an added id is blocked everywhere.
+    function test_addedIdWithoutUserSitesIsBlocked() {
+        ;[undefined, [], [testCase.pi], "x"].forEach(function (userSites, at) {
+            compare(userNav("https://chat.mistral.ai/chat", false, true, userSites), "block", "main " + at)
+            compare(userNav("https://chat.mistral.ai/chat", false, false, userSites), "block", "subframe " + at)
+            compare(userNav("about:blank", false, false, userSites), "block", "subframe blank " + at)
+            compare(userPopup("https://chat.mistral.ai/", true, true, userSites), "block", "popup " + at)
+            compare(ChatSites.offSiteHost({siteId: "user-3fa9c01b", url: "https://chat.mistral.ai/",
+                                           userSites: userSites}), {off: false, host: ""})
+            compare(ChatSites.isPageUrl(ChatSites.effectiveSite("user-3fa9c01b", {}, userSites),
+                                        "https://chat.mistral.ai/"), false)
+        })
+    }
+
+    function test_addedSiteOffSiteAndLocalOwner() {
+        var off = function (url) {
+            return ChatSites.offSiteHost({siteId: "user-3fa9c01b", url: url, userSites: testCase.added})
+        }
+        compare(off("https://chat.mistral.ai/c/1"), {off: false, host: ""})
+        compare(off("https://Chat.Mistral.AI./x"), {off: false, host: ""})
+        compare(off("https://auth.mistral.ai/"), {off: true, host: "auth.mistral.ai"})
+        compare(off("https://mistral.ai/"), {off: true, host: "mistral.ai"})
+        var site = ChatSites.effectiveSite("user-3fa9c01b", {}, testCase.added)
+        verify(ChatSites.isPageUrl(site, "https://chat.mistral.ai/c/1"))
+        verify(!ChatSites.isPageUrl(site, "https://localhost/"))
+        verify(!ChatSites.isPageUrl(site, "http://chat.mistral.ai/"))
+        // Never local in 005.
+        compare(ChatSites.localOwnerPort({siteId: "user-3fa9c01b", url: "https://localhost:3000/",
+                                         userSites: testCase.added}), 0)
+        compare(ChatSites.localOwnerGate({siteId: "user-3fa9c01b", url: "https://localhost:3000/",
+                                         userSites: testCase.added}), "skip")
+    }
+
+    function test_orderedSites() {
+        var order = function (userSites, text) {
+            return ChatSites.orderedSites(userSites, text).map(function (site) { return site.id })
+        }
+        var defaults = ChatSites.siteIds().concat(["user-3fa9c01b", "user-0000beef", "ollama"])
+        compare(order(testCase.added, ""), defaults)
+        compare(order(testCase.added, undefined), defaults)
+        compare(order([], ""), ChatSites.siteIds().concat(["ollama"]))
+        compare(order(undefined, ""), ChatSites.siteIds().concat(["ollama"]))
+        // A stored order; unknown ids dropped, missing ones appended in
+        // default order, a missing Ollama last.
+        compare(order(testCase.added, "[\"user-0000beef\",\"ollama\",\"grok\",\"devin\",\"user-00000009\"]"),
+                ["user-0000beef", "ollama", "grok", "claude", "chatgpt", "gemini", "copilot", "mscopilot", "local",
+                 "user-3fa9c01b"])
+        compare(order(testCase.added, "[\"grok\"]"),
+                ["grok", "claude", "chatgpt", "gemini", "copilot", "mscopilot", "local", "user-3fa9c01b",
+                 "user-0000beef", "ollama"])
+        // Damaged: the default order.
+        compare(order(testCase.added, "[\"grok\",\"grok\"]"), defaults)
+        compare(order(testCase.added, "[\"grok\",7]"), defaults)
+        compare(order(testCase.added, "{"), defaults)
+        compare(order(testCase.added, "{}"), defaults)
+        // Site objects: built-ins from the catalog, added ones built, Ollama's entry.
+        var sites = ChatSites.orderedSites(testCase.added, "")
+        compare(sites[0], ChatSites.byId("claude"))
+        compare(sites[7].user, true)
+        compare(sites[7].icon, "")
+        compare(sites[9], OllamaChat.ENTRY)
+    }
+
+    function test_serializeSiteOrder() {
+        var defaults = ChatSites.siteIds(testCase.added).concat(["ollama"])
+        compare(ChatSites.serializeSiteOrder(defaults, testCase.added), "")
+        compare(ChatSites.serializeSiteOrder([], testCase.added), "")
+        var moved = ChatSites.moveInOrder(defaults, "ollama", -1)
+        compare(ChatSites.serializeSiteOrder(moved, testCase.added), JSON.stringify(moved))
+        // Round trip.
+        compare(ChatSites.orderedSites(testCase.added, ChatSites.serializeSiteOrder(moved, testCase.added))
+                .map(function (site) { return site.id }), moved)
+        // Unknown ids are not written; the rest is completed.
+        compare(ChatSites.serializeSiteOrder(["user-00000009", "grok"], []),
+                JSON.stringify(["grok", "claude", "chatgpt", "gemini", "copilot", "mscopilot", "local", "ollama"]))
+        compare(ChatSites.serializeSiteOrder(["ollama"].concat(ChatSites.siteIds()), []),
+                JSON.stringify(["ollama"].concat(ChatSites.siteIds())))
+    }
+
+    function test_moveInOrder() {
+        compare(ChatSites.moveInOrder(["a", "b", "c"], "b", -1), ["b", "a", "c"])
+        compare(ChatSites.moveInOrder(["a", "b", "c"], "b", 1), ["a", "c", "b"])
+        compare(ChatSites.moveInOrder(["a", "b", "c"], "a", -1), ["a", "b", "c"])
+        compare(ChatSites.moveInOrder(["a", "b", "c"], "c", 1), ["a", "b", "c"])
+        compare(ChatSites.moveInOrder(["a", "b", "c"], "x", 1), ["a", "b", "c"])
+        compare(ChatSites.moveInOrder(["a", "b", "c"], "a", 0.5), ["a", "b", "c"])
+        compare(ChatSites.moveInOrder(null, "a", 1), [])
+        var list = ["a", "b"]
+        ChatSites.moveInOrder(list, "a", 1)
+        compare(list, ["a", "b"], "a copy")
+    }
+
+    function test_enabledSitesFollowTheOrder() {
+        var json = JSON.stringify(["claude", "grok", "user-0000beef", "user-3fa9c01b", "ollama"])
+        compare(ids(ChatSites.enabledSites(json, testCase.added, "")),
+                ["claude", "grok", "user-3fa9c01b", "user-0000beef"])
+        compare(ids(ChatSites.enabledSites(json, testCase.added, "[\"user-0000beef\",\"grok\"]")),
+                ["user-0000beef", "grok", "claude", "user-3fa9c01b"])
+        // Without userSites an added id is never enabled.
+        compare(ids(ChatSites.enabledSites(json)), ["claude", "grok"])
+        // Unreadable chatSites: the default-on built-ins only.
+        compare(ids(ChatSites.enabledSites("x", testCase.added, "")), ChatSites.defaultSiteIds())
+    }
+
+    function test_badgeLetter() {
+        compare(ChatSites.badgeLetter("le Chat"), "L")
+        compare(ChatSites.badgeLetter("  pi "), "P")
+        compare(ChatSites.badgeLetter("éclair"), "É")
+        compare(ChatSites.badgeLetter("éclair"), "E", "combining mark: the first code point")
+        compare(ChatSites.badgeLetter("😀 Smile"), "😀")
+        compare(ChatSites.badgeLetter("\ud83d"), "\ud83d".toUpperCase())
+        compare(ChatSites.badgeLetter("日本"), "日")
+        compare(ChatSites.badgeLetter(""), "?")
+        compare(ChatSites.badgeLetter("   "), "?")
+        compare(ChatSites.badgeLetter(undefined), "?")
+    }
+
+    function test_userSitesPerformance() {
+        var many = []
+        for (var index = 0; index < 200; index++)
+            many.push({id: "user-" + ("0000000" + index.toString(16)).slice(-8), name: "Site " + index,
+                       url: "https://s" + index + ".example.org/"})
+        var start = Date.now()
+        for (var run = 0; run < 20; run++)
+            ChatSites.classifyNavigation({siteId: "user-000000c7", url: "https://s199.example.org/", userSites: many})
+        verify(Date.now() - start < 2000, "a navigation with 200 added sites stays quick")
     }
 
     function test_catalogOrderAndFields() {

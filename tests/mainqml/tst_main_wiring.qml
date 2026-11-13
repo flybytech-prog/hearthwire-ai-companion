@@ -44,11 +44,12 @@ TestCase {
     readonly property string warningPick: "#aa0000"
     readonly property string criticalPick: "#0000aa"
 
-    // Plasma injects i18n(); a stand-in that fills %1, %2...
+    // Plasma injects i18n(); a stand-in that fills %1, %2... (each one
+    // wherever it appears, as KI18n does).
     function i18n(text) {
         var result = text
         for (var index = 1; index < arguments.length; index++)
-            result = result.replace("%" + index, String(arguments[index]))
+            result = result.split("%" + index).join(String(arguments[index]))
         return result
     }
 
@@ -1408,7 +1409,7 @@ TestCase {
         alertLowEnabled: true,
         alertResetEnabled: true,
         alertLowPercent: 40,
-        chatSites: "[\"claude\",\"ollama\",\"local\"]",
+        chatSites: "[\"claude\",\"ollama\",\"local\",\"user-3fa9c01b\"]",
         chatDefaultSite: "ollama",
         chatOllamaUrl: "http://[::1]:11434",
         chatKeepOpen: true,
@@ -1419,7 +1420,9 @@ TestCase {
         shortcutOpens: "ollama",
         panelRing: "codex.spark_weekly",
         middleClickOpens: "mscopilot",
-        chatCustomUrls: "{\"claude\":\"https://claude.example.org/new?x=1\",\"local\":\"http://localhost:8080/\"}"
+        chatCustomUrls: "{\"claude\":\"https://claude.example.org/new?x=1\",\"local\":\"http://localhost:8080/\"}",
+        chatUserSites: "[{\"id\":\"user-3fa9c01b\",\"name\":\"Le Chat\",\"url\":\"https://chat.mistral.ai/chat\"}]",
+        chatSiteOrder: "[\"user-3fa9c01b\",\"claude\",\"ollama\"]"
     })
 
     // The settings page after its first status check.
@@ -1621,7 +1624,7 @@ TestCase {
         compare(generalPart(page, "backupMessage").text, "Backup loaded. Press Apply to save it.")
         for (var key in goodBackup)
             compare(page["cfg_" + key], goodBackup[key], key)
-        compare(Object.keys(goodBackup).length, 28, "the fixture is complete")
+        compare(Object.keys(goodBackup).length, 30, "the fixture is complete")
         // The page shows what it took over.
         compare(generalPart(page, "middleClickChoice").currentValue, "mscopilot")
         // Out again is the helper's part (it reads the applied settings).
@@ -2380,8 +2383,9 @@ TestCase {
     }
 
     // Unlocked and prepared for the shown site (claude), keep and prune
-    // done; with popup, through the real Chat tab's start.
-    function unlockedMain(settings, popup) {
+    // done; with popup, through the real Chat tab's start. known: the ids
+    // prune keeps (the built-ins when left out).
+    function unlockedMain(settings, popup, known) {
         var main = loadMain(Object.assign({chatSignInStorage: "encrypted"}, settings || {}))
         compare(main.chatWebSiteId, "claude")
         var generation = main.chatGeneration
@@ -2392,7 +2396,8 @@ TestCase {
         expectStorage(main, "--vault status", testCase.unlockedReply)
         expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
         expectStorage(main, webData("remove", " --keep " + generation))
-        expectStorage(main, webData("prune", " --generation " + generation + " --known " + builtIns.join(",")))
+        expectStorage(main, webData("prune", " --generation " + generation + " --known "
+                                    + (known || builtIns).join(",")))
         verify(main.chatStorageReady)
         compare(main.chatReadySites, ["claude"])
         return main
@@ -3193,5 +3198,567 @@ TestCase {
         expectStorage(main, webData("prepare", " --generation " + generation + " --sites gemini"))
         verify(main.chatReadySites.indexOf("gemini") >= 0)
         compare(chat.web.preparedSites.indexOf("gemini") >= 0, true)
+    }
+
+    // --- task 005: added sites ----------------------------------------------
+
+    readonly property var lechat: ({id: "user-3fa9c01b", name: "Le Chat", url: "https://chat.mistral.ai/chat"})
+    readonly property var pi: ({id: "user-0000beef", name: "Pi", url: "https://pi.ai/talk"})
+
+    function userSites(list) {
+        return JSON.stringify(list)
+    }
+
+    // Both added sites, on, next to claude.
+    function addedSettings(extra) {
+        return Object.assign({
+            chatUserSites: userSites([testCase.lechat, testCase.pi]),
+            chatSites: JSON.stringify(["claude", "chatgpt", "user-3fa9c01b", "user-0000beef"])
+        }, extra || {})
+    }
+
+    readonly property var knownWithAdded: builtIns.concat(["user-3fa9c01b", "user-0000beef"])
+
+    function test_addedSitesJoinTheChatTab() {
+        var main = loadMain(addedSettings({chatSiteOrder: JSON.stringify(["user-0000beef", "claude"])}))
+        verify(main.chatUserSitesOk)
+        compare(main.chatSiteIds, ["user-0000beef", "claude", "chatgpt", "user-3fa9c01b"])
+        compare(main.chatKnownSites, knownWithAdded)
+        compare(main.chatUserSiteIdsSeen, ["user-3fa9c01b", "user-0000beef"])
+        // Ollama follows the order too.
+        Plasmoid.configuration.chatSites = JSON.stringify(["claude", "user-0000beef", "ollama"])
+        Plasmoid.configuration.chatSiteOrder = JSON.stringify(["ollama", "user-0000beef"])
+        compare(main.chatSiteIds, ["ollama", "user-0000beef", "claude"])
+        compare(main.chatWebSiteIds, ["user-0000beef", "claude"])
+    }
+
+    // An added site shown with Stay signed in gets its own folder.
+    function test_addedSiteIsPreparedWithSavedSignIns() {
+        var main = unlockedMain(addedSettings(), false, knownWithAdded)
+        var generation = main.chatGeneration
+        main.chatSiteId = "user-3fa9c01b"
+        main.chatSiteWanted("user-3fa9c01b")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites user-3fa9c01b"))
+        compare(main.chatReadySites, ["claude", "user-3fa9c01b"])
+        // An added id the settings don't have is never prepared.
+        main.chatSiteWanted("user-00c0ffee")
+        wait(50)
+        verify(storageCommands(main).every(function (command) { return command.indexOf("user-00c0ffee") < 0 }))
+    }
+
+    // Unlocked, with the real Chat tab: the owed delete is stored before
+    // the tab drops the site; after the wait only its folder is deleted, a
+    // busy answer is tried again.
+    function test_removedSiteUnlockedIsDeletedAfterTheTeardown() {
+        var main = unlockedMain(addedSettings(), true, knownWithAdded)
+        var generation = main.chatGeneration
+        var chat = testCase.chatOpened
+        tryVerify(function () { return chat.persistentActive }, 3000)
+        verify(main.chatWebLoaded)
+        main.chatRemoveRetryWait = 100
+        main.chatSiteId = "user-3fa9c01b"
+        main.chatSiteWanted("user-3fa9c01b")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites user-3fa9c01b"))
+        compare(main.chatReadySites, ["claude", "user-3fa9c01b"])
+        var signalled = []
+        main.chatUserSitesRemoved.connect(function (ids) {
+            signalled.push({ids: ids, pending: Plasmoid.configuration.chatPendingSiteClears,
+                            fresh: main.chatFreshSites.slice()})
+        })
+        var storedAtTeardown = []
+        chat.web.holdRelease = true
+        chat.web.clearHook = function (siteId) { storedAtTeardown.push(Plasmoid.configuration.chatPendingSiteClears) }
+        var count = webDataCommands(main).length
+        Plasmoid.configuration.chatUserSites = userSites([testCase.pi])
+        compare(signalled, [{ids: ["user-3fa9c01b"], pending: "user-3fa9c01b", fresh: ["claude"]}])
+        compare(chat.web.clearedSites, ["user-3fa9c01b"])
+        compare(storedAtTeardown, ["user-3fa9c01b"])
+        compare(main.chatKnownSites, builtIns.concat(["user-0000beef"]))
+        // Nothing deleted before the web view released the profile.
+        wait(50)
+        compare(webDataCommands(main).length, count)
+        chat.web.siteReleased("user-3fa9c01b")
+        var remove = webData("remove-site", " --generation " + generation + " --site user-3fa9c01b")
+        expectRun(main, remove, 1, testCase.removeBusy)
+        compare(Plasmoid.configuration.chatPendingSiteClears, "user-3fa9c01b")
+        expectRun(main, remove, 2)
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
+        // Only that folder; the removed site is never prepared again.
+        var after = webDataCommands(main).slice(count)
+        verify(after.every(function (command) {
+            return command === remove || command.indexOf("--web-data prepare") === 0
+        }), JSON.stringify(after))
+        verify(after.every(function (command) { return command.indexOf("--sites user-3fa9c01b") < 0 }))
+    }
+
+    // Without a web view no profile exists: the removed site is released
+    // at once, and its folder deleted after the wait.
+    function test_removedSiteWithoutAWebViewIsReleasedAtOnce() {
+        var main = unlockedMain(addedSettings(), false, knownWithAdded)
+        var generation = main.chatGeneration
+        verify(!main.chatWebLoaded)
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechat])
+        compare(Plasmoid.configuration.chatPendingSiteClears, "user-0000beef")
+        tryVerify(function () { return main.chatOp === "wait" }, 3000)
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site user-0000beef"))
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
+    }
+
+    // Locked: the debt is stored and nothing runs; the next unlock deletes
+    // the folder first, then prepares, keeps and prunes with the ids left.
+    function test_removedSiteWhileLockedIsDeletedAtTheNextUnlock() {
+        var main = loadMain(addedSettings({chatSignInStorage: "encrypted"}))
+        var generation = main.chatGeneration
+        main.chatStorageRequest("open")
+        expectStorage(main, "--vault status", JSON.stringify({ok: true, state: "locked", wallet: "off"}))
+        var count = storageCommands(main).length
+        Plasmoid.configuration.chatUserSites = userSites([testCase.pi])
+        compare(Plasmoid.configuration.chatPendingSiteClears, "user-3fa9c01b")
+        wait(1200)
+        compare(storageCommands(main).length, count, "nothing runs while locked")
+        main.chatStorageRequest("unlock")
+        expectStorage(main, "--vault unlock")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site user-3fa9c01b"))
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
+        expectStorage(main, webData("remove", " --keep " + generation))
+        expectStorage(main, webData("prune", " --generation " + generation + " --known "
+                                    + builtIns.concat(["user-0000beef"]).join(",")))
+    }
+
+    // A restart with a debt (e.g. removed while the widget wasn't running):
+    // the same order at the first unlock.
+    function test_owedAddedSiteDeleteAtStart() {
+        var main = loadMain(addedSettings({chatSignInStorage: "encrypted", chatPendingSiteClears: "user-00c0ffee"}))
+        var generation = main.chatGeneration
+        main.chatStorageRequest("open")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site user-00c0ffee"))
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
+    }
+
+    // Memory mode: nothing on disk, no helper command, nothing stored.
+    function test_removedSiteInMemoryModeRunsNothing() {
+        var main = loadMain(addedSettings())
+        var removed = []
+        main.chatUserSitesRemoved.connect(function (ids) { removed.push(ids) })
+        Plasmoid.configuration.chatUserSites = "[]"
+        compare(removed, [["user-3fa9c01b", "user-0000beef"]])
+        wait(1200)
+        compare(storageCommands(main), [])
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
+        compare(main.chatSiteIds, ["claude", "chatgpt"])
+    }
+
+    // A damaged chatUserSites deletes nothing: no prune can be built, no
+    // removal is worked out from it, no debt is stored, the zoom stays.
+    function test_damagedUserSitesDeleteNothing() {
+        var damaged = JSON.stringify([testCase.lechat, Object.assign({local: true}, testCase.pi)])
+        var zoom = JSON.stringify({"user-3fa9c01b": 1.5, claude: 1.25})
+        var main = loadMain(addedSettings({chatSignInStorage: "encrypted", chatUserSites: damaged,
+                                           chatSiteZoom: zoom}))
+        var generation = main.chatGeneration
+        verify(!main.chatUserSitesOk)
+        compare(main.chatKnownSites, [])
+        compare(main.chatUserSiteIdsSeen, null)
+        // Its valid entry still shows.
+        compare(main.chatSiteIds, ["claude", "chatgpt", "user-3fa9c01b"])
+        var removed = []
+        main.chatUserSitesRemoved.connect(function (ids) { removed.push(ids) })
+        main.chatStorageRequest("open")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
+        expectStorage(main, webData("remove", " --keep " + generation))
+        wait(100)
+        verify(storageCommands(main).every(function (command) { return command.indexOf("--web-data prune") < 0 }),
+               "no prune without an ok read")
+        var before = JSON.stringify(main.chatZoom)
+        // Another damaged value without Le Chat: still nothing removed.
+        Plasmoid.configuration.chatUserSites = "[{"
+        compare(removed, [])
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
+        compare(JSON.stringify(main.chatZoom), before)
+        compare(Plasmoid.configuration.chatSiteZoom, zoom)
+        // The first ok read only starts the list; it removes nothing.
+        Plasmoid.configuration.chatUserSites = userSites([testCase.pi])
+        compare(removed, [])
+        compare(main.chatUserSiteIdsSeen, ["user-0000beef"])
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
+        // From then on a removal counts.
+        Plasmoid.configuration.chatUserSites = "[]"
+        compare(removed, [["user-0000beef"]])
+    }
+
+    // A removed site's zoom goes, stored only through the zoom timer.
+    function test_removedSiteZoomIsPrunedByTheTimer() {
+        var zoom = JSON.stringify({claude: 1.25, "user-0000beef": 0.8, "user-3fa9c01b": 1.5})
+        var main = loadMain(addedSettings({chatSiteZoom: zoom}))
+        compare(main.chatZoom, {claude: 1.25, "user-0000beef": 0.8, "user-3fa9c01b": 1.5})
+        Plasmoid.configuration.chatUserSites = userSites([testCase.pi])
+        compare(main.chatZoom, {claude: 1.25, "user-0000beef": 0.8})
+        compare(Plasmoid.configuration.chatSiteZoom, zoom, "not written at once")
+        tryVerify(function () {
+            return Plasmoid.configuration.chatSiteZoom === JSON.stringify({claude: 1.25, "user-0000beef": 0.8})
+        }, 3000)
+        // Nothing to prune: no write.
+        Plasmoid.configuration.chatUserSites = userSites([testCase.pi, testCase.lechat])
+        wait(1300)
+        compare(Plasmoid.configuration.chatSiteZoom, JSON.stringify({claude: 1.25, "user-0000beef": 0.8}))
+        // An added site's own zoom works like a built-in's.
+        main.setSiteZoom("user-3fa9c01b", 1.1)
+        compare(main.chatZoom["user-3fa9c01b"], 1.1)
+    }
+
+    // Middle-click on an added site; once it is removed: Refresh. The
+    // setting itself is left alone.
+    function test_middleClickOnARemovedSiteRefreshes() {
+        var main = loadMain(addedSettings({middleClickOpens: "user-0000beef"}))
+        compare(main.middleClickTarget, "user-0000beef")
+        main.middleClick()
+        compare(main.expanded, true)
+        compare(main.chatSiteId, "user-0000beef")
+        main.expanded = false
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechat])
+        compare(main.middleClickTarget, "refresh")
+        compare(Plasmoid.configuration.middleClickOpens, "user-0000beef")
+        main.refreshQueued = false
+        var runs = main.refreshRun
+        main.middleClick()
+        verify(main.refreshRun > runs || main.refreshQueued, "a refresh ran or queued")
+        compare(main.expanded, false)
+    }
+
+    // The real picker: in order, added sites with their badge, names as
+    // plain text.
+    function test_pickerShowsAddedSitesInOrder() {
+        var main = loadMain(addedSettings({chatSiteOrder: JSON.stringify(["user-0000beef", "claude"])}))
+        var full = createTemporaryObject(main.fullRepresentation, main, {width: 900, height: 800})
+        verify(full)
+        var views = allNamed(full, "chatView")
+        views[0].webSource = testCase.chatWebStub
+        compare(views[0].userSites, main.chatUserSites)
+        compare(main.chatSites.map(function (site) { return site.id }),
+                ["user-0000beef", "claude", "chatgpt", "user-3fa9c01b"])
+        compare(main.chatSites[0].name, "Pi")
+        compare(main.chatSites[0].user, true)
+    }
+
+    // --- Settings → Chat: the site table ----------------------------------
+
+    // A settings page as Plasma opens it: the applied settings, and its cfg_
+    // values taken from them.
+    function pageWith(file, settings) {
+        var page = load(file, settings || {})
+        for (var key in settings || {})
+            page["cfg_" + key] = settings[key]
+        return page
+    }
+
+    function chatPage(settings) {
+        return pageWith(testCase.chatPageFile, settings)
+    }
+
+    function rowOf(page, siteId) {
+        var rows = allNamed(page, "siteRow").filter(function (row) { return row.siteId === siteId })
+        return rows.length === 1 ? rows[0] : null
+    }
+
+    function rowIds(page) {
+        return allNamed(page, "siteRow").filter(function (row) { return row.visible })
+            .map(function (row) { return row.siteId })
+    }
+
+    function partOf(item, objectName) {
+        var found = allNamed(item, objectName)
+        verify(found.length > 0, objectName + " exists")
+        return found[0]
+    }
+
+    function test_settingsTableRows() {
+        var page = chatPage(addedSettings())
+        tryVerify(function () { return rowIds(page).length === 10 }, 3000)
+        compare(rowIds(page), builtIns.concat(["user-3fa9c01b", "user-0000beef", "ollama"]))
+        var lechat = rowOf(page, "user-3fa9c01b")
+        compare(partOf(lechat, "siteName").text, "Le Chat")
+        compare(partOf(lechat, "siteName").textFormat, Text.PlainText)
+        compare(partOf(lechat, "siteAddress").text, "chat.mistral.ai")
+        compare(partOf(lechat, "siteAddress").textFormat, Text.PlainText)
+        compare(partOf(lechat, "editSite").text, "Edit Le Chat")
+        compare(partOf(lechat, "moveUp").text, "Move Le Chat up")
+        compare(partOf(lechat, "moveDown").text, "Move Le Chat down")
+        compare(partOf(lechat, "removeSite").text, "Remove Le Chat")
+        verify(partOf(lechat, "removeSite").enabled)
+        verify(!partOf(rowOf(page, "claude"), "removeSite").enabled, "built-ins can't be removed")
+        verify(!partOf(rowOf(page, "claude"), "moveUp").enabled, "first row")
+        verify(!partOf(rowOf(page, "ollama"), "moveDown").enabled, "last row")
+        compare(partOf(rowOf(page, "claude"), "siteAddress").text, "claude.ai")
+        var badges = allNamed(lechat, "").filter(function (item) { return item.name === "Le Chat" && item.radius > 0 })
+        verify(badges.length === 1 && badges[0].visible, "a letter badge")
+        compare(badges[0].Accessible.ignored, true)
+        compare(partOf(page, "removalWarning").visible, false)
+    }
+
+    function test_settingsAddSite() {
+        var page = chatPage({chatSites: JSON.stringify(["claude", "ollama"])})
+        partOf(page, "addSite").clicked()
+        compare(page.editingId, "new")
+        var name = partOf(page, "editorName")
+        var address = partOf(page, "editorAddress")
+        // Invalid: a fixed message, nothing written.
+        name.text = "Le <b>Chat</b>"
+        address.text = "https://chat.mistral.ai/"
+        partOf(page, "editorSave").clicked()
+        compare(partOf(page, "editorError").text,
+                "Names can't contain <, >, &, control characters or invisible formatting characters.")
+        compare(partOf(page, "editorError").textFormat, Text.PlainText)
+        compare(page.cfg_chatUserSites, "[]")
+        name.text = "  Le Chat "
+        address.text = "http://chat.mistral.ai/"
+        partOf(page, "editorSave").clicked()
+        compare(partOf(page, "editorError").text, "Only https:// addresses can be added.")
+        compare(page.cfg_chatUserSites, "[]")
+        address.text = " https://chat.mistral.ai/chat "
+        partOf(page, "editorSave").clicked()
+        compare(page.editingId, "", "closed")
+        var read = ChatSites.parseUserSites(page.cfg_chatUserSites)
+        verify(read.ok)
+        compare(read.sites.length, 1)
+        compare(read.sites[0].name, "Le Chat", "trimmed")
+        compare(read.sites[0].url, "https://chat.mistral.ai/chat")
+        var id = read.sites[0].id
+        verify(ChatSites.isUserSiteId(id))
+        // On, at the end above Ollama: still the default order.
+        compare(JSON.parse(page.cfg_chatSites), ["claude", "ollama", id])
+        compare(page.cfg_chatSiteOrder, "")
+        compare(rowIds(page).slice(-2), [id, "ollama"])
+        // Moving Ollama up, then adding: the new site goes last.
+        page.moveSite("ollama", -1)
+        compare(page.saveUserSite("new", "Pi", "https://pi.ai/talk"), "")
+        compare(page.tableIds.slice(-3), ["ollama", id, ChatSites.parseUserSites(page.cfg_chatUserSites).sites[1].id])
+        // A taken name.
+        compare(page.saveUserSite("new", "pi", "https://other.example/"), "name-taken")
+        compare(page.saveUserSite("new", "Claude", "https://other.example/"), "name-taken")
+    }
+
+    function test_settingsAddCap() {
+        var list = []
+        for (var index = 0; index < 200; index++)
+            list.push({id: "user-" + ("0000000" + index.toString(16)).slice(-8), name: "S" + index,
+                       url: "https://s" + index + ".example.org/"})
+        var page = chatPage({chatUserSites: userSites(list)})
+        verify(!page.canAddSite)
+        partOf(page, "addSite").clicked()
+        tryVerify(function () { return partOf(page, "editorFull").visible }, 3000)
+        compare(partOf(page, "editorFull").text, "Can't add more sites.")
+        compare(page.saveUserSite("new", "One more", "https://more.example/"), "full")
+        compare(ChatSites.parseUserSites(page.cfg_chatUserSites).sites.length, 200)
+    }
+
+    function test_settingsEditAddedSite() {
+        var page = chatPage(addedSettings({chatDefaultSite: "user-3fa9c01b"}))
+        page.openEditor("user-3fa9c01b")
+        var name = partOf(page, "editorName")
+        var address = partOf(page, "editorAddress")
+        compare(name.text, "Le Chat")
+        compare(address.text, "https://chat.mistral.ai/chat")
+        // Same host: same id, profile and data.
+        name.text = "Mistral"
+        address.text = "https://chat.mistral.ai/other"
+        compare(partOf(page, "editorHostChange").visible, false)
+        partOf(page, "editorSave").clicked()
+        var sites = ChatSites.parseUserSites(page.cfg_chatUserSites).sites
+        compare(sites[0], {id: "user-3fa9c01b", name: "Mistral", url: "https://chat.mistral.ai/other"})
+        compare(partOf(page, "removalWarning").visible, false)
+        // Another host (M1): warned, then a new id at the same place; the
+        // old one counts as removed.
+        page.openEditor("user-3fa9c01b")
+        address = partOf(page, "editorAddress")
+        address.text = "https://le-chat.example.org/"
+        var warning = partOf(page, "editorHostChange")
+        tryVerify(function () { return warning.visible }, 3000)
+        compare(warning.text, "This is another site: Hearthwire signs you out of Mistral and deletes its site data.")
+        compare(warning.textFormat, Text.PlainText)
+        partOf(page, "editorSave").clicked()
+        sites = ChatSites.parseUserSites(page.cfg_chatUserSites).sites
+        compare(sites.length, 2)
+        verify(sites[0].id !== "user-3fa9c01b" && ChatSites.isUserSiteId(sites[0].id))
+        compare(sites[0].name, "Mistral")
+        compare(sites[0].url, "https://le-chat.example.org/")
+        compare(sites[1].id, "user-0000beef")
+        compare(JSON.parse(page.cfg_chatSites), ["claude", "chatgpt", sites[0].id, "user-0000beef"])
+        compare(page.cfg_chatDefaultSite, sites[0].id)
+        compare(page.tableIds.indexOf(sites[0].id), 7)
+        var removal = partOf(page, "removalWarning")
+        compare(removal.visible, true)
+        compare(removal.text, "When you apply, 1 removed site is signed out and its site data is deleted.")
+        compare(removal.textFormat, Text.PlainText)
+        // Escape or Cancel close the editor unchanged.
+        var before = page.cfg_chatUserSites
+        page.openEditor("user-0000beef")
+        partOf(page, "editorName").text = "Changed"
+        partOf(page, "editorCancel").clicked()
+        compare(page.editingId, "")
+        compare(page.cfg_chatUserSites, before)
+    }
+
+    function test_settingsRemoveSite() {
+        var page = chatPage(addedSettings({chatDefaultSite: "user-0000beef",
+                                           chatSiteOrder: JSON.stringify(["user-0000beef", "claude"])}))
+        var row = rowOf(page, "user-0000beef")
+        partOf(row, "removeSite").clicked()
+        compare(page.confirmingRemove, "user-0000beef")
+        var text = partOf(row, "removeText")
+        compare(text.visible, true)
+        compare(text.textFormat, Text.PlainText)
+        compare(text.text, "Remove Pi? This also signs you out of Pi and deletes its site data.")
+        partOf(row, "removeCancel").clicked()
+        compare(page.confirmingRemove, "")
+        compare(ChatSites.parseUserSites(page.cfg_chatUserSites).sites.length, 2)
+        partOf(row, "removeSite").clicked()
+        partOf(row, "removeConfirm").clicked()
+        compare(ChatSites.parseUserSites(page.cfg_chatUserSites).sites, [testCase.lechat])
+        compare(JSON.parse(page.cfg_chatSites), ["claude", "chatgpt", "user-3fa9c01b"])
+        compare(page.cfg_chatSiteOrder, JSON.stringify(["claude"].concat(builtIns.slice(1), ["user-3fa9c01b", "ollama"]))
+                === page.cfg_chatSiteOrder ? page.cfg_chatSiteOrder : "")
+        verify(page.cfg_chatSiteOrder.indexOf("user-0000beef") < 0)
+        compare(page.cfg_chatDefaultSite, "claude", "the first enabled one in table order")
+        compare(page.cfg_middleClickOpens, "refresh", "not written")
+        var removal = partOf(page, "removalWarning")
+        compare(removal.visible, true)
+        compare(removal.text, "When you apply, 1 removed site is signed out and its site data is deleted.")
+        // Nothing reached the configuration (Apply does that).
+        compare(Plasmoid.configuration.chatUserSites, userSites([testCase.lechat, testCase.pi]))
+    }
+
+    // Defaults removes the added sites, behind the same warning (§12).
+    function test_settingsDefaultsWarnBeforeApply() {
+        var page = chatPage(addedSettings())
+        page.cfg_chatUserSites = page.cfg_chatUserSitesDefault
+        page.cfg_chatSiteOrder = page.cfg_chatSiteOrderDefault
+        compare(page.cfg_chatUserSitesDefault, "[]")
+        compare(page.cfg_chatSiteOrderDefault, "")
+        var removal = partOf(page, "removalWarning")
+        compare(removal.visible, true)
+        compare(removal.text, "When you apply, 2 removed sites are signed out and their site data is deleted.")
+        compare(rowIds(page), builtIns.concat(["ollama"]))
+    }
+
+    function test_settingsReorder() {
+        var page = chatPage(addedSettings())
+        partOf(rowOf(page, "user-0000beef"), "moveUp").clicked()
+        compare(JSON.parse(page.cfg_chatSiteOrder),
+                builtIns.concat(["user-0000beef", "user-3fa9c01b", "ollama"]))
+        partOf(rowOf(page, "user-0000beef"), "moveDown").clicked()
+        compare(page.cfg_chatSiteOrder, "", "the default order again")
+        partOf(rowOf(page, "claude"), "moveDown").clicked()
+        compare(JSON.parse(page.cfg_chatSiteOrder).slice(0, 2), ["chatgpt", "claude"])
+        // Reorder changes no site.
+        compare(page.cfg_chatUserSites, userSites([testCase.lechat, testCase.pi]))
+        // Open first follows the order.
+        compare(page.enabledIds, ["chatgpt", "claude", "user-3fa9c01b", "user-0000beef"])
+    }
+
+    // Built-in and Ollama addresses: written only on Save, only when valid.
+    function test_settingsSaveWritesOnlyValidAddresses() {
+        var page = chatPage({})
+        page.openEditor("claude")
+        var address = partOf(page, "editorAddress")
+        compare(address.placeholderText, "https://claude.ai/new")
+        address.text = "https://admin:1234@claude.example.org/"
+        compare(page.cfg_chatCustomUrls, "{}", "never while typing")
+        partOf(page, "editorSave").clicked()
+        compare(partOf(page, "editorError").text, "Addresses with a user name or password aren't allowed.")
+        compare(page.cfg_chatCustomUrls, "{}")
+        address.text = "https://claude.example.org/"
+        partOf(page, "editorSave").clicked()
+        compare(page.cfg_chatCustomUrls, JSON.stringify({claude: "https://claude.example.org/"}))
+        compare(partOf(rowOf(page, "claude"), "siteAddress").text, "claude.example.org")
+        page.openEditor("claude")
+        compare(partOf(page, "editorAddress").text, "https://claude.example.org/")
+        partOf(page, "editorUseDefault").clicked()
+        partOf(page, "editorSave").clicked()
+        compare(page.cfg_chatCustomUrls, "{}")
+        // Ollama.
+        page.openEditor("ollama")
+        address = partOf(page, "editorAddress")
+        address.text = "http://192.168.1.2:11434"
+        partOf(page, "editorSave").clicked()
+        compare(partOf(page, "editorError").text, "Only this computer is allowed: 127.0.0.1, localhost or [::1].")
+        compare(page.cfg_chatOllamaUrl, "http://127.0.0.1:11434")
+        address.text = "http://[::1]:11434/"
+        partOf(page, "editorSave").clicked()
+        compare(page.cfg_chatOllamaUrl, "http://[::1]:11434")
+    }
+
+    // A new id is never one the page has seen or one still owing a delete.
+    function test_settingsNewIdsAvoidOwedOnes() {
+        var page = chatPage(addedSettings({chatPendingSiteClears: "user-00c0ffee"}))
+        var id = page.newSiteId()
+        verify(ChatSites.isUserSiteId(id))
+        verify(["user-3fa9c01b", "user-0000beef", "user-00c0ffee"].indexOf(id) < 0)
+        verify(page.seenUserSiteIds.indexOf(id) >= 0)
+        verify(page.seenUserSiteIds.indexOf("user-3fa9c01b") >= 0)
+    }
+
+    // --- Settings → General: middle-click list and backups ----------------
+
+    function test_settingsMiddleClickListsAddedSitesInOrder() {
+        var page = pageWith(testCase.generalPageFile, addedSettings({
+            chatSiteOrder: JSON.stringify(["user-0000beef", "claude"]), middleClickOpens: "user-0000beef"}))
+        compare(page.middleClickChoices.map(function (choice) { return choice.value }),
+                ["refresh", "usage", "ollama", "user-0000beef", "claude", "chatgpt", "grok", "gemini", "copilot",
+                 "mscopilot", "local", "user-3fa9c01b"])
+        compare(page.middleClickChoices[3].text, "Pi")
+        compare(page.middleClickChoices[3].user, true)
+        compare(generalPart(page, "middleClickChoice").currentValue, "user-0000beef")
+    }
+
+    function test_backupImportListsAddedSites() {
+        var page = backupPage()
+        page.cfg_chatUserSites = userSites([testCase.lechat])
+        importing(page, {chatUserSites: userSites([testCase.pi]), popupSize: "large"})
+        var label = generalPart(page, "backupAddressChanges")
+        compare(label.visible, true)
+        compare(label.textFormat, Text.PlainText)
+        compare(label.text, ["This changes 2 chat addresses:", "Adds Pi (pi.ai)",
+                             "Removes Le Chat and deletes its site data when you apply"].join("\n"))
+    }
+
+    // Replace sets both keys; a list without the applied sites warns.
+    function test_backupApplySetsTheAddedSites() {
+        var page = backupPage()
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechat])
+        page.cfg_chatUserSites = userSites([testCase.lechat])
+        compare(generalPart(page, "removalWarning").visible, false)
+        importing(page, {chatUserSites: userSites([testCase.pi]),
+                         chatSiteOrder: JSON.stringify(["user-0000beef", "claude"]),
+                         chatSites: JSON.stringify(["claude", "user-0000beef"]),
+                         middleClickOpens: "user-3fa9c01b"})
+        compare(page.backupPlan.dropped, 1, "an id the backup's own list doesn't have")
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        compare(page.cfg_chatUserSites, userSites([testCase.pi]))
+        compare(page.cfg_chatSiteOrder, JSON.stringify(["user-0000beef", "claude"]))
+        compare(page.cfg_chatSites, JSON.stringify(["claude", "user-0000beef"]))
+        compare(page.cfg_middleClickOpens, "refresh")
+        var removal = generalPart(page, "removalWarning")
+        compare(removal.visible, true)
+        compare(removal.textFormat, Text.PlainText)
+        compare(removal.text, "When you apply, 1 removed site is signed out and its site data is deleted.")
+    }
+
+    function test_pagesDeclareTheSiteTableKeys_data() {
+        return [{tag: "usage", file: testCase.usagePageFile}, {tag: "general", file: testCase.generalPageFile},
+                {tag: "chat", file: testCase.chatPageFile}]
+    }
+
+    function test_pagesDeclareTheSiteTableKeys(data) {
+        var page = load(data.file, {})
+        compare(page.cfg_chatUserSites, "[]")
+        compare(page.cfg_chatUserSitesDefault, "[]")
+        compare(page.cfg_chatSiteOrder, "")
+        compare(page.cfg_chatSiteOrderDefault, "")
+        compare(Plasmoid.configuration.chatUserSites, "[]", "main.xml default")
+        compare(Plasmoid.configuration.chatSiteOrder, "", "main.xml default")
     }
 }

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from hearthwire.core import settingsbackup
+from hearthwire.core import settingsbackup, webdata
 from hearthwire.core.appletconfig import CONFIG_ENTRIES, applied_from
 from hearthwire.core.settingsbackup import BACKUP_KEYS, EXCLUDED_KEYS
 
@@ -139,7 +139,7 @@ def run_export(monkeypatch, tmp_path):
 
 
 def checked_problems(code, backup):
-    body = function_body(code, r"checkedValue\(key, value, tools\)")
+    body = function_body(code, r"checkedValue\(key, value, tools(?:, \w+)?\)")  # task 005 adds the added ids
     cases = re.findall(r'^\s*case "(\w+)":$', body, re.MULTILINE)
     return [] if sorted(cases) == sorted(backup) else [
         f"checkedValue cases differ from BACKUP_KEYS: {sorted(set(cases) ^ set(backup))}"]
@@ -316,3 +316,108 @@ def test_proof_default_table_rule_catches(table):
 ])
 def test_proof_checked_rule_catches(old, new):
     assert checked_problems(mutated(SETTINGS_BACKUP_JS, old, new), BACKUP_KEYS)
+
+
+# --- task 005: added sites and the site order ---------------------------------------------------
+
+CHAT_SITES_JS = UI / "ChatSites.js"
+CHAT_STORAGE_JS = UI / "ChatStorage.js"
+# Both are in the backup, at the end of BACKUP_KEYS, and main.qml never writes them.
+SITE_TABLE_KEYS = {"chatUserSites": ("String", "[]"), "chatSiteOrder": ("String", "")}
+
+
+def js_number(code, name):
+    """The value of ``var NAME = <integer>`` or ``<integer> + <integer>`` / ``<integer> * <integer>``."""
+    match = re.search(rf"^var {name} = ([0-9]+(?: [+*] [0-9]+)?)$", code, re.MULTILINE)
+    if match is None:
+        return None
+    left, operator, right = (match.group(1).split(" ") + ["+", "0"])[:3]
+    return int(left) + int(right) if operator == "+" else int(left) * int(right)
+
+
+def site_table_key_problems(backup, excluded, table, xml_keys):
+    problems = []
+    if tuple(backup[-2:]) != tuple(SITE_TABLE_KEYS):
+        problems.append(f"BACKUP_KEYS must end with {list(SITE_TABLE_KEYS)}")
+    for key, entry in SITE_TABLE_KEYS.items():
+        if key in excluded:
+            problems.append(f"{key} must not be excluded")
+        if table.get(key) != entry:
+            problems.append(f"{key} must default to {entry!r}")
+    position = [key for key in xml_keys if key in SITE_TABLE_KEYS or key == "chatPendingSiteClears"]
+    if position != ["chatPendingSiteClears", *SITE_TABLE_KEYS]:
+        problems.append(f"main.xml must list {list(SITE_TABLE_KEYS)} right after chatPendingSiteClears, found {position}")
+    elif xml_keys.index("chatSiteOrder") - xml_keys.index("chatPendingSiteClears") != 2:
+        problems.append("main.xml: the site table keys must follow chatPendingSiteClears directly")
+    return problems
+
+
+def test_the_site_table_keys_are_backed_up_with_their_defaults():
+    problems = site_table_key_problems(BACKUP_KEYS, EXCLUDED_KEYS, CONFIG_ENTRIES, main_xml_keys(read(MAIN_XML)))
+    assert not problems, problems
+
+
+def test_apply_backup_assigns_the_site_table_keys():
+    body = function_body(read(CONFIG_GENERAL), r"applyBackup\(\)")
+    for key in SITE_TABLE_KEYS:
+        assert re.search(rf"^\s*if \(values\.{key} !== undefined\) page\.cfg_{key} = values\.{key}$", body, re.M), key
+
+
+def cap_problems(backup_js, chat_sites_js, chat_storage_js):
+    problems = []
+    if js_number(backup_js, "MAX_REPLY_CHARS") != settingsbackup.MAX_FILE_BYTES + 1024:
+        problems.append("SettingsBackup.js MAX_REPLY_CHARS must be MAX_FILE_BYTES + 1024")
+    for name in ("MAX_USER_SITES", "MAX_USER_SITES_CHARS", "MAX_USER_SITE_NAME"):
+        if js_number(chat_sites_js, name) != getattr(settingsbackup, name):
+            problems.append(f"ChatSites.js {name} differs from the helper's")
+    if js_number(chat_sites_js, "MAX_CUSTOM_URL_LENGTH") != settingsbackup.MAX_CUSTOM_URL_LENGTH:
+        problems.append("ChatSites.js MAX_CUSTOM_URL_LENGTH differs from the helper's")
+    ids = settingsbackup.MAX_USER_SITES + len(settingsbackup.WEB_SITE_IDS)
+    if not ids == webdata.MAX_SITE_IDS == js_number(chat_storage_js, "MAX_SITE_IDS") == 207:
+        problems.append("MAX_USER_SITES + 7 built-ins must equal webdata and ChatStorage.js MAX_SITE_IDS (207)")
+    return problems
+
+
+def test_the_caps_match_the_widget():
+    problems = cap_problems(read(SETTINGS_BACKUP_JS), read(CHAT_SITES_JS), read(CHAT_STORAGE_JS))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("backup", "excluded", "table", "xml_change"), [
+    (BACKUP_KEYS[:-2] + ("chatSiteOrder", "chatUserSites"), EXCLUDED_KEYS, CONFIG_ENTRIES, None),
+    (BACKUP_KEYS[:-1], EXCLUDED_KEYS + ("chatSiteOrder",), CONFIG_ENTRIES, None),
+    (BACKUP_KEYS, EXCLUDED_KEYS, dict(CONFIG_ENTRIES, chatUserSites=("String", "")), None),
+    (BACKUP_KEYS, EXCLUDED_KEYS, dict(CONFIG_ENTRIES, chatSiteOrder=("String", "[]")), None),
+    (BACKUP_KEYS, EXCLUDED_KEYS, CONFIG_ENTRIES, ("chatUserSites", "chatProfileGeneration")),
+    (BACKUP_KEYS, EXCLUDED_KEYS, CONFIG_ENTRIES, ("chatSiteOrder", "usageMode")),
+])
+def test_proof_site_table_key_rule_catches(backup, excluded, table, xml_change):
+    xml_keys = main_xml_keys(read(MAIN_XML))
+    if xml_change is not None:
+        moved, before = xml_change
+        xml_keys.remove(moved)
+        xml_keys.insert(xml_keys.index(before), moved)
+    assert site_table_key_problems(backup, excluded, table, xml_keys)
+
+
+@pytest.mark.parametrize(("which", "name", "value"), [
+    ("backup", "MAX_REPLY_CHARS", "65536 + 1024"),
+    ("backup", "MAX_REPLY_CHARS", "524288"),
+    ("backup", "MAX_REPLY_CHARS", "524288 + 1025"),
+    ("sites", "MAX_USER_SITES", "201"),
+    ("sites", "MAX_USER_SITES_CHARS", "448 * 1000"),
+    ("sites", "MAX_USER_SITE_NAME", "41"),
+    ("storage", "MAX_SITE_IDS", "208"),
+])
+def test_proof_cap_rule_catches(which, name, value):
+    texts = {"backup": read(SETTINGS_BACKUP_JS), "sites": read(CHAT_SITES_JS), "storage": read(CHAT_STORAGE_JS)}
+    # Write the value in whether or not the widget has the name yet (phase 1 runs in parallel).
+    texts[which] = re.sub(rf"^var {name} = .*$", "", texts[which], flags=re.M) + f"\nvar {name} = {value}\n"
+    assert cap_problems(texts["backup"], texts["sites"], texts["storage"])
+
+
+def test_js_number_reads_the_forms_the_widget_uses():
+    assert js_number("var A = 524288 + 1024\n", "A") == 525312
+    assert js_number("var A = 448 * 1024\n", "A") == 458752
+    assert js_number("var A = 207\n", "A") == 207
+    assert js_number("var A = B + 1\n", "A") is None

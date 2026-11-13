@@ -17,6 +17,13 @@ strictly against what the widget itself would store; anything unknown or odd
 is dropped and counted. Sign-in, vault, zoom and history settings are never
 in a backup (EXCLUDED_KEYS). Replies hold codes, counts, the timestamp and,
 for import, the checked settings; never a path.
+
+Task 005: the sites the user added (``chatUserSites``, ids ``user-`` and 8 hex
+digits) and the site order (``chatSiteOrder``) are in the backup, so the file
+may be up to 512 KiB. A second, cross-key pass lets ``chatSites``,
+``chatSiteOrder``, ``chatDefaultSite`` and ``middleClickOpens`` name an added
+id only when the same settings keep a valid ``chatUserSites`` holding it; any
+other added id drops that whole setting.
 """
 
 from __future__ import annotations
@@ -44,7 +51,8 @@ FORMAT_VERSION = 1
 CONFIG_SCHEMA = 3
 BACKUP_FILE = "settings-backup.json"
 FILE_MODE = 0o600
-MAX_FILE_BYTES = 64 * 1024
+# 200 added sites with 40-unit names and 2048-character addresses fit (task 005).
+MAX_FILE_BYTES = 512 * 1024
 MAX_STRING_CHARS = 4096
 # Arrays and objects nest at most 2 deep, both in the document (document >
 # settings) and in the JSON a setting holds (metric map > list); 4 leaves room.
@@ -72,6 +80,7 @@ BACKUP_KEYS = (
     "showUsageTab", "showChatTab", "popupDefaultTab", "popupSize", "shortcutOpens",
     "panelRing", "middleClickOpens",
     "chatCustomUrls",  # D74
+    "chatUserSites", "chatSiteOrder",  # task 005
 )
 # Never saved, never restored: sign-ins, the encrypted folder, per-site zoom,
 # schema and first-run state, the history opt-in (D70) with its owed delete,
@@ -90,6 +99,11 @@ WEB_SITE_IDS = ("claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot", "
 LOCAL_SITE_IDS = frozenset({"local"})
 OLLAMA_SITE_ID = "ollama"
 CHAT_SITE_IDS = WEB_SITE_IDS + (OLLAMA_SITE_ID,)
+# Their names, in the same order (ChatSites.js ``name``, OllamaChat.js ENTRY.name):
+# an added site may not take one of them, in any case.
+WEB_SITE_NAMES = ("Claude", "ChatGPT", "Grok", "Gemini", "GitHub Copilot", "Microsoft Copilot",
+                  "Local web UI (Open WebUI)")
+OLLAMA_SITE_NAME = "Ollama"
 
 REFRESH_INTERVALS = (60, 300, 900, 1800, 3600)            # configGeneral.qml refreshChoices
 COLOR_PERCENTS = tuple(range(50, 100, 5))                 # UsageLogic.js COLOR_PERCENTS
@@ -303,6 +317,100 @@ def custom_url_error(site_id: str, value: str) -> str:
     return ""
 
 
+# --- chatUserSites: a port of ChatSites.js (task 005) -------------------------------------------------
+
+MAX_USER_SITES = 200                  # ChatSites.js MAX_USER_SITES; + 7 built-ins = webdata.MAX_SITE_IDS
+MAX_USER_SITES_CHARS = 448 * 1024     # ChatSites.js MAX_USER_SITES_CHARS, the stored text in UTF-16 units
+MAX_USER_SITE_NAME = 40               # ChatSites.js MAX_USER_SITE_NAME, in UTF-16 units
+USER_SITE_KEYS = ("id", "name", "url")  # Exactly these, written in this order.
+_USER_SITE_ID = re.compile(r"user-[0-9a-f]{8}")
+_JS_TRIM = re.compile("^[" + _JS_SPACE + "]+|[" + _JS_SPACE + "]+\\Z")
+# Markup characters, and invisible or bidi formatting that could spoof the table or a prompt (M3).
+_NAME_FORBIDDEN = re.compile("[<>&\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+# Steps 3 and 4 of userSiteUrlError: printable ASCII only, without the characters
+# a browser would percent-encode or refuse.
+_USER_URL_CHARS = re.compile(r'[^\x21-\x7e]|["\\<>`{}|^]')
+_NUMERIC_LABEL = re.compile(r"0x[0-9a-f]*|[0-9]+")
+
+
+def _js_lower(text: str) -> str:
+    """String.prototype.toLowerCase as Qt's JS engine runs it: per code point, no final-sigma rule."""
+    return "".join(character.lower() for character in text)
+
+
+_TAKEN_NAMES = frozenset(_js_lower(name) for name in WEB_SITE_NAMES + (OLLAMA_SITE_NAME,))
+
+
+def is_user_site_id(value: object) -> bool:
+    """ChatSites.js isUserSiteId: ``user-`` and 8 lower-case hex digits."""
+    return isinstance(value, str) and _USER_SITE_ID.fullmatch(value) is not None
+
+
+def user_site_name_error(name: object, others: tuple[str, ...] = ()) -> str:
+    """ChatSites.js userSiteNameError: "" when ``name`` may be stored, else its code.
+
+    ``others`` are the names of the other added sites. The name is checked as
+    stored, so leading or trailing whitespace is ``name-chars`` (the editor trims).
+    Codes, first failure wins: name-empty, name-too-long, name-chars, name-taken.
+    """
+    if not isinstance(name, str) or _JS_TRIM.sub("", name) == "":
+        return "name-empty"
+    if _utf16_length(name) > MAX_USER_SITE_NAME:
+        return "name-too-long"
+    if _JS_TRIM.sub("", name) != name or _CONTROL.search(name) or _NAME_FORBIDDEN.search(name):
+        return "name-chars"
+    lowered = _js_lower(name)
+    if lowered in _TAKEN_NAMES or any(lowered == _js_lower(other) for other in others):
+        return "name-taken"
+    return ""
+
+
+def user_site_url_error(url: object) -> str:
+    """ChatSites.js userSiteUrlError: "" for an https address of a public DNS name, else its code.
+
+    In order, first failure wins: url-empty, too-long, whitespace, url-chars,
+    userinfo, malformed, http-not-allowed, scheme, malformed, loopback-not-allowed,
+    ip-literal (any IPv4 literal, public ones too, in 005; M2).
+    """
+    if not isinstance(url, str) or url == "":
+        return "url-empty"
+    if _utf16_length(url) > MAX_CUSTOM_URL_LENGTH:
+        return "too-long"
+    if _URL_FORBIDDEN.search(url):
+        return "whitespace"
+    if _USER_URL_CHARS.search(url):
+        return "url-chars"
+    authority = _AUTHORITY_PREFIX.match(url)
+    if authority is not None and "@" in authority.group(1):
+        return "userinfo"
+    scheme_match = _SCHEME_PREFIX.match(url)
+    if scheme_match is None:
+        return "malformed"
+    scheme = scheme_match.group(1).lower()
+    if scheme == "http":
+        return "http-not-allowed"
+    if scheme != "https":
+        return "scheme"
+    parsed = parse_url(url)
+    if parsed is None or parsed[1] == "":
+        return "malformed"
+    if is_local_address(parsed[1]):
+        return "loopback-not-allowed"
+    if _NUMERIC_LABEL.fullmatch(normalize_host(parsed[1]).split(".")[-1]):
+        return "ip-literal"
+    return ""
+
+
+def address_class(url: object) -> str:
+    """ChatSites.js addressClass: "public" for an address an added site may have, else "" (005)."""
+    return "public" if user_site_url_error(url) == "" else ""
+
+
+def user_site_ids(value: str) -> tuple[str, ...]:
+    """The ids of a ``chatUserSites`` value that ``_user_sites`` kept."""
+    return tuple(entry["id"] for entry in json.loads(value))
+
+
 # --- per-key rules ------------------------------------------------------------------------------------
 
 
@@ -391,9 +499,57 @@ def _color(value: object) -> str:
     return text.lower()
 
 
-def _chat_sites(value: object) -> str:
-    """chatSites: a JSON array of chat site ids (web sites and ollama), none twice."""
-    return _dumps(_id_list(_embedded(value), CHAT_SITE_IDS))
+def _chat_sites(value: object, added: tuple[str, ...] = ()) -> str:
+    """chatSites: a JSON array of chat site ids (web sites, ollama and the ``added`` ids), none twice."""
+    return _dumps(_id_list(_embedded(value), CHAT_SITE_IDS + added))
+
+
+def _site_order(value: object, added: tuple[str, ...] = ()) -> str:
+    """chatSiteOrder: "" (the default order) or a JSON array of chat site ids, as chatSites."""
+    if _text(value) == "":
+        return ""
+    return _chat_sites(value, added)
+
+
+def _default_site(value: object, added: tuple[str, ...] = ()) -> object:
+    """chatDefaultSite: one chat site id."""
+    return _choice(CHAT_SITE_IDS + added)(value)
+
+
+def _middle_click(value: object, added: tuple[str, ...] = ()) -> object:
+    """middleClickOpens: refresh, usage, ollama or a web site id."""
+    return _choice(MIDDLE_CLICK_TARGETS + added)(value)
+
+
+def _user_sites(value: object) -> str:
+    """chatUserSites (task 005): a JSON array of {id, name, url}, every entry valid.
+
+    Strict, like _custom_urls: an extra or missing key (``local``, ``icon``,
+    host lists...), a bad or repeated id, a name another site has, more than
+    MAX_USER_SITES entries or more than MAX_USER_SITES_CHARS drops the whole
+    setting. Written again with the keys in USER_SITE_KEYS order.
+    """
+    if not isinstance(value, str) or _utf16_length(value) > MAX_USER_SITES_CHARS:
+        raise _Bad()
+    parsed = _embedded(value, MAX_USER_SITES_CHARS)
+    if not isinstance(parsed, list) or len(parsed) > MAX_USER_SITES:
+        raise _Bad()
+    result: list[dict[str, str]] = []
+    for entry in parsed:
+        if not isinstance(entry, dict) or set(entry) != set(USER_SITE_KEYS):
+            raise _Bad()
+        site_id, name, url = (entry[key] for key in USER_SITE_KEYS)
+        if not is_user_site_id(site_id) or any(site["id"] == site_id for site in result):
+            raise _Bad()
+        if user_site_name_error(name, tuple(site["name"] for site in result)) != "":
+            raise _Bad()
+        if user_site_url_error(url) != "":
+            raise _Bad()
+        result.append({"id": site_id, "name": name, "url": url})
+    text = _dumps(result)
+    if _utf16_length(text) > MAX_USER_SITES_CHARS:
+        raise _Bad()
+    return text
 
 
 def _ollama_address(value: object) -> str:
@@ -434,7 +590,8 @@ def _custom_urls(value: object) -> str:
     return _dumps(result)
 
 
-RULES: dict[str, Callable[[object], object]] = {
+# Called with one value; the SITE_KEYS rules also take the added ids (validate_settings).
+RULES: dict[str, Callable[..., object]] = {
     "trackedProviders": _provider_list,
     "providerMetrics": _metric_map,
     "providerOrder": _provider_order,
@@ -452,7 +609,7 @@ RULES: dict[str, Callable[[object], object]] = {
     "alertResetEnabled": _boolean,
     "alertLowPercent": _choice(ALERT_PERCENTS),
     "chatSites": _chat_sites,
-    "chatDefaultSite": _choice(CHAT_SITE_IDS),
+    "chatDefaultSite": _default_site,
     "chatOllamaUrl": _ollama_address,
     "chatKeepOpen": _boolean,
     "showUsageTab": _boolean,
@@ -461,9 +618,13 @@ RULES: dict[str, Callable[[object], object]] = {
     "popupSize": _choice(POPUP_SIZES),
     "shortcutOpens": _choice(SHORTCUT_TARGETS),
     "panelRing": _panel_ring,
-    "middleClickOpens": _choice(MIDDLE_CLICK_TARGETS),
+    "middleClickOpens": _middle_click,
     "chatCustomUrls": _custom_urls,
+    "chatUserSites": _user_sites,
+    "chatSiteOrder": _site_order,
 }
+# The settings that may name an added site: checked after chatUserSites, with its ids.
+SITE_KEYS = ("chatSites", "chatDefaultSite", "middleClickOpens", "chatSiteOrder")
 
 
 def validate_settings(value: Mapping[str, object]) -> tuple[dict[str, object], int]:
@@ -472,15 +633,29 @@ def validate_settings(value: Mapping[str, object]) -> tuple[dict[str, object], i
     The one check for the applied settings export read and for the import file. Unknown and excluded
     keys are dropped, and so is a known key with a value the widget would not
     store; both count in the number dropped.
+
+    Two passes: every key on its own, then the SITE_KEYS, which may name only
+    the added ids of the chatUserSites kept in the first pass (none when that
+    key is absent or was dropped). Any other ``user-`` id drops that setting.
     """
-    kept: dict[str, object] = {}
+    checked: dict[str, object] = {}
     for key in BACKUP_KEYS:
+        if key not in value or key in SITE_KEYS:
+            continue
+        try:
+            checked[key] = RULES[key](value[key])
+        except _Bad:
+            continue
+    user_sites = checked.get("chatUserSites")
+    added = user_site_ids(user_sites) if isinstance(user_sites, str) else ()
+    for key in SITE_KEYS:
         if key not in value:
             continue
         try:
-            kept[key] = RULES[key](value[key])
+            checked[key] = RULES[key](value[key], added)
         except _Bad:
             continue
+    kept = {key: checked[key] for key in BACKUP_KEYS if key in checked}
     return kept, len(value) - len(kept)
 
 
