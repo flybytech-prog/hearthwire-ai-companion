@@ -426,7 +426,7 @@ ColumnLayout {
         case "legacy-data":
             return i18n("Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
         case "delete-failed":
-            return i18n("Couldn't delete the encrypted folder because it is still in use. Close Chat in other Hearthwire widgets, then delete it in Settings → Chat → Advanced.")
+            return i18n("Couldn't delete the encrypted folder because it is still in use. Close Chat in other Hearthwire widgets, then delete it in Settings → General → Encrypted folder → Show folder actions.")
         case "":
             return ""
         default:
@@ -886,7 +886,7 @@ ColumnLayout {
         type: Kirigami.MessageType.Warning
         // The local address itself is never shown here.
         text: chatView.localSite
-            ? i18n("Couldn't load. Is your local chat server running? You can change its address in Settings → Chat → Advanced.")
+            ? i18n("Couldn't load. Is your local chat server running? You can change its address in Settings → Chat: Edit on the Local web UI row.")
             : i18n("Couldn't load this page.")
         actions: [
             Kirigami.Action {

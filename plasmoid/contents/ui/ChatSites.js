@@ -341,19 +341,6 @@ function validateCustomUrl(siteId, text) {
     return { ok: true, url: value, error: "" }
 }
 
-// {url, error} for one settings row: url is what to save for the text the
-// user has typed so far. Valid text (trimmed) or empty is saved as is;
-// invalid text saves baseline, the value saved when the page opened, so a
-// half-typed secret such as "https://admin:1234" never outlives the "@".
-function customUrlToPersist(siteId, text, baseline) {
-    var value = text === undefined || text === null ? "" : String(text).trim()
-    var checked = validateCustomUrl(siteId, value)
-    if (checked.ok)
-        return { url: checked.url, error: "" }
-    var fallback = validateCustomUrl(siteId, baseline)
-    return { url: fallback.ok ? fallback.url : "", error: checked.error }
-}
-
 // Only known ids with a valid non-empty address, in catalog order.
 function filterCustomUrls(map) {
     var result = {}

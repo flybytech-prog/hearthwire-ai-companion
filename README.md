@@ -200,6 +200,32 @@ starts with Plasma while it remains on a panel.
 
 ### Chat sites
 
+- **Settings → Chat** lists every site in one table: **On**, its icon, name
+  and address, and **↑ ↓** (the order of the Chat tab's site list, **Open
+  first**, the split view's list and the middle-click list), **Edit** and,
+  for sites you added, **Remove**. Nothing is saved until you press
+  **Apply**.
+  - **Add site…** adds any `https://` site by name and address; it starts on,
+    at the end of the list (above Ollama when Ollama is last), and its icon
+    is the first letter of its name. You can add up to 200 sites. For now an
+    added site must have a public name: `http://`, this computer and IP
+    addresses (`https://192.168.1.10/`) are refused until local sites arrive
+    in a later version. Names are 1 to 40 characters, unique (also against
+    the built-in names), without `<`, `>`, `&` or invisible formatting
+    characters.
+  - Each added site gets its own sign-in, as the built-in ones do (see
+    [docs/privacy.md](docs/privacy.md#one-profile-per-chat-site)): no site
+    sees another site's cookies or storage.
+  - **Edit** changes a name or address. A new address on the same host keeps
+    the site's sign-in. An address on **another host** makes it another
+    site: the editor warns you, and on Apply the old site is signed out and
+    its data deleted, so no sign-in moves to a different host.
+  - **Removing an added site deletes its data.** The page warns you before
+    Apply ("When you apply, N removed sites are signed out and their site
+    data is deleted"); **Cancel** keeps everything. With **Stay signed in**
+    its saved sign-in is deleted on Apply, or at the next unlock while the
+    encrypted folder is locked. **Defaults** on this page also removes every
+    added site, with the same warning.
 - **GitHub Copilot** opens GitHub's sign-in page and goes on to
   `github.com/copilot` once you are signed in (signed-out visitors to
   `/copilot` only get a landing page). Google and Apple sign-in may be
@@ -235,8 +261,8 @@ starts with Plasma while it remains on a panel.
     message box (nothing is sent until you press Send). Hearthwire never starts Ollama: if
   it isn't running, the Chat tab says so and shows
   `systemctl start ollama` (or `ollama serve`). The address is
-  `http://127.0.0.1:11434` unless you change it under **Show advanced
-  settings → Ollama address**; only `http://` on this computer (`127.0.0.1`,
+  `http://127.0.0.1:11434` unless you change it with Ollama's **Edit** button
+  in **Settings → Chat**; only `http://` on this computer (`127.0.0.1`,
   `localhost`, `[::1]`) with a port is accepted. Before it sends anything,
   Hearthwire checks that the program on that port belongs to you or to the
   system (the packaged `ollama` service), never to another user.
@@ -247,9 +273,10 @@ starts with Plasma while it remains on a panel.
   (or `open-webui serve`, which listens on port 8080; set that address below).
   As for Ollama, the page loads only when the program on that port belongs
   to you or to the system, never to another user.
-- **Custom addresses**: under **Settings → Chat → Show advanced settings**
-  each site can open a different address, for example a self-hosted
-  instance. Leave a field empty to use the built-in address. Addresses must
+- **Custom addresses**: a built-in site's **Edit** button in **Settings →
+  Chat** gives it a different address, for example a self-hosted instance;
+  **Use the built-in address** goes back. Only a valid address is saved, when
+  you press **Save**. Addresses must
   use `https://`; only Local web UI may also use plain `http://`, and only for this
   computer (`localhost`, `127.0.0.1`, `[::1]`). A custom address adds only its
   exact host to the site, never its subdomains. Don't put passwords or tokens
@@ -314,7 +341,11 @@ starts with Plasma while it remains on a panel.
   saves the applied settings only, so press **Apply** first: the helper reads
   them from Plasma's own settings file, and no setting is passed on a command
   line. The backup holds the usage, popup and
-  chat site settings, including custom chat addresses. It never holds
+  chat site settings, including custom chat addresses and the sites you
+  added (names and addresses) with their order; the file is at most 512 KiB.
+  The confirmation also lists the sites an import adds or removes: a site the
+  backup doesn't have is removed when you apply, and its data is deleted
+  (the red warning says so first). It never holds
   sign-ins or anything about the encrypted folder (Stay signed in, Lock
   automatically, Unlock with), the zoom of each site, or the Usage history
   choice. See [docs/privacy.md](docs/privacy.md#settings-backup).

@@ -206,6 +206,54 @@ settings page):
 - A custom address adds exactly its own host to the site (no subdomains); the
   built-in site and sign-in hosts still apply.
 
+Added sites (`chatUserSites`, written only by Settings → Chat and a backup
+Replace; task 005):
+
+- A JSON array of at most 200 entries (`MAX_USER_SITES`; with the 7 built-ins
+  that is the web data helper's 207-id cap), at most 458752 UTF-16 units,
+  each exactly `{"id","name","url"}`, written in that key order. Any other key
+  (`local`, `site_hosts`, `auth_hosts`, `icon`...) makes the entry invalid.
+- `id`: `user-` and 8 lower-case hex digits, random (`ChatSites.newUserSiteId`),
+  unique, never reused while its delete is owed.
+- `name`: stored trimmed, 1 to 40 UTF-16 units, no C0/C1 controls, lone
+  surrogates, `<`, `>`, `&` or invisible/bidi characters (U+00AD, U+061C,
+  U+180E, U+200B–200F, U+2028–202E, U+2060–2064, U+2066–2069, U+FEFF), and
+  not a built-in name, `Ollama` or another added site's name in any case.
+  Codes, first failure wins: `name-empty`, `name-too-long`, `name-chars`,
+  `name-taken`.
+- `url`, in order: `url-empty`, `too-long` (2048), `whitespace`,
+  `url-chars` (outside 0x21–0x7E or one of `` " \ < > ` { } | ^ ``),
+  `userinfo`, `malformed` (no scheme), `http-not-allowed`, `scheme`,
+  `malformed` (`parseUrl`), `loopback-not-allowed` (`isLocalAddress`),
+  `ip-literal` (any IPv4 literal, even a public one, until local sites
+  arrive). What is left is a public DNS name, `ChatSites.addressClass` →
+  `"public"`.
+- The site is rebuilt from the name and address on every use
+  (`ChatSites.effectiveSite`): no site or sign-in hosts, its exact host only,
+  never local. Every navigation call takes `userSites`; an added id without
+  its entry resolves to nothing and is blocked. `ChatSites.parseUserSites`
+  is ok only when the whole value is valid; only an ok read may remove sites,
+  build the `prune --known` list or prune zoom entries.
+- Navigation for added sites: main-frame `https:` to any public host loads
+  (redirects, sign-in); a clicked link off its host goes to the "Open in your
+  browser" prompt; main frame, subframes and new windows block this computer
+  (as above) and every IPv4 literal in 10/8, 172.16/12, 192.168/16,
+  169.254/16 or 0/8 in any spelling, plus unreadable bracketed literals. New
+  windows: a clicked dialog opens as the sign-in overlay, anything else
+  `https:` goes to the browser. The built-in rules are unchanged (a recorded
+  golden table, `tests/qml/ChatSitesGolden.js`).
+- An address on another host gives the site a new id; the old id is removed.
+- Removal (main.qml `chatRemoveUserSites`, after Apply, on an ok read): with
+  Stay signed in the ids join `chatPendingSiteClears` first, then the Chat tab
+  drops their views and profiles, and each folder goes through the same
+  `wait` and `remove-site --site <id>` path as Clear <site> data (with its
+  busy retry); while locked the delete waits for the next unlock.
+
+`chatSiteOrder`: `""` (built-ins, added sites, Ollama) or a JSON array of
+site ids (built-in, added, `ollama`), each once. Unknown ids are dropped and
+missing ones appended in the default order, a missing `ollama` last. The
+order the user set is written as `""` when it equals the default order.
+
 Navigation in a site view (main frame unless noted):
 
 - Only `https:` main-frame pages load, plus `about:blank`. `http:`, `file:`,
@@ -1111,8 +1159,14 @@ doesn't depend on the Python build's recursion handling. Only `BACKUP_KEYS` are 
 `configSchemaVersion`, `initialSetupComplete`, `usageHistoryEnabled`,
 `usageHistoryClearOwed`, `chatProfileLayout`, `chatPendingSiteClears`) and
 known keys with a value the widget would not store are dropped and counted
-in `dropped`. Strings hold at most 4096 characters (`chatCustomUrls` 32768)
-and no C0/C1 controls or lone surrogates; a boolean is never an integer.
+in `dropped`. Strings hold at most 4096 characters (`chatCustomUrls` 32768,
+`chatUserSites` 458752 UTF-16 units) and no C0/C1 controls or lone
+surrogates; a boolean is never an integer.
+
+A second pass checks the keys that may name an added site: `chatSites`,
+`chatSiteOrder`, `chatDefaultSite` and `middleClickOpens` may name only the
+added ids of the `chatUserSites` the same settings keep (none when that key
+is absent or dropped). Any other `user-` id drops that whole key.
 
 | Key | Accepted value |
 | --- | --- |
@@ -1126,14 +1180,16 @@ and no C0/C1 controls or lone surrogates; a boolean is never an integer.
 | `usageWarnPercent` / `usageCriticalPercent` | 50 to 90 / 55 to 95, steps of 5 |
 | `usageNormalColor`, `usageWarnColor`, `usageCriticalColor` | `""` or `#rrggbb` (kept in lower case) |
 | `alertLowPercent` | 5, 10, 15, 20, 25, 30, 40 or 50 |
-| `chatSites` | JSON array of `claude chatgpt grok gemini copilot mscopilot local ollama`, none twice |
+| `chatSites` | JSON array of `claude chatgpt grok gemini copilot mscopilot local ollama` and the kept added ids, none twice |
 | `chatDefaultSite` | one of those ids |
+| `chatSiteOrder` | `""` or a JSON array like `chatSites` |
+| `chatUserSites` | JSON array of added sites under the rules above (`settingsbackup.user_site_name_error`, `user_site_url_error`, the same codes as `ChatSites.js`); one bad entry, extra key, repeated id or name, more than 200 entries or more than 458752 UTF-16 units drops the whole key. Re-serialized with the keys in `id, name, url` order |
 | `chatOllamaUrl` | `http://<127.0.0.1\|localhost\|[::1]>:<1-65535>` exactly as the widget stores it |
 | `popupDefaultTab` | `chat` or `usage` |
 | `popupSize` | `compact`, `normal` or `large` |
 | `shortcutOpens` | `popup`, `chat`, `ollama` or `usage` |
 | `panelRing` | `off`, `auto` or a catalog `provider.metric` pair (not `extra_usage`) |
-| `middleClickOpens` | `refresh`, `usage`, `ollama` or a web site id |
+| `middleClickOpens` | `refresh`, `usage`, `ollama`, a web site id or a kept added id |
 | `chatCustomUrls` | JSON object `{webSiteId: address}` (D74); every address non-empty and valid under the rules of `ChatSites.validateCustomUrl` (https only, http only for Local and only to loopback, at most 2048 UTF-16 units, no whitespace or control characters, no user info, no local address except for Local). One bad entry drops the whole key |
 
 `BACKUP_KEYS` and `EXCLUDED_KEYS` together are every `main.xml` key, with no
@@ -1152,7 +1208,7 @@ value failed; excluded keys are never read. An export that keeps nothing is
 
 Errors (`{"ok":false,"error":"<code>"}`, exit 0): `absent` (no backup;
 `import` only), `invalid` (not a backup file), `unsupported` (another
-version or schema), `too-large` (file over 64 KiB, or an export that would
+version or schema), `too-large` (file over 512 KiB, or an export that would
 be), `bad-data` (export: no applied setting passed), `symlink`, `not-owned`,
 `unsafe-mode` (the backup folder or file is group- or other-writable),
 `legacy-data` (`export` only: the previous version's data still waits for the
@@ -1175,15 +1231,21 @@ anything odd gives no command. One step runs at a time.
   applied do not count, so the page asks for Apply first.
 - `import` on **Import**. `SettingsBackup.importPlan` checks every value
   again with the widget's own rules (the catalog, `ChatSites.siteIds`,
-  `ChatSites.validateCustomUrl`, `OllamaChat.checkedAddress` and the ring
-  pairs), drops what fails, and adds that to the helper's `dropped`. It also
+  `ChatSites.validateCustomUrl`, `OllamaChat.checkedAddress`, the ring
+  pairs, and `ChatSites.validateUserSite` / `serializeUserSites` with the
+  same cross-key check, the added ids taken only from the import's own
+  `chatUserSites`), drops what fails, and adds that to the helper's
+  `dropped`. The confirmation lists address changes, added sites ("Adds
+  <name> (<host>)") and removed ones ("Removes <name> and deletes its site
+  data when you apply") as plain text, at most 8 lines and a count. It also
   drops both levels when the warning level isn't below the critical one, and
   both tab switches when they would hide both tabs. Only
   after an inline **Replace** does `applyBackup` set the page's `cfg_` values
   for backup keys (never an excluded key); Apply on the General page saves
   them. A plan with nothing to apply shows a fixed message instead.
 
-`SettingsBackup.parseReply` accepts exit code 0, at most 65 KiB of stdout,
+`SettingsBackup.parseReply` accepts exit code 0, at most 512 KiB + 1024
+characters of stdout (`MAX_REPLY_CHARS`),
 exactly the keys of each reply above and a known error code; anything else
 is `bad-reply`. Every code is shown as fixed text, never the helper's own.
 

@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest
+import QtWebEngine
 import "../../plasmoid/contents/ui"
 
 // ChatWebView's Local owner gate with a real, off-the-record Qt WebEngine
@@ -290,9 +291,19 @@ TestCase {
         web.zoomMap = zoomMap
         waitForCheck(1)
         answer(web, "self")
-        verify(web.currentView !== null)
-        // Nothing listens on port 9: the load fails at once.
-        tryVerify(function () { return !web.currentView.loading }, 5000)
+        var view = web.currentView
+        verify(view !== null)
+        // The view isn't loading yet when it is created: its load starts a
+        // moment later, and a zoom changed during a load is only undone
+        // (zoomedWhileLoading). So wait for that load's own end; Chromium
+        // refuses port 9, so it fails quickly. Connected before the event
+        // loop runs again, so the start can't be missed.
+        var ended = false
+        view.loadingChanged.connect(function (info) {
+            if (info.status !== WebEngineLoadingInfo.LoadStartedStatus)
+                ended = true
+        })
+        tryVerify(function () { return ended && !view.loading }, 5000, "the first load ended")
         return web
     }
 

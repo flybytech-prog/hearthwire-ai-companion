@@ -64,6 +64,8 @@ an account, a plan name, a reading or an error from a provider.
 | `usageHistoryClearOwed` | Written by the widget | `true` while turning Usage history off still has to delete the stored history, else `false` (the default) |
 | `chatProfileLayout` | Written by the widget | `0` (the default: the old shared chat profile, or a new install), `1` (moved to one profile per site; the Chat tab's one-time notice still shows), or `2` (done). It makes the [move to one profile per site](#one-profile-per-site-the-one-time-move) run once |
 | `chatPendingSiteClears` | Written by the widget | Which chat sites still owe the delete of a **Clear <site> data** with saved sign-ins, so a failed delete is retried and the site stays closed even after a Plasma restart: chat site ids separated by commas, for example `claude,gemini`, never a path, an address or a sign-in; empty (the default) when none. Anything in it that isn't a site id is ignored |
+| `chatUserSites` | Chat → Add site…, Edit, Remove | The sites you added: for each one an id (`user-` and 8 random hex digits, never made from the name or address), the name and the address you typed, for example `[{"id":"user-3fa9c01b","name":"Le Chat","url":"https://chat.example.org/"}]`; `[]` (the default) when none. Nothing else is stored for a site: its hosts and whether it is local are worked out from the address each time. A value the widget can't read whole is shown as far as it is valid, and never deletes anything |
+| `chatSiteOrder` | Chat → ↑ ↓ | The order of the chat sites (built-in and added ids and `ollama`), for example `["user-3fa9c01b","claude","ollama"]`; empty (the default) is the built-in order with added sites after the built-ins and Ollama last |
 
 Antigravity is the one provider that requires a derived access-token cache
 because its Secret Service entry can contain only a refresh token. That cache
@@ -188,10 +190,12 @@ there is no file dialog.
   `usageCriticalColor`, `alertLowEnabled`, `alertResetEnabled`,
   `alertLowPercent`, `chatSites`, `chatDefaultSite`, `chatOllamaUrl`,
   `chatKeepOpen`, `showUsageTab`, `showChatTab`, `popupDefaultTab`,
-  `popupSize`, `shortcutOpens`, `panelRing`, `middleClickOpens` and
-  `chatCustomUrls`. So it names the providers and chat sites you use and
-  holds your custom chat addresses in plain text, like the Plasma
-  configuration file does.
+  `popupSize`, `shortcutOpens`, `panelRing`, `middleClickOpens`,
+  `chatCustomUrls`, `chatUserSites` and `chatSiteOrder`. So it names the
+  providers and chat sites you use and holds your custom chat addresses and
+  the names and addresses of the sites you added in plain text, like the
+  Plasma configuration file does. The file is at most 512 KiB (enough for
+  200 added sites with long addresses); a bigger file is refused.
 - What is never in it: sign-ins, cookies, passphrases, the KDE Wallet key,
   prompts, personalities, chat text or model names; and the settings
   `chatSignInStorage`, `chatProfileGeneration`, `chatAutoLockMinutes`,
@@ -215,8 +219,16 @@ there is no file dialog.
   your settings in the process list.
 - Import reads the file; the helper and then the widget check every value,
   and a value the widget would not store is left out ("Settings left out:
-  N"). Before **Replace**, the confirmation lists each chat address the
-  import would change, as plain text and shortened when long. After
+  N"). An added site is kept only when every added site in the file is
+  valid (exactly an id, a name and an `https://` address, nothing else), and
+  `chatSites`, `chatSiteOrder`, `chatDefaultSite` and `middleClickOpens` may
+  name only the added sites the same file keeps. Before **Replace**, the
+  confirmation lists each chat address the import would change, each site it
+  adds, and each added site it removes, as plain text and shortened when
+  long. **A site the backup doesn't have is removed when you apply, and its
+  data is deleted** (as for Remove, see
+  [One profile per chat site](#one-profile-per-chat-site)); a red warning
+  says so before you apply. After
   **Replace** the values fill in the settings pages; nothing is saved until
   you press **Apply** on the General page.
 - The file stays until you delete it. `scripts/install.sh
@@ -273,8 +285,8 @@ sign-ins only inside the encrypted folder.
 ### One profile per chat site
 
 Every chat site (Claude, ChatGPT, Grok, Gemini, GitHub Copilot, Microsoft
-Copilot and Local web UI) has its own Qt WebEngine profile; no profile is
-shared between sites. A site's profile is made the first time that site is
+Copilot and Local web UI, and every site you add in Settings → Chat) has its
+own Qt WebEngine profile; no profile is shared between sites. A site's profile is made the first time that site is
 opened, so memory grows only with the sites you actually open (each one adds
 its own network context and in-memory cache on top of the page itself). A site's sign-in windows use that site's profile.
 
@@ -297,6 +309,36 @@ Its limits:
   unlocked, the encrypted folder.
 - The clipboard, your Downloads folder, your system browser and your network
   are shared by all sites.
+
+Sites you add:
+
+- An added site gets its profile exactly as a built-in one does (with saved
+  sign-ins, its own `site-user-<8 hex>` folder in the encrypted folder). Its
+  sign-in windows use its profile; a page it frames from another site shows
+  as signed out.
+- It may only be an `https://` address with a public name. Addresses on this
+  computer, IP addresses (any form, such as `192.168.1.10`, `10.1` or
+  `0x7f000001`) and `http://` are refused for now; local and home-network
+  sites come in a later version. An added site's pages, frames and windows
+  can't open this computer or a private, link-local or loopback IP address.
+  Like any browser, it may follow redirects and sign-in pages to other public
+  `https://` hosts; a link you click to another host opens in your browser.
+- Changing an added site's address to **another host** makes it a new site
+  (the editor says so): the old site is signed out and its data deleted on
+  Apply, so no sign-in carries over to a different host. A new address on the
+  same host keeps the sign-in. (A built-in site's custom address keeps that
+  site's profile, as before.)
+- **Removing an added site deletes its data.** Settings → Chat warns you
+  before Apply; Cancel keeps everything. On Apply its pages and profile
+  close, and with saved sign-ins its folder is deleted, through the same
+  path as Clear <site> data: the delete is stored as owed first, so if the
+  encrypted folder is locked (or another widget holds it) the folder is
+  deleted at the next unlock, also after a Plasma restart. The first prepare
+  after each unlock also deletes the folder of any site that no longer
+  exists. A value of
+  `chatUserSites` the widget can't read whole never deletes anything. Ids of
+  removed sites are never reused while their delete is owed. Defaults on the
+  Chat page and a backup import without a site remove it in the same way.
 
 ### Off: private in-memory profiles
 
@@ -557,12 +599,12 @@ What Encrypted mode does not protect against:
 
 | Data | Off | Encrypted |
 | --- | --- | --- |
-| Cookies, sessions, site storage | Memory only, one profile per site; dropped on Clear <site> data (that site), Clear chat data or Plasma restart | Encrypted folder, one `site-<id>` folder per site (with that site's history, favicons and GPU caches); deleted on Clear <site> data (that site), Clear chat data (this widget) or when you turn it Off (all widgets) |
+| Cookies, sessions, site storage | Memory only, one profile per site; dropped on Clear <site> data (that site), removing an added site, Clear chat data or Plasma restart | Encrypted folder, one `site-<id>` folder per site (with that site's history, favicons and GPU caches); deleted on Clear <site> data (that site), removing an added site (that site, at the next unlock if locked), Clear chat data (this widget) or when you turn it Off (all widgets) |
 | HTTP cache | Memory only | Memory only |
 | Page titles, addresses, history, icons | Memory only; the widget never shows, stores, or logs them | Same; Qt WebEngine's own history files, if any, are inside the encrypted folder |
 | Passphrase | Not used | Never stored; typed into kdialog, read by gocryptfs |
 | Passwords and form autofill | Not supported by Qt WebEngine; nothing is saved | Same |
-| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the one-time profile move's state (`chatProfileLayout`), the sites still owing a Clear <site> data delete (`chatPendingSiteClears`), the Ollama address (`chatOllamaUrl`), the zoom of each site and of the Ollama chat, set with the zoom keys or Ctrl+scroll (`chatSiteZoom`, for example `{"claude":1.25}`; sites at 100% are left out), the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `chatKeepOpen`, `chatAutoLockMinutes`, `shortcutOpens`, `middleClickOpens`, and
+| Widget settings | The enabled sites (`chatSites`), the first site (`chatDefaultSite`), any custom addresses you enter (`chatCustomUrls`), the names and addresses of the sites you add (`chatUserSites`) and the site order (`chatSiteOrder`), the Stay signed in choice (`chatSignInStorage`), a profile counter (`chatProfileGeneration`), the one-time profile move's state (`chatProfileLayout`), the sites still owing a Clear <site> data delete (`chatPendingSiteClears`), the Ollama address (`chatOllamaUrl`), the zoom of each site and of the Ollama chat, set with the zoom keys or Ctrl+scroll (`chatSiteZoom`, for example `{"claude":1.25}`; sites at 100% are left out), the General page's popup choices (`popupDefaultTab`, `showUsageTab`, `showChatTab`, `popupSize`, `chatKeepOpen`, `chatAutoLockMinutes`, `shortcutOpens`, `middleClickOpens`, and
 `chatVaultUnlock`, Passphrase or KDE Wallet), and the usage settings in the table near the top of this page, in plain text in `~/.config/plasma-org.kde.plasma.desktop-appletsrc`; never the last page you visited, a passphrase, a path, a model name, or anything you typed into a chat | Same |
 | Ollama conversation | Plasma memory only (and the Ollama server, see below); dropped on Clear conversation, when you turn Ollama off in settings, or on Plasma restart; kept while the popup is closed or another site is shown | Same; never in the encrypted folder |
 | Prompt library | This session's prompts and personalities in Plasma memory only | Saved in the encrypted folder (`library/`); in Plasma memory only while unlocked; never in the configuration |
@@ -606,15 +648,18 @@ only the widget's id; the helper reads the applied settings itself (see
 not logged. The system file dialog may remember recently used folders, as it
 does for any application.
 
-### Custom addresses
+### Custom and added addresses
 
-Under **Settings → Chat → Show advanced settings** you can change the address
-each site opens. Custom addresses are saved in plain text in your Plasma
+With a built-in site's **Edit** button in **Settings → Chat** you can change
+the address it opens, and with **Add site…** you add a site by name and
+address. Only a valid address is saved, when you press Save. Custom and added
+addresses are saved in plain text in your Plasma
 configuration file (`~/.config/plasma-org.kde.plasma.desktop-appletsrc`), which
 other programs running as your user and your backups can read. Don't put
 passwords, tokens, or other secrets in them. Addresses with a user name or
 password (`https://user:pass@host/`) are refused, and text that isn't a valid
-address is never saved. A custom address adds only its exact host to the site.
+address is never saved. A custom address adds only its exact host to the site;
+an added site's address is its own host, and nothing else is stored with it.
 
 ### Local web UI
 

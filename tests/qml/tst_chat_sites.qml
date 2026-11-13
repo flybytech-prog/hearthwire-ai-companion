@@ -927,48 +927,6 @@ TestCase {
         compare(nav("https://ai.home.example/f", "local", false, false, secure), "allow")
     }
 
-    function test_customUrlToPersistTypingSecret() {
-        var target = "https://admin:1234@host.example/"
-        var baselines = ["", "https://chat.example.org/"]
-        for (var b = 0; b < baselines.length; b++) {
-            var baseline = baselines[b]
-            var at = target.indexOf("@")
-            for (var length = 0; length <= target.length; length++) {
-                var text = target.slice(0, length)
-                var result = ChatSites.customUrlToPersist("claude", text, baseline)
-                var checked = ChatSites.validateCustomUrl("claude", text)
-                // Always either the valid text itself or the baseline.
-                compare(result.url, checked.ok ? text : baseline, text)
-                compare(result.error, checked.ok ? "" : checked.error, text)
-                if (length > at) {
-                    compare(result.url, baseline, text)
-                    compare(result.error, "userinfo", text)
-                }
-                verify(result.url.indexOf("1234") < 0 || length <= at, text)
-            }
-        }
-    }
-
-    function test_customUrlToPersist() {
-        compare(ChatSites.customUrlToPersist("claude", "", "https://chat.example.org/"),
-                {url: "", error: ""})
-        compare(ChatSites.customUrlToPersist("claude", "  https://a.example/  ", ""),
-                {url: "https://a.example/", error: ""})
-        compare(ChatSites.customUrlToPersist("claude", "https://a.example/\u0001", "https://b.example/"),
-                {url: "https://b.example/", error: "whitespace"})
-        compare(ChatSites.customUrlToPersist("claude", "http://a.example/", "https://b.example/"),
-                {url: "https://b.example/", error: "scheme"})
-        // A baseline that is itself invalid is never written back.
-        compare(ChatSites.customUrlToPersist("claude", "https://x@y/", "https://localhost/"),
-                {url: "", error: "userinfo"})
-        compare(ChatSites.customUrlToPersist("claude", "https://x@y/", undefined),
-                {url: "", error: "userinfo"})
-        compare(ChatSites.customUrlToPersist("local", null, "http://localhost:8080/"),
-                {url: "", error: ""})
-        compare(ChatSites.customUrlToPersist("devin", "https://a.example/", ""),
-                {url: "", error: "unknown-site"})
-    }
-
     function test_customUrlsParseAndSerialize() {
         var map = {local: "http://localhost:8080/", claude: "https://chat.example.org/x"}
         var json = ChatSites.serializeCustomUrls(map)

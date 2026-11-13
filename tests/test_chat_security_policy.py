@@ -83,6 +83,11 @@ CHAT_CONFIG_KEYS = {
     # empty default reads as None from main.xml).
     "chatProfileLayout": ("Int", "0"),
     "chatPendingSiteClears": ("String", None),
+    # Task 005, written only by configChat.qml and configGeneral.qml's
+    # applyBackup, and backed up: the added sites (JSON [{id, name, url}])
+    # and the site order ("" = default order; the empty default reads as None).
+    "chatUserSites": ("String", "[]"),
+    "chatSiteOrder": ("String", None),
 }
 # The Ollama address (plan T4). Expected once main.xml has it or the Ollama
 # view exists, so it can neither be half-added nor forgotten.
@@ -1109,7 +1114,10 @@ def _prepared_site_problems(main, full_representation, storage=None):
     time) and shrinks only when the site is cleared or expires. L1-r + I1:
     each site expires chatFreshWait after its own latest ok prepare
     (chatFreshAt, chatExpireFresh), so a site no view took is prepared again
-    before it gets a profile, and later prepares of other sites don't keep it."""
+    before it gets a profile, and later prepares of other sites don't keep it.
+    Task 005: chatRemoveUserSites, pinned whole by _user_site_removal_problems,
+    also drops removed sites; it is left out here only while it is exactly that."""
+    main = _without_user_site_removal(main)
     problems = [f"main.qml needs `{pattern}` once" for pattern in MAIN_SITE_GATE if len(re.findall(pattern, main)) != 1]
     if len(_hits(r"(?m)^\s*preparedSites\s*:\s*root\.chatReadySites\s*$", full_representation)) != 1 \
             or len(_hits(r"\bpreparedSites\s*:", full_representation)) != 1:
@@ -1243,7 +1251,10 @@ def test_proof_prepared_site_rule_catches(path, old, new):
 def _pending_clear_problems(main, chat_view):
     """3g (widget side): an owed Clear <site> delete is stored before anything
     is torn down, runs before any prepare at unlock, and a pending id is never
-    prepared or granted before its delete replied ok."""
+    prepared or granted before its delete replied ok. Task 005: the owed
+    deletes of removed added sites are stored only by chatRemoveUserSites,
+    pinned whole by _user_site_removal_problems (left out here while exact)."""
+    main = _without_user_site_removal(main)
     problems = []
     body = _function_body(main, "chatRemovalPending")
     if body is None or _squashed(body) != CHAT_REMOVAL_PENDING_BODY:
@@ -2010,6 +2021,8 @@ def test_main_xml_adds_only_the_chat_keys():
             )
     assert entries["chatPendingSiteClears"]["default"] is None, (
         f"{_rel(MAIN_XML)}: chatPendingSiteClears must default to empty (no owed delete)")
+    assert entries["chatSiteOrder"]["default"] is None, (
+        f"{_rel(MAIN_XML)}: chatSiteOrder must default to empty (the default order)")
 
 
 @pytest.mark.parametrize("filename", CHAT_CONFIG_READ_ONLY_FILES)
@@ -2485,7 +2498,10 @@ def _remove_retry_problems(code):
     """L2-r: a busy remove-site is tried again only in the state (mode, vault
     state, hold, private session, generation) it ran in; any change stops the
     retry at once, and a busy reply to a step started in another state isn't
-    retried. Only an ok reply ends the debt; past the limit it is a failure."""
+    retried. Only an ok reply ends the debt; past the limit it is a failure.
+    Task 005: chatRemoveUserSites's own release and list drops are pinned by
+    _user_site_removal_problems; it is left out here while it is exactly that."""
+    code = _without_user_site_removal(code)
     problems = []
     if len(re.findall(REMOVE_SCOPE, code)) != 1 or len(_hits(r"\bchatRemoveScope\s*:", code)) != 1:
         problems.append("chatRemoveScope must be exactly mode, vault state, hold, private session and generation")
@@ -6016,7 +6032,9 @@ def test_proof_set_persona_rule_catches(path, old, new):
 # is off, a sign-in window covers its opener's pane, and the one WebEngineView
 # stays inside pageComponent.
 SPLIT_SYNC_APPEND = (r"ChatSites\s*\.\s*localOwnerPort\s*\(\s*\{\s*siteId\s*:\s*wanted\s*,\s*customUrls\s*:\s*"
-                     r"chatWeb\s*\.\s*customUrls\s*,\s*url\s*:\s*home\s*\}\s*\)\s*===\s*0\s*\)\s*\{\s*"
+                     # Task 005: with the added sites, as every request object.
+                     r"chatWeb\s*\.\s*customUrls\s*,\s*userSites\s*:\s*chatWeb\s*\.\s*userSites\s*,\s*"
+                     r"url\s*:\s*home\s*\}\s*\)\s*===\s*0\s*\)\s*\{\s*"
                      # Task 004: only once the site's profile exists (or could be made).
                      r"if\s*\(\s*chatWeb\s*\.\s*ensureProfile\s*\(\s*wanted\s*\)\s*\)\s*"
                      r"visitedSites\s*\.\s*append\s*\(\s*\{\s*site\s*:\s*wanted\s*,\s*pane\s*:\s*pane\s*\}\s*\)\s*\}")
@@ -6643,7 +6661,7 @@ DOWNLOAD_HANDLER = (
     "{ if (download.isSavePageDownload || chatWeb.pendingDownload !== null) { download.cancel() return } "
     "chatWeb.pendingDownload = download chatWeb.pendingDownloadName = download.downloadFileName "
     "var siteId = download.view && typeof download.view.site === \"string\" ? download.view.site : \"\" "
-    "var source = siteId !== \"\" ? ChatSites.byId(siteId) : null "
+    "var source = siteId !== \"\" ? ChatSites.byId(siteId, chatWeb.userSites) : null "
     "chatWeb.pendingDownloadSite = source ? source.name : \"\" "
     "chatWeb.pendingDownloadSiteId = source ? siteId : \"\" downloadTimeout.restart() }"
 )
@@ -6653,7 +6671,7 @@ NAV_HEAD = (
     "{ var verdict = ChatSites.classifyNavigation({ url: request.url.toString(), "
     "isMainFrame: request.isMainFrame, linkClicked: request.navigationType "
     "=== WebEngineNavigationRequest.LinkClickedNavigation, siteId: page.site, "
-    "customUrls: chatWeb.customUrls }) if (verdict === \"allow\") {"
+    "customUrls: chatWeb.customUrls, userSites: chatWeb.userSites }) if (verdict === \"allow\") {"
 )
 NAV_TAIL = " request.reject() if (verdict === \"external\") chatWeb.askExternal(request.url.toString()) }"
 
@@ -6888,8 +6906,8 @@ M1_MUTATIONS = [
      "                if (loadingInfo.status === WebEngineLoadingInfo.LoadSucceededStatus)\n"
      "                    page[\"runJava\" + \"Script\"](\"document.cookie\", function (c) { chatWeb.externalHost = String(c) })\n"),
     # 6 clipboard
-    (CHAT_WEB_VIEW, "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n",
-     "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n"
+    (CHAT_WEB_VIEW, "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls, chatWeb.userSites)\n",
+     "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls, chatWeb.userSites)\n"
      "                page.settings.javascriptCanAccessClipboard = true\n"
      "                page.settings.javascriptCanPaste = true\n"
      "                page.settings.localContentCanAccessFileUrls = true\n"),
@@ -6916,8 +6934,8 @@ M1_MUTATIONS = [
     (CHAT_WEB_VIEW, "                permission.deny()\n", "                permission.deny()\n                eval(\"1\")\n"),
     (CHAT_WEB_VIEW, "                permission.deny()\n",
      "                permission.deny()\n                Reflect.get(permission, \"deny\")\n"),
-    (CHAT_WEB_VIEW, "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n",
-     "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n"
+    (CHAT_WEB_VIEW, "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls, chatWeb.userSites)\n",
+     "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls, chatWeb.userSites)\n"
      "                Object.assign(page.settings, { pluginsEnabled: true })\n"),
     (CHAT_WEB_VIEW, "                permission.deny()\n",
      "                permission.deny()\n                var f = new Function(\"p\", \"p.deny()\")\n"),
@@ -6937,8 +6955,8 @@ M1_MUTATIONS = [
     (CHAT_VIEW, "onTriggered: chatView.web.cancelDownload()", "onTriggered: chatView.web.saveDownload()"),
     (MAIN_QML, "    function chatNext() {", "    property string x: \"acceptCertificate\"\n    function chatNext() {"),
     # pinned properties
-    (CHAT_WEB_VIEW, "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n",
-     "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)\n"
+    (CHAT_WEB_VIEW, "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls, chatWeb.userSites)\n",
+     "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls, chatWeb.userSites)\n"
      "                var s = page.settings\n                s.pluginsEnabled = true\n"),
     (CHAT_WEB_VIEW, "        chatWeb.syncCurrentViews()\n    }\n\n    // A changed address moves",
      "        chatWeb.syncCurrentViews()\n        chatWeb.profileFor(\"claude\").persistentPermissionsPolicy = 0\n"
@@ -9121,13 +9139,24 @@ ADDRESS_CHANGE_PAGE_PINS = (
     "shownText: UsageLogic.shownText",
     "list.slice(0, SettingsBackup.MAX_SHOWN_CHANGES).forEach(function (change) {",
     "var site = change.id === SettingsBackup.OLLAMA_ID ? null : ChatSites.byId(change.id)",
-    'var name = site ? site.name : i18n("Ollama")',
+    # Task 005: an added site's own (shownText) name, else the built-in's or Ollama.
+    'var name = typeof change.name === "string" ? change.name : site ? site.name : i18n("Ollama")',
     'lines.push(i18nc("a chat address: site, old address, new address", "%1: %2 → %3", name, change.from, change.to))',
+    'lines.push(i18nc("an added chat site: name, host", "Adds %1 (%2)", change.name, change.host))',
+    'lines.push(i18nc("a removed chat site: name", "Removes %1 and deletes its site data when you apply", change.name))',
 )
 ADDRESS_CHANGE_LIBRARY_PINS = (
     "var MAX_SHOWN_CHANGES = 8",
     "result.push({id: id, from: tools.shownText(from), to: tools.shownText(to)})",
     "result.push({id: OLLAMA_ID, from: tools.shownText(now.chatOllamaUrl), to: tools.shownText(next.chatOllamaUrl)})",
+    # Task 005: added sites, each name, host and address through shownText.
+    "result = result.concat(userSiteChanges(tools.parseUserSites(now.chatUserSites).sites, "
+    "tools.parseUserSites(next.chatUserSites).sites, tools))",
+    'return tools.shownText(typeof tools.hostOf === "function" ? tools.hostOf(url) : "")',
+    'result.push({kind: "add", id: site.id, name: tools.shownText(site.name), host: host(site.url)})',
+    "result.push({id: site.id, name: tools.shownText(site.name), from: tools.shownText(old.url), "
+    "to: tools.shownText(site.url)})",
+    'result.push({kind: "remove", id: site.id, name: tools.shownText(site.name)})',
 )
 ADDRESS_CHANGE_FORMS = (
     r"property\s+var\s+backupAddressChanges\s*:\s*\[\s*\]",
@@ -9147,16 +9176,24 @@ def _address_change_problems(general, library):
     changes = _function_body(library, "addressChanges")
     if None in (text, changes):
         return problems + ["exactly one addressChangeText() and addressChanges() expected"]
-    if set(_returns(text)) != {'""', 'lines.join("\\n")'}:
-        problems.append(f"addressChangeText may return only \"\" or the joined lines, found {_returns(text)}")
-    extra = set(re.findall(r"\bchange\s*\.\s*(\w+)", text)) - {"id", "from", "to"}
+    # Bare `return`s end the add and remove lines inside the forEach.
+    returns = [value.strip() for value in re.findall(r"\breturn\b[ \t]*([^\n]*)", text)]
+    if set(returns) != {'""', 'lines.join("\\n")', ""} or returns.count("") != 2:
+        problems.append(f"addressChangeText may return only \"\" or the joined lines, found {returns}")
+    extra = set(re.findall(r"\bchange\s*\.\s*(\w+)", text)) - {"id", "from", "to", "kind", "name", "host"}
     if extra:
-        problems.append(f"addressChangeText may read only change.id, from and to, found {sorted(extra)}")
-    if len(_hits(r"\blines\s*\.\s*push\s*\(", text)) != 2:
-        problems.append("addressChangeText pushes one line per change and one count line")
+        problems.append(f"addressChangeText may read only change.id, kind, name, host, from and to, found {sorted(extra)}")
+    if len(_hits(r"\bchange\s*\.\s*(?:name|host)\b", text)) != 5:
+        problems.append("addressChangeText shows change.name and change.host only in its pinned lines")
+    if len(_hits(r"\blines\s*\.\s*push\s*\(", text)) != 4:
+        problems.append("addressChangeText pushes one line per change (address, add, remove) and one count line")
     problems += _pin_problems(library, ADDRESS_CHANGE_LIBRARY_PINS, "SettingsBackup.js")
     if len(_hits(r"\bresult\s*\.\s*push\s*\(", changes)) != 2:
         problems.append("addressChanges adds entries only through its two capped pushes")
+    site_changes = _function_body(library, "userSiteChanges")
+    if site_changes is None or len(_hits(r"\bresult\s*\.\s*push\s*\(", site_changes)) != 3 \
+            or len(_hits(r"\buserSiteChanges\s*\(", library)) != 2:
+        problems.append("userSiteChanges (called once, by addressChanges) adds entries only through its three pushes")
     return problems
 
 
@@ -9169,7 +9206,20 @@ def test_import_address_changes_are_plain_and_capped():
     (CONFIG_GENERAL, "shownText: UsageLogic.shownText", "shownText: function (text) { return text }"),
     (CONFIG_GENERAL, "list.slice(0, SettingsBackup.MAX_SHOWN_CHANGES)", "list"),
     (CONFIG_GENERAL, "name, change.from, change.to))", "name, change.raw, change.to))"),
-    (CONFIG_GENERAL, 'var name = site ? site.name : i18n("Ollama")', 'var name = change.name'),
+    (CONFIG_GENERAL, 'var name = typeof change.name === "string" ? change.name : site ? site.name : i18n("Ollama")',
+     'var name = change.raw'),
+    (CONFIG_GENERAL, '"Adds %1 (%2)", change.name, change.host))', '"Adds %1 (%2)", change.name, change.url))'),
+    (CONFIG_GENERAL, '                return\n            }\n            if (change.kind === "remove") {',
+     '            }\n            if (change.kind === "remove") {'),
+    (SETTINGS_BACKUP_JS, 'result.push({kind: "add", id: site.id, name: tools.shownText(site.name), host: host(site.url)})',
+     'result.push({kind: "add", id: site.id, name: site.name, host: host(site.url)})'),
+    (SETTINGS_BACKUP_JS, 'result.push({kind: "remove", id: site.id, name: tools.shownText(site.name)})',
+     'result.push({kind: "remove", id: site.id, name: site.name})'),
+    (SETTINGS_BACKUP_JS, "from: tools.shownText(old.url),", "from: old.url,"),
+    (SETTINGS_BACKUP_JS, '    return tools.shownText(typeof tools.hostOf === "function" ? tools.hostOf(url) : "")',
+     '    return tools.hostOf(url)'),
+    (SETTINGS_BACKUP_JS, "    before.forEach(function (site) {\n",
+     "    result.push({kind: \"add\", id: \"x\", name: next.chatUserSites, host: \"\"})\n    before.forEach(function (site) {\n"),
     (CONFIG_GENERAL, '        return lines.join("\\n")\n', '        return lines.join("<br>")\n'),
     (CONFIG_GENERAL, "        page.backupPlan = plan\n",
      "        page.backupPlan = plan\n        page.backupAddressChanges = reply.settings.chatCustomUrls\n"),
@@ -9878,3 +9928,646 @@ SAFETY_HELP_MUTATIONS = {
 @pytest.mark.parametrize("name", sorted(SAFETY_HELP_MUTATIONS))
 def test_proof_safety_help_rule_catches(name):
     assert _safety_help_problems(_mutated(CONFIG_GENERAL, *SAFETY_HELP_MUTATIONS[name]))
+
+
+# --- task 005: added sites (plan section 8) ----------------------------------------------
+#
+# Users can add https sites (chatUserSites, ids user-xxxxxxxx). An added site
+# gets its own per-site profile exactly like a built-in one, its hosts and
+# class are derived from its address alone, every navigation rule hears about
+# it through request.userSites, and removing it in the settings deletes its
+# data only through task 004's pending-clear path. A damaged chatUserSites
+# never deletes anything.
+
+LETTER_BADGE = UI / "LetterBadge.qml"
+TST_CHAT_SITES = PLASMOID.parent / "tests" / "qml" / "tst_chat_sites.qml"
+CHAT_SITES_GOLDEN = PLASMOID.parent / "tests" / "qml" / "ChatSitesGolden.js"
+
+# Rule 5: the whole removal, in its reviewed order. Stored first (encrypted
+# mode, any vault state), then the views and profiles go, then (no web view:
+# no profile) the release, then the zoom map through zoomWriteTimer only.
+# Nothing in it deletes: remove-site runs only from chatSiteReleased.
+CHAT_REMOVE_USER_SITES_BODY = (
+    "{ var removed = (Array.isArray(ids) ? ids : []).filter(function (id, index, all) { "
+    "return ChatSites.isUserSiteId(id) && all.indexOf(id) === index }) "
+    "if (removed.length === 0) return "
+    "var gone = function (id) { return removed.indexOf(id) < 0 } "
+    'if (root.chatStorageMode === "encrypted") { '
+    "root.chatWritePendingClears(root.chatPendingClears.concat(removed.filter(function (id) { "
+    "return !root.chatRemovalPending(id) }))) "
+    "root.chatFreshSites = root.chatFreshSites.filter(gone) "
+    "root.chatWantedSites = root.chatWantedSites.filter(gone) "
+    "root.chatRemoveTried = root.chatRemoveTried.filter(gone) "
+    "root.chatRemoveRewanted = root.chatRemoveRewanted.filter(gone) } "
+    "root.chatUserSitesRemoved(removed) "
+    "if (!root.chatWebLoaded) removed.forEach(function (id) { root.chatSiteReleased(id) }) "
+    "var kept = ChatSites.siteIds(ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites).sites) "
+    'var zoom = SettingsLogic.parseZoomMap(SettingsLogic.zoomMapToPersist(root.chatZoom, "", 1.0), '
+    "kept.concat([OllamaChat.ENTRY.id])) "
+    "if (JSON.stringify(zoom) !== JSON.stringify(root.chatZoom)) { root.chatZoom = zoom zoomWriteTimer.restart() } }"
+)
+# Only an ok read counts; the first ok read only seeds.
+CHAT_SYNC_USER_SITES_BODY = (
+    "{ var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites) if (!read.ok) return "
+    "var now = read.sites.map(function (site) { return site.id }) "
+    "var seen = root.chatUserSiteIdsSeen root.chatUserSiteIdsSeen = now if (seen === null) return "
+    "var removed = seen.filter(function (id) { return now.indexOf(id) < 0 }) "
+    "if (removed.length > 0) root.chatRemoveUserSites(removed) }"
+)
+DROP_SITES_BODY = (
+    '{ var list = ids !== null && typeof ids === "object" && typeof ids.length === "number" '
+    "&& ids.length >= 0 && ids.length <= ChatStorage.MAX_SITE_IDS ? Array.prototype.slice.call(ids) : [] "
+    'if (list.indexOf(chatView.confirmingClearSite) >= 0) chatView.confirmingClearSite = "" '
+    "if (!chatView.web) return "
+    "list.forEach(function (siteId) { if (ChatSites.isUserSiteId(siteId)) chatView.web.clearSite(siteId) }) }"
+)
+# Rule 4: the prune list is built-ins plus parsed ids only from an ok read.
+MAIN_USER_SITE_PINS = (
+    "readonly property var chatUserSitesRead: ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)",
+    "readonly property var chatUserSites: root.chatUserSitesRead.sites",
+    "readonly property bool chatUserSitesOk: root.chatUserSitesRead.ok",
+    "property var chatUserSiteIdsSeen: null",
+    "signal chatUserSitesRemoved(var ids)",
+    "property bool chatWebLoaded: false",
+    "readonly property var chatKnownSites: root.chatUserSitesOk "
+    "? ChatStorage.BUILTIN_SITE_IDS.concat(root.chatUserSites.map(function (site) { return site.id })) : []",
+    "if (root.chatUserSitesOk) root.chatUserSiteIdsSeen = root.chatUserSites.map(function (site) { return site.id })",
+    "readonly property string configuredUserSites: Plasmoid.configuration.chatUserSites",
+    "onConfiguredUserSitesChanged: root.chatSyncUserSites()",
+    'return ChatStorage.webDataCommand("prune", "encrypted", root.chatAppletId, root.chatGeneration, null, run, '
+    "root.chatKnownSites)",
+)
+FULL_USER_SITE_PINS = (
+    "userSites: root.chatUserSites",
+    "function onChatUserSitesRemoved(ids) { chatView.dropSites(ids) }",
+    "onWebLoadedChanged: (loaded) => root.chatWebLoaded = loaded",
+    "Component.onDestruction: root.chatWebLoaded = false",
+)
+VIEW_USER_SITE_PINS = (
+    "property var userSites: []",
+    "signal webLoadedChanged(bool loaded)",
+    "onAvailableChanged: chatView.webLoadedChanged(chatView.available)",
+    "webLoader.item.userSites = Qt.binding(function () { return chatView.userSites })",
+)
+# chatParse of the stored text: ok only when every entry is valid and unique.
+PARSE_USER_SITES_BODY = (
+    '{ var result = { ok: false, sites: [] } if (typeof text !== "string" || text.length > MAX_USER_SITES_CHARS) '
+    "return result var parsed = null try { parsed = JSON.parse(text) } catch (error) { return result } "
+    "if (!Array.isArray(parsed)) return result var ok = parsed.length <= MAX_USER_SITES "
+    "for (var index = 0; index < parsed.length; index++) { if (result.sites.length >= MAX_USER_SITES) break "
+    "var entry = parsed[index] if (!validateUserSite(entry, result.sites).ok) { ok = false continue } "
+    "result.sites.push({ id: entry.id, name: entry.name, url: entry.url }) } result.ok = ok return result }"
+)
+
+
+def _without_user_site_removal(main):
+    """``main`` with chatRemoveUserSites's body blanked, only while that body is
+    exactly CHAT_REMOVE_USER_SITES_BODY (any other body stays and trips the 004
+    rules that count list writes, releases and owed-delete writes)."""
+    spans = _block_spans(main, r"\bfunction\s+chatRemoveUserSites\s*\([^)]*\)\s*\{")
+    if len(spans) != 1:
+        return main
+    lo, hi = spans[0]
+    if _squashed(main[lo:hi]) != CHAT_REMOVE_USER_SITES_BODY:
+        return main
+    return main[:lo + 1] + re.sub(r"[^\n]", " ", main[lo + 1:hi - 1]) + main[hi - 1:]
+
+
+def _user_site_removal_problems(main, full_representation, view, chat_sites):
+    """Rules 4 and 5: a removal stores the owed delete before the Chat tab
+    drops anything and never deletes itself; only an ok read of chatUserSites
+    may remove, prune or seed anything."""
+    problems = []
+    for name, expected in (("chatRemoveUserSites", CHAT_REMOVE_USER_SITES_BODY),
+                           ("chatSyncUserSites", CHAT_SYNC_USER_SITES_BODY)):
+        body = _function_body(main, name)
+        if body is None or _squashed(body) != expected:
+            problems.append(f"main.qml: {name} must be exactly `{expected}`")
+    body = _function_body(main, "chatRemoveUserSites") or ""
+    stored = body.find("chatWritePendingClears(")
+    emitted = body.find("chatUserSitesRemoved(")
+    if stored < 0 or emitted < 0 or stored > emitted:
+        problems.append("chatRemoveUserSites stores the owed deletes before it emits chatUserSitesRemoved")
+    if re.search(r'\bchatEnqueue\s*\(|"remove-site"|\bwebDataCommand\s*\(|\bchatClearSite\s*\(', body):
+        problems.append("chatRemoveUserSites deletes nothing itself (no enqueue, command or chatClearSite)")
+    problems += _pin_problems(main, MAIN_USER_SITE_PINS, "main.qml")
+    for word, count in (("chatRemoveUserSites", 2), ("chatSyncUserSites", 2), ("chatUserSitesRemoved", 2),
+                        ("chatKnownSites", 2), ("chatUserSitesOk", 3)):
+        found = len(_hits(rf"\b{word}\b", main))
+        if found != count:
+            problems.append(f"main.qml: {word} must appear {count} times (declared and its reviewed uses), found {found}")
+    if len(_hits(r"\bchatUserSiteIdsSeen\s*=(?!=)", main)) != 2:
+        problems.append("chatUserSiteIdsSeen is set only by the ok seed at start and in chatSyncUserSites")
+    if _hits(r"\bchatWebLoaded\s*=(?!=)", main):
+        problems.append("main.qml never sets chatWebLoaded; only FullRepresentation reports it")
+    problems += _pin_problems(full_representation, FULL_USER_SITE_PINS, "FullRepresentation.qml")
+    if len(_hits(r"\bchatWebLoaded\s*=(?!=)", full_representation)) != 2 \
+            or len(_hits(r"\bdropSites\s*\(", full_representation)) != 1:
+        problems.append("FullRepresentation sets chatWebLoaded only from ChatView and on destruction, "
+                        "and calls dropSites only for chatUserSitesRemoved")
+    drop = _function_body(view, "dropSites")
+    if drop is None or _squashed(drop) != DROP_SITES_BODY:
+        problems.append(f"ChatView.dropSites must be exactly `{DROP_SITES_BODY}`")
+    problems += _pin_problems(view, VIEW_USER_SITE_PINS, "ChatView.qml")
+    parse = _function_body(chat_sites, "parseUserSites")
+    if parse is None or _squashed(parse) != PARSE_USER_SITES_BODY:
+        problems.append(f"ChatSites.parseUserSites must be exactly `{PARSE_USER_SITES_BODY}`")
+    return problems
+
+
+def test_removed_added_sites_are_deleted_only_through_the_pending_clears():
+    problems = _user_site_removal_problems(_read_code(MAIN_QML), _read_code(FULL_REPRESENTATION),
+                                           _read_code(CHAT_VIEW), _read_code(CHAT_SITES_JS))
+    assert not problems, problems
+
+
+USER_SITE_REMOVAL_MUTATIONS = {
+    # Rule 5: the order, a direct delete, the debt skipped.
+    "torn down before stored": (MAIN_QML,
+        "            root.chatWritePendingClears(root.chatPendingClears.concat(removed.filter(function (id) {\n"
+        "                return !root.chatRemovalPending(id)\n            })))\n",
+        "            root.chatUserSitesRemoved(removed)\n"
+        "            root.chatWritePendingClears(root.chatPendingClears.concat(removed.filter(function (id) {\n"
+        "                return !root.chatRemovalPending(id)\n            })))\n"),
+    "remove-site enqueued directly": (MAIN_QML, "        root.chatUserSitesRemoved(removed)\n",
+                                      "        root.chatUserSitesRemoved(removed)\n"
+                                      "        root.chatEnqueue([\"wait\", \"remove-site\"])\n"),
+    "debt never stored": (MAIN_QML,
+        "            root.chatWritePendingClears(root.chatPendingClears.concat(removed.filter(function (id) {\n"
+        "                return !root.chatRemovalPending(id)\n            })))\n", ""),
+    "released although a view exists": (MAIN_QML, "        if (!root.chatWebLoaded)\n            removed.forEach(",
+                                        "        if (true)\n            removed.forEach("),
+    "any id removed": (MAIN_QML, "return ChatSites.isUserSiteId(id) && all.indexOf(id) === index",
+                       "return all.indexOf(id) === index"),
+    "zoom written directly": (MAIN_QML, "            root.chatZoom = zoom\n            zoomWriteTimer.restart()\n",
+                              "            Plasmoid.configuration.chatSiteZoom = JSON.stringify(zoom)\n"),
+    # Rule 4 and the ok-read rule.
+    "lenient read removes": (MAIN_QML, "        var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)\n"
+                                       "        if (!read.ok)\n            return\n",
+                             "        var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)\n"),
+    "first read removes": (MAIN_QML, "        if (seen === null)\n            return\n", "        if (seen === null)\n            seen = []\n"),
+    "prune lenient when not ok": (MAIN_QML, "    readonly property var chatKnownSites: root.chatUserSitesOk\n"
+                                            "        ? ChatStorage.BUILTIN_SITE_IDS.concat(root.chatUserSites.map(function (site) { return site.id }))\n"
+                                            "        : []\n",
+                                  "    readonly property var chatKnownSites:\n"
+                                  "        ChatStorage.BUILTIN_SITE_IDS.concat(root.chatUserSites.map(function (site) { return site.id }))\n"),
+    "prune built-ins when not ok": (MAIN_QML, "site.id }))\n        : []\n",
+                                    "site.id }))\n        : ChatStorage.BUILTIN_SITE_IDS\n"),
+    "prune keeps removed ids": (MAIN_QML, "        ? ChatStorage.BUILTIN_SITE_IDS.concat(root.chatUserSites.map(function (site) { return site.id }))\n",
+                                "        ? ChatStorage.BUILTIN_SITE_IDS.concat(root.chatUserSites.map(function (site) { return site.id }),\n"
+                                "            root.chatUserSiteIdsSeen || [])\n"),
+    "seeded from a lenient read": (MAIN_QML, "        if (root.chatUserSitesOk)\n            root.chatUserSiteIdsSeen =",
+                                   "        if (true)\n            root.chatUserSiteIdsSeen ="),
+    "parse ok despite a bad entry": (CHAT_SITES_JS, "            ok = false\n            continue\n", "            continue\n"),
+    # The teardown side.
+    "drops built-ins too": (CHAT_VIEW, "            if (ChatSites.isUserSiteId(siteId))\n                chatView.web.clearSite(siteId)",
+                            "            chatView.web.clearSite(siteId)"),
+    "not dropped": (FULL_REPRESENTATION, "            chatView.dropSites(ids)\n", "            void ids\n"),
+    "web view always loaded": (FULL_REPRESENTATION, "    Component.onDestruction: root.chatWebLoaded = false\n", ""),
+    "main fakes no web view": (MAIN_QML, "    function chatSyncUserSites() {\n",
+                               "    function chatNoWeb() { root.chatWebLoaded = false }\n    function chatSyncUserSites() {\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(USER_SITE_REMOVAL_MUTATIONS))
+def test_proof_user_site_removal_rule_catches(name):
+    path, old, new = USER_SITE_REMOVAL_MUTATIONS[name]
+    texts = {path: _mutated(path, old, new)}
+    problems = _user_site_removal_problems(
+        texts.get(MAIN_QML) or _read_code(MAIN_QML), texts.get(FULL_REPRESENTATION) or _read_code(FULL_REPRESENTATION),
+        texts.get(CHAT_VIEW) or _read_code(CHAT_VIEW), texts.get(CHAT_SITES_JS) or _read_code(CHAT_SITES_JS))
+    assert problems
+
+
+@pytest.mark.parametrize(("rule", "old", "new"), [
+    # The 004 rules still count what a changed chatRemoveUserSites writes.
+    (_prepared_site_problems, "            root.chatFreshSites = root.chatFreshSites.filter(gone)\n",
+     "            root.chatFreshSites = root.chatFreshSites.concat(removed)\n"),
+    (_pending_clear_problems, "            root.chatWritePendingClears(root.chatPendingClears.concat(removed.filter(function (id) {\n"
+                              "                return !root.chatRemovalPending(id)\n            })))\n",
+     "            root.chatWritePendingClears([])\n"),
+    (_remove_retry_problems, "            root.chatRemoveRewanted = root.chatRemoveRewanted.filter(gone)\n",
+     "            root.chatRemoveRewanted = []\n"),
+])
+def test_proof_004_rules_still_see_a_changed_removal(rule, old, new):
+    main = _mutated(MAIN_QML, old, new)
+    if rule is _prepared_site_problems:
+        problems = rule(main, _read_code(FULL_REPRESENTATION), _read_code(CHAT_STORAGE_JS))
+    elif rule is _pending_clear_problems:
+        problems = rule(main, _read_code(CHAT_VIEW))
+    else:
+        problems = rule(main)
+    assert problems
+
+
+def test_proof_zoom_write_in_the_removal_is_caught():
+    old = "            root.chatZoom = zoom\n            zoomWriteTimer.restart()\n"
+    new = "            Plasmoid.configuration.chatSiteZoom = JSON.stringify(zoom)\n"
+    assert _zoom_write_problems(_sources_with(MAIN_QML, old, new))
+
+
+# Rule 3: an added site is rebuilt from its name and address alone.
+USER_SITE_FROM_BODY = (
+    '{ return { id: entry.id, name: entry.name, url: entry.url, icon: "", user: true, site_hosts: [], '
+    "auth_hosts: [], exact_hosts: [normalizeHost(parseUrl(entry.url).host)], local: false, "
+    'local_kind: addressClass(entry.url), default_on: true, http_origin: "" } }'
+)
+CHAT_SITES_USER_PINS = (
+    'var USER_SITE_KEYS = ["id", "name", "url"]',
+    "if (keys.length !== USER_SITE_KEYS.length || !USER_SITE_KEYS.every(function (key) { "
+    'return keys.indexOf(key) >= 0 })) return fail("entry")',
+    "if (isUserSiteId(siteId)) return userSite(siteId, userSites)",
+    "result.sites.push({ id: entry.id, name: entry.name, url: entry.url })",
+    "valid.push({ id: entry.id, name: entry.name, url: entry.url })",
+    "clean.push({ id: list[index].id, name: list[index].name, url: list[index].url })",
+)
+# The user-site functions: the only code that sees a stored entry.
+USER_SITE_FUNCTIONS = ("validateUserSite", "parseUserSites", "serializeUserSites", "validUserSites", "userSiteFrom",
+                       "userSite", "orderedSites")
+DERIVED_FIELDS = ("local", "local_kind", "site_hosts", "auth_hosts", "icon", "exact_hosts", "http_origin",
+                  "default_on", "user")
+
+
+def _derived_class_problems(chat_sites, sources):
+    problems = []
+    body = _function_body(chat_sites, "userSiteFrom")
+    if body is None or _squashed(body) != USER_SITE_FROM_BODY:
+        problems.append(f"ChatSites.userSiteFrom must be exactly `{USER_SITE_FROM_BODY}`")
+    problems += _pin_problems(chat_sites, CHAT_SITES_USER_PINS, "ChatSites.js")
+    read = set()
+    for function in USER_SITE_FUNCTIONS:
+        body = _function_body(chat_sites, function)
+        if body is None:
+            problems.append(f"ChatSites.js needs one function {function}")
+            continue
+        read |= set(re.findall(r"\b(?:entry|list\s*\[\s*index\s*\]|valid\s*\[\s*index\s*\])\s*\.\s*(\w+)", body))
+        if re.search(r"\b(?:entry|list\s*\[\s*index\s*\]|valid\s*\[\s*index\s*\])\s*\[", body):
+            read.add("[computed]")
+    if read - {"id", "name", "url"}:
+        problems.append(f"ChatSites.js reads only id, name and url of a stored entry, found {sorted(read)}")
+    calls = _hits(r"\buserSiteFrom\s*\(", chat_sites)
+    if len(calls) != 3 or len(_hits(r"\breturn\s+userSiteFrom\s*\(\s*valid\s*\[\s*index\s*\]\s*\)", chat_sites)) != 2 \
+            or len(_hits(r"\bvar\s+valid\s*=\s*validUserSites\s*\(\s*userSites\s*\)", chat_sites)) != 3:
+        problems.append("userSiteFrom is called only on entries validUserSites kept (userSite, orderedSites)")
+    # Nothing outside ChatSites.js (and the backup check) parses the stored list.
+    for name, code in sources.items():
+        if not name.endswith(".qml"):
+            continue
+        for line in code.splitlines():
+            if "chatUserSites" in line and re.search(r"\bJSON\s*\.\s*parse\b", line):
+                problems.append(f"{name}: chatUserSites is read only through ChatSites.parseUserSites")
+            for field in DERIVED_FIELDS:
+                if re.search(rf"\bchatUserSites\b.*\.\s*{field}\b", line):
+                    problems.append(f"{name}: reads {field} next to chatUserSites")
+    return problems
+
+
+def test_added_sites_get_derived_hosts_and_class_only():
+    problems = _derived_class_problems(_read_code(CHAT_SITES_JS), _all_code())
+    assert not problems, problems
+
+
+DERIVED_CLASS_MUTATIONS = {
+    "class copied from the entry": ("        local: false,\n        local_kind: addressClass(entry.url),",
+                                    "        local: entry.local === true,\n        local_kind: addressClass(entry.url),"),
+    "auth hosts from the entry": ("        auth_hosts: [],\n        exact_hosts:",
+                                  "        auth_hosts: entry.auth_hosts || [],\n        exact_hosts:"),
+    "extra key accepted": ("keys.length !== USER_SITE_KEYS.length || ", ""),
+    "extra key kept": ("        result.sites.push({ id: entry.id, name: entry.name, url: entry.url })",
+                       "        result.sites.push(entry)"),
+    "site hosts from the entry": ("        site_hosts: [],\n", "        site_hosts: entry[\"site_hosts\"] || [],\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(DERIVED_CLASS_MUTATIONS))
+def test_proof_derived_class_rule_catches(name):
+    old, new = DERIVED_CLASS_MUTATIONS[name]
+    assert _derived_class_problems(_mutated(CHAT_SITES_JS, old, new), _all_code())
+
+
+def test_proof_derived_class_rule_sees_the_pages():
+    sources = _sources_with(CONFIG_CHAT, snippet="\n    readonly property var x: JSON.parse(page.cfg_chatUserSites)\n")
+    assert _derived_class_problems(_read_code(CHAT_SITES_JS), sources)
+    sources = _sources_with(MAIN_QML, snippet="\n    readonly property bool x: root.chatUserSites[0].local\n")
+    assert _derived_class_problems(_read_code(CHAT_SITES_JS), sources)
+
+
+# Rule 6 + 7: the web view treats an added id like any other: its own
+# profile through the 004 functions, and every ChatSites call gets the list.
+SYNC_HOME_GUARD = (
+    'var home = ChatSites.homeUrl(wanted, chatWeb.customUrls, chatWeb.userSites) if (home === "") continue '
+    "if (!chatWeb.profileFor(wanted) && !chatWeb.siteProfileSpec(wanted)) {"
+)
+REQUEST_CALLS = r"\bChatSites\s*\.\s*(classifyNavigation|classifySubframe|classifyNewWindow|offSiteHost|localOwnerPort|localOwnerGate)\s*\("
+
+
+def _added_site_web_problems(web, view):
+    problems = []
+    if len(_hits(r"(?m)^\s*property\s+var\s+userSites\s*:\s*\[\s*\]\s*$", web)) != 1 \
+            or _hits(r"\buserSites\s*=(?!=)", web):
+        problems.append("ChatWebView: `property var userSites: []` once, never assigned inside")
+    if re.search(r"\bisUserSiteId\b|[\"']user-|\.\s*user\b", web):
+        problems.append("ChatWebView has no added-site special case: profiles and views treat every id alike")
+    if _squashed(SYNC_HOME_GUARD) not in _squashed(_function_body(web, "syncViews") or ""):
+        problems.append(f"syncViews skips an id without an address before any profile or request: `{SYNC_HOME_GUARD}`")
+    calls = list(re.finditer(REQUEST_CALLS, web))
+    literals = [match for match in re.finditer(REQUEST_CALLS + r"\s*\{([^}]*)\}", web)]
+    if not calls or len(literals) != len(calls):
+        problems.append("every ChatSites request call takes an object literal")
+    for match in literals:
+        fields = match.group(2)
+        if not re.search(r"\buserSites\s*:\s*chatWeb\s*\.\s*userSites\b", fields) \
+                or not re.search(r"\bcustomUrls\s*:\s*chatWeb\s*\.\s*customUrls\b", fields):
+            problems.append(f"line {_line_of(web, match.start())}: {match.group(1)} needs "
+                            "`customUrls: chatWeb.customUrls` and `userSites: chatWeb.userSites`")
+    for function in ("effectiveSite", "homeUrl"):
+        all_calls = _hits(rf"\bChatSites\s*\.\s*{function}\s*\(", web)
+        good = _hits(rf"\bChatSites\s*\.\s*{function}\s*\([^()]*,\s*chatWeb\s*\.\s*customUrls\s*,\s*"
+                     r"chatWeb\s*\.\s*userSites\s*\)", web)
+        if not all_calls or all_calls != good:
+            problems.append(f"every ChatSites.{function} call passes chatWeb.customUrls, chatWeb.userSites")
+    for code, owner, where in ((web, "chatWeb", "ChatWebView"), (view, "chatView", "ChatView")):
+        all_calls = _hits(r"\bChatSites\s*\.\s*byId\s*\(", code)
+        good = _hits(rf"\bChatSites\s*\.\s*byId\s*\([^(),]+,\s*{owner}\s*\.\s*userSites\s*\)", code)
+        if not all_calls or all_calls != good:
+            problems.append(f"{where}: every ChatSites.byId call passes {owner}.userSites")
+    return problems
+
+
+def test_added_sites_reach_every_web_rule_and_only_their_own_profile():
+    problems = _added_site_web_problems(_read_code(CHAT_WEB_VIEW), _read_code(CHAT_VIEW))
+    assert not problems, problems
+
+
+ADDED_SITE_WEB_MUTATIONS = {
+    "navigation without userSites": (CHAT_WEB_VIEW, "                    customUrls: chatWeb.customUrls,\n"
+                                     "                    userSites: chatWeb.userSites\n                })\n"
+                                     "                if (verdict === \"allow\") {",
+                                     "                    customUrls: chatWeb.customUrls\n                })\n"
+                                     "                if (verdict === \"allow\") {"),
+    "new window without userSites": (CHAT_WEB_VIEW, "                    siteId: page.site,\n                    customUrls: chatWeb.customUrls,\n"
+                                     "                    userSites: chatWeb.userSites\n                })\n"
+                                     "                // A Local window",
+                                     "                    siteId: page.site,\n                    customUrls: chatWeb.customUrls\n"
+                                     "                })\n                // A Local window"),
+    "gate without userSites": (CHAT_WEB_VIEW, "                        customUrls: chatWeb.customUrls,\n"
+                               "                        userSites: chatWeb.userSites,\n                        pass: page.ownerPass",
+                               "                        customUrls: chatWeb.customUrls,\n                        pass: page.ownerPass"),
+    "request built elsewhere": (CHAT_WEB_VIEW, "        var port = ChatSites.localOwnerPort({ siteId: \"local\", customUrls: chatWeb.customUrls,\n"
+                                "                                              userSites: chatWeb.userSites, url: url })",
+                                "        var request = { siteId: \"local\", customUrls: chatWeb.customUrls, url: url }\n"
+                                "        var port = ChatSites.localOwnerPort(request)"),
+    "home without userSites": (CHAT_WEB_VIEW, "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls, chatWeb.userSites)",
+                               "                page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls)"),
+    "page check without userSites": (CHAT_WEB_VIEW, "ChatSites.effectiveSite(chatWeb.activeView.site, chatWeb.customUrls, chatWeb.userSites)",
+                                     "ChatSites.effectiveSite(chatWeb.activeView.site, chatWeb.customUrls)"),
+    "download name without userSites": (CHAT_WEB_VIEW, "ChatSites.byId(siteId, chatWeb.userSites)", "ChatSites.byId(siteId)"),
+    "clear name without userSites": (CHAT_VIEW, "ChatSites.byId(chatView.confirmingClearSite, chatView.userSites)",
+                                     "ChatSites.byId(chatView.confirmingClearSite)"),
+    "no home guard": (CHAT_WEB_VIEW, "            if (home === \"\")\n                continue\n", ""),
+    # Rule 6: an added id mapped to another site's profile.
+    "added ids share a profile": (CHAT_WEB_VIEW, "            ? chatWeb.profiles[siteId] : null",
+                                  "            ? chatWeb.profiles[ChatSites.isUserSiteId(siteId) ? \"claude\" : siteId] : null"),
+    "list replaced inside": (CHAT_WEB_VIEW, "    function home() {\n", "    function f() { chatWeb.userSites = [] }\n    function home() {\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(ADDED_SITE_WEB_MUTATIONS))
+def test_proof_added_site_web_rule_catches(name):
+    path, old, new = ADDED_SITE_WEB_MUTATIONS[name]
+    web = _mutated(path, old, new) if path == CHAT_WEB_VIEW else _read_code(CHAT_WEB_VIEW)
+    view = _mutated(path, old, new) if path == CHAT_VIEW else _read_code(CHAT_VIEW)
+    assert _added_site_web_problems(web, view)
+
+
+@pytest.mark.parametrize(("rule", "old", "new"), [
+    # Rule 6 through the 004 rules 3b and 3e: an added id reaches only profiles[id].
+    (_page_profile_problems, "            ? chatWeb.profiles[siteId] : null",
+     "            ? chatWeb.profiles[ChatSites.isUserSiteId(siteId) ? \"claude\" : siteId] : null"),
+    (_page_profile_problems, "            profile: chatWeb.profileFor(page.site)",
+     "            profile: chatWeb.profileFor(ChatSites.isUserSiteId(page.site) ? \"claude\" : page.site)"),
+    (_site_profile_problems, "        chatWeb.profiles[siteId] = profile\n",
+     "        chatWeb.profiles[ChatSites.isUserSiteId(siteId) ? \"claude\" : siteId] = profile\n"),
+    (_site_profile_problems, "ChatStorage.siteProfileName(chatWeb.storageApplet, chatWeb.storageGeneration, siteId)",
+     "ChatStorage.siteProfileName(chatWeb.storageApplet, chatWeb.storageGeneration, "
+     "ChatSites.isUserSiteId(siteId) ? \"claude\" : siteId)"),
+])
+def test_proof_added_ids_never_reach_another_profile(rule, old, new):
+    assert rule(_mutated(CHAT_WEB_VIEW, old, new))
+
+
+# Rule 2 + 11: who writes the site table keys, and only valid values.
+CONFIG_CHAT_WRITERS = ("onValueChanged", "setEnabled", "saveCustomUrl", "saveOllamaAddress", "saveUserSite",
+                       "removeUserSite", "moveSite")
+CONFIG_CHAT_SAVE_PINS = (
+    'var checked = ChatSites.validateCustomUrl(siteId, String(text || "").trim()) if (!checked.ok) return checked.error',
+    "page.cfg_chatCustomUrls = ChatSites.serializeCustomUrls(map)",
+    'var checked = OllamaChat.validateAddress(String(text || "").trim()) if (!checked.ok) return checked.error',
+    "page.cfg_chatOllamaUrl = checked.address",
+    "var checked = ChatSites.validateUserSite(entry, others) if (!checked.ok) return checked.error",
+    'var text = ChatSites.serializeUserSites(list) if (text === "") return adding ? "full" : "too-long"',
+    'var text = ChatSites.serializeUserSites(list) if (text === "") return var order',
+    "onActivated: page.cfg_chatDefaultSite = currentValue",
+)
+APPLY_SITE_TABLE_LINES = (
+    "if (values.chatUserSites !== undefined) page.cfg_chatUserSites = values.chatUserSites",
+    "if (values.chatSiteOrder !== undefined) page.cfg_chatSiteOrder = values.chatSiteOrder",
+)
+GENERAL_BACKUP_TOOL_PINS = (
+    "userSiteIds: function (text) { return ChatSites.parseUserSites(text).sites.map(function (site) { return site.id }) }",
+    "validateUserSite: ChatSites.validateUserSite",
+    "serializeUserSites: ChatSites.serializeUserSites",
+)
+
+
+def _site_table_writer_problems(sources):
+    problems = []
+    write = r"\bcfg_(chatUserSites|chatSiteOrder)\s*(?:=(?!=)|[-+*/%&|^]=|\+\+|--)"
+    config_write = r"\b[Pp]lasmoid\s*\.\s*configuration\s*(?:\.\s*|\[\s*\"\s*)(chatUserSites|chatSiteOrder)\b\s*\"?\]?\s*=(?!=)"
+    for name, code in sources.items():
+        if _hits(config_write, code):
+            problems.append(f"{name}: never writes Plasmoid.configuration.chatUserSites or chatSiteOrder")
+        if name not in (_rel(CONFIG_CHAT), _rel(CONFIG_GENERAL)) and _hits(write, code):
+            problems.append(f"{name}: may not assign cfg_chatUserSites or cfg_chatSiteOrder")
+        if re.search(r'\bkey\s*===\s*"(chatUserSites|chatSiteOrder)"', code):
+            problems.append(f"{name}: the site table keys are never synced from main.qml (it never writes them)")
+    general = sources.get(_rel(CONFIG_GENERAL), "")
+    apply = _function_body(general, "applyBackup") or ""
+    problems += _pin_problems(apply, APPLY_SITE_TABLE_LINES, "configGeneral.qml applyBackup")
+    if len(_hits(write, general)) != 2:
+        problems.append("configGeneral.qml assigns the site table keys only in applyBackup's two lines")
+    problems += _pin_problems(general, GENERAL_BACKUP_TOOL_PINS, "configGeneral.qml")
+    chat = sources.get(_rel(CONFIG_CHAT), "")
+    spans = []
+    for function in CONFIG_CHAT_WRITERS:
+        spans += _block_spans(chat, rf"\bfunction\s+{function}\s*\([^)]*\)\s*\{{")
+    activated = [match.start() for match in re.finditer(r"onActivated\s*:\s*page\s*\.\s*cfg_chatDefaultSite\s*=", chat)]
+    for match in re.finditer(r"\bcfg_\w+\s*(?:=(?!=)|[-+*/%&|^]=|\+\+|--)", chat):
+        inside = any(lo <= match.start() < hi for lo, hi in spans)
+        if not inside and not any(start <= match.start() < start + 60 for start in activated):
+            problems.append(f"configChat.qml line {_line_of(chat, match.start())}: a cfg_ value is written "
+                            "outside the reviewed save functions")
+    problems += _pin_problems(chat, CONFIG_CHAT_SAVE_PINS, "configChat.qml")
+    counts = {"chatUserSites": (r"\bcfg_chatUserSites\s*=\s*text\b", 2),
+              "chatSiteOrder": (r"\bcfg_chatSiteOrder\s*=\s*ChatSites\s*\.\s*serializeSiteOrder\s*\(", 3),
+              "chatCustomUrls": (r"\bcfg_chatCustomUrls\s*=", 1), "chatOllamaUrl": (r"\bcfg_chatOllamaUrl\s*=(?!=)", 1)}
+    for key, (pattern, count) in counts.items():
+        if len(_hits(pattern, chat)) != count or len(_hits(rf"\bcfg_{key}\s*=(?!=)", chat)) != count:
+            problems.append(f"configChat.qml writes cfg_{key} only {count} time(s), each a checked value")
+    if re.search(r"\bshowAdvanced\b|\bcustomUrlToPersist\b", chat):
+        problems.append("configChat.qml: the per-keystroke advanced fields are gone (showAdvanced, customUrlToPersist)")
+    return problems
+
+
+def test_site_table_keys_are_written_only_by_the_chat_page_and_restore():
+    problems = _site_table_writer_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new", "snippet"), [
+    (MAIN_QML, None, None, "\n    function f() { Plasmoid.configuration.chatUserSites = \"[]\" }\n"),
+    (MAIN_QML, None, None, "\n    function f() { Plasmoid.configuration[\"chatSiteOrder\"] = \"\" }\n"),
+    (CONFIG_USAGE, None, None, "\n    function f() { page.cfg_chatUserSites = \"[]\" }\n"),
+    (CONFIG_USAGE, None, None, "\n    function f() { page.cfg_chatSiteOrder = \"\" }\n"),
+    (CONFIG_GENERAL, None, None, "\n    function f() { page.cfg_chatUserSites = \"[]\" }\n"),
+    (CONFIG_CHAT, None, None, "\n    QQC2.TextField { onTextEdited: page.cfg_chatCustomUrls = text }\n"),
+    (CONFIG_CHAT, None, None, "\n    property bool showAdvanced: false\n"),
+    (CONFIG_CHAT, "        if (!checked.ok)\n            return checked.error\n        var list = page.userSites.slice()",
+     "        var list = page.userSites.slice()", None),
+    (CONFIG_CHAT, "        var checked = ChatSites.validateCustomUrl(siteId, String(text || \"\").trim())\n"
+                  "        if (!checked.ok)\n            return checked.error\n",
+     "        var checked = ChatSites.validateCustomUrl(siteId, String(text || \"\").trim())\n", None),
+    (CONFIG_CHAT, "        page.cfg_chatUserSites = text\n        page.cfg_chatSiteOrder = ChatSites.serializeSiteOrder(order, list)\n"
+                  "        page.cfg_chatSites = JSON.stringify(enabled)\n        if (page.cfg_chatDefaultSite !== first)",
+     "        page.cfg_chatUserSites = JSON.stringify(list)\n        page.cfg_chatSiteOrder = ChatSites.serializeSiteOrder(order, list)\n"
+     "        page.cfg_chatSites = JSON.stringify(enabled)\n        if (page.cfg_chatDefaultSite !== first)", None),
+    (CONFIG_CHAT, '            else if (key === "chatSiteZoom")\n',
+     '            else if (key === "chatUserSites")\n                page.cfg_chatUserSites = value\n'
+     '            else if (key === "chatSiteZoom")\n', None),
+    (CONFIG_GENERAL, "            validateUserSite: ChatSites.validateUserSite,\n",
+     "            validateUserSite: function () { return { ok: true, error: \"\" } },\n", None),
+    (CONFIG_GENERAL, "        if (values.chatSiteOrder !== undefined) page.cfg_chatSiteOrder = values.chatSiteOrder\n", "", None),
+])
+def test_proof_site_table_writer_rule_catches(path, old, new, snippet):
+    assert _site_table_writer_problems(_sources_with(path, old, new, snippet))
+
+
+# Rule 8: a site name is user text now; every element showing one is plain.
+SITE_NAME_SOURCE = (r"\.\s*name\b|\bbadgeLetter\b|\b(?:clearSiteName|zoomSiteName|activeSiteName|pendingDownloadSite"
+                    r"|removedUserSiteIds|addressChangeText)\b")
+SITE_NAME_FILES = (CONFIG_CHAT, CONFIG_GENERAL, CHAT_VIEW, CHAT_WEB_VIEW, FULL_REPRESENTATION, LETTER_BADGE)
+DOWNLOAD_SOURCE = (
+    "readonly property string source: chatView.web && chatView.web.pendingDownloadSite "
+    '? String(chatView.web.pendingDownloadSite).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : ""'
+)
+
+
+def _site_name_plain_problems(sources):
+    problems = []
+    for path in SITE_NAME_FILES:
+        code = sources.get(_rel(path), "")
+        for start, body in _blocks(code, TEXT_ELEMENT):
+            top = _top_level_raw(body)
+            binding = re.search(r"(?:^|[\n;])\s*text\s*:(.*?)(?=\n\s*[\w.]+\s*:|\Z)", top, re.DOTALL)
+            if binding and re.search(SITE_NAME_SOURCE, binding.group(1)) \
+                    and len(re.findall(PLAIN_TEXT_FORMAT, _top_level(body))) != 1:
+                problems.append(f"{path.name} line {_line_of(code, start)}: shows a site name without "
+                                "`textFormat: Text.PlainText`")
+        for start, body in _blocks(code, MESSAGE_ELEMENT):
+            top = _top_level_raw(body)
+            if re.search(r"\bpendingDownloadSite\b", top) and _squashed(DOWNLOAD_SOURCE) not in _squashed(top):
+                problems.append(f"{path.name} line {_line_of(code, start)}: the download prompt (rich text) must "
+                                f"escape the site name: `{DOWNLOAD_SOURCE}`")
+            elif re.search(r"\b(?:clearSiteName|zoomSiteName|activeSiteName|badgeLetter)\b|\.\s*name\b", top):
+                problems.append(f"{path.name} line {_line_of(code, start)}: a message element (rich text) "
+                                "may not show a site name")
+    view = sources.get(_rel(CHAT_VIEW), "")
+    if _squashed(view).count(_squashed(DOWNLOAD_SOURCE)) != 1 or len(_hits(r"\bpendingDownloadSite\b", view)) != 2:
+        problems.append(f"ChatView.qml: the download prompt (rich text) shows the site name only escaped: "
+                        f"`{DOWNLOAD_SOURCE}`")
+    badge = sources.get(_rel(LETTER_BADGE), "")
+    if not re.search(r"(?m)^\s*Accessible\.ignored\s*:\s*true\s*$", badge) \
+            or _hits(r"(?<![\w.])(?:Image|AnimatedImage|BorderImage|Icon)\s*\{|\bsource\s*:|\bQt\s*\.\s*resolvedUrl\b", badge):
+        problems.append("LetterBadge: Accessible.ignored, no image and no source")
+    return problems
+
+
+def test_site_names_are_shown_as_plain_text():
+    problems = _site_name_plain_problems(_all_code())
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (LETTER_BADGE, "        textFormat: Text.PlainText\n        text: ChatSites.badgeLetter(badge.name)\n",
+     "        text: ChatSites.badgeLetter(badge.name)\n"),
+    (LETTER_BADGE, "        textFormat: Text.PlainText\n", "        textFormat: Text.StyledText\n"),
+    (LETTER_BADGE, "    Accessible.ignored: true\n\n", "\n    Image { source: \"x.svg\" }\n"),
+    (CONFIG_CHAT, "                            textFormat: Text.PlainText\n                            text: siteRow.modelData.native === true",
+     "                            text: siteRow.modelData.native === true"),
+    (CONFIG_CHAT, "                        textFormat: Text.PlainText\n                        text: i18n(\"Remove %1? This",
+     "                        text: i18n(\"Remove %1? This"),
+    (CONFIG_CHAT, "            textFormat: Text.PlainText\n            color: Kirigami.Theme.negativeTextColor\n"
+                  "            text: i18n(\"This is another site",
+     "            color: Kirigami.Theme.negativeTextColor\n            text: i18n(\"This is another site"),
+    (CONFIG_CHAT, "                        textFormat: Text.PlainText\n                        text: firstDelegate.modelData.name",
+     "                        text: firstDelegate.modelData.name"),
+    (CHAT_VIEW, 'pendingDownloadSite).replace(/&/g, "&amp;").replace(/</g, "&lt;")',
+     'pendingDownloadSite).replace(/&/g, "&amp;")'),
+    (CHAT_VIEW, "            ? String(chatView.web.pendingDownloadSite).replace(",
+     "            ? String(chatView.web.pendingDownloadSite + chatView.clearSiteName).replace("),
+    (CHAT_VIEW, "                textFormat: Text.PlainText\n                text: chatView.persistentActive\n"
+                "                    ? i18n(\"Clear %1 data?",
+     "                text: chatView.persistentActive\n                    ? i18n(\"Clear %1 data?"),
+    (FULL_REPRESENTATION, "textFormat: Text.PlainText\n                    text: siteDelegate.modelData.name",
+     "text: siteDelegate.modelData.name"),
+])
+def test_proof_site_name_plain_rule_catches(path, old, new):
+    assert _site_name_plain_problems(_sources_with(path, old, new))
+
+
+def test_proof_site_name_in_a_message_element_is_caught():
+    snippet = "\n    Kirigami.InlineMessage { text: i18n(\"Clear %1?\", chatView.clearSiteName) }\n"
+    assert _site_name_plain_problems(_sources_with(CHAT_VIEW, snippet=snippet))
+
+
+# Rule 10: the built-in answers are recorded before 005 and compared with
+# and without added sites.
+def _golden_table_problems(test_code, golden):
+    problems = []
+    body = _function_body(test_code, "test_builtinGoldenTable")
+    if body is None:
+        return ["tests/qml/tst_chat_sites.qml needs function test_builtinGoldenTable"]
+    for needed in ("var variants = [undefined, [], added]", "Golden.table(ChatSites, variants[v])",
+                   "compare(now[keys[index]], Golden.EXPECTED[keys[index]]",
+                   "compare(keys.length, Golden.SITE_IDS.length * Golden.ADDRESSES.length * 2)"):
+        if _squashed(needed) not in _squashed(body):
+            problems.append(f"test_builtinGoldenTable must keep `{needed}`")
+    if not re.search(r'(?m)^import "ChatSitesGolden\.js" as Golden$', test_code):
+        problems.append('tst_chat_sites.qml imports "ChatSitesGolden.js" as Golden')
+    if not re.search(r"(?m)^var EXPECTED = \{$", golden) or len(re.findall(r'(?m)^    "[^"]+": ', golden)) < 700:
+        problems.append("ChatSitesGolden.js holds the recorded EXPECTED literal (770 rows)")
+    return problems
+
+
+def test_the_builtin_golden_table_is_checked():
+    problems = _golden_table_problems(TST_CHAT_SITES.read_text(encoding="utf-8"),
+                                      CHAT_SITES_GOLDEN.read_text(encoding="utf-8"))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("which", "old", "new"), [
+    ("test", "function test_builtinGoldenTable()", "function test_builtinTable()"),
+    ("test", "var variants = [undefined, [], added]", "var variants = [undefined]"),
+    ("test", "compare(now[keys[index]], Golden.EXPECTED[keys[index]]", "compare(now[keys[index]], now[keys[index]]"),
+    ("golden", "var EXPECTED = {\n", "var EXPECTED = {}\nvar OLD = {\n"),
+])
+def test_proof_golden_table_rule_catches(which, old, new):
+    test_code = TST_CHAT_SITES.read_text(encoding="utf-8")
+    golden = CHAT_SITES_GOLDEN.read_text(encoding="utf-8")
+    if which == "test":
+        assert old in test_code
+        test_code = test_code.replace(old, new, 1)
+    else:
+        assert old in golden
+        golden = golden.replace(old, new, 1)
+    assert _golden_table_problems(test_code, golden)
