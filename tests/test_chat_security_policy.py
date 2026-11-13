@@ -936,7 +936,7 @@ def test_proof_page_profile_rule_catches(name):
 SITE_PROFILE_SPEC_BODY = (
     '{ if (!ChatStorage.isSiteId(siteId) || chatWeb.retiring[siteId] === true) return null '
     'if (!chatWeb.staySignedIn) return { saved: false, sitePath: "", siteName: "" } '
-    "if (!Array.isArray(chatWeb.preparedSites) || chatWeb.preparedSites.indexOf(siteId) < 0) return null "
+    "if (!ChatStorage.listHas(chatWeb.preparedSites, siteId)) return null "
     "var name = ChatStorage.siteProfileName(chatWeb.storageApplet, chatWeb.storageGeneration, siteId) "
     "var path = ChatStorage.siteProfilePath(chatWeb.runtimeDir, chatWeb.storageApplet, chatWeb.storageGeneration, siteId) "
     'if (name === "" || path === "") return null '
@@ -949,7 +949,8 @@ ENSURE_PROFILE_BODY = (
     'if (chatWeb.baseUserAgent === "") { chatWeb.baseUserAgent = ChatSites.userAgent(profile.httpUserAgent) '
     "chatWeb.baseClientHintsEnabled = profile.clientHints.isAllClientHintsEnabled "
     "chatWeb.baseBrands = profile.clientHints.fullVersionList } "
-    "profile.httpUserAgent = chatWeb.baseUserAgent chatWeb.profiles[siteId] = profile return profile }"
+    "profile.httpUserAgent = chatWeb.baseUserAgent chatWeb.profiles[siteId] = profile "
+    "chatWeb.profilesRevision++ return profile }"
 )
 
 
@@ -994,9 +995,10 @@ SITE_PROFILE_MUTATIONS = {
         "            chatWeb.storageGeneration)"),
     "old shared name": ("ChatStorage.siteProfileName(chatWeb.storageApplet, chatWeb.storageGeneration, siteId)",
                         "ChatStorage.profileName(chatWeb.storageApplet, chatWeb.storageGeneration)"),
-    "no prepared-site check": (
-        "        if (!Array.isArray(chatWeb.preparedSites) || chatWeb.preparedSites.indexOf(siteId) < 0)\n"
-        "            return null\n", ""),
+    "no prepared-site check": ("        if (!ChatStorage.listHas(chatWeb.preparedSites, siteId))\n"
+                               "            return null\n", ""),
+    "prepared check fails open": ("if (!ChatStorage.listHas(chatWeb.preparedSites, siteId))",
+                                  "if (ChatStorage.listHas(chatWeb.preparedSites, \"\"))"),
     "saved without stay signed in": ("        if (!chatWeb.staySignedIn)\n", "        if (false)\n"),
     "a new profile while the old retires": (" || chatWeb.retiring[siteId] === true", ""),
     "profile stored under another key": ("        chatWeb.profiles[siteId] = profile\n",
@@ -1074,7 +1076,7 @@ def test_proof_container_name_rule_catches(path, old, new):
 # 3f: main.qml hands the web view only sites it prepared in this generation,
 # and only while saved sign-ins are ready.
 MAIN_SITE_GATE = (
-    r"readonly\s+property\s+var\s+chatReadySites\s*:\s*root\.chatStorageReady\s*\?\s*root\.chatPreparedSites\s*:\s*\[\s*\]",
+    r"readonly\s+property\s+var\s+chatReadySites\s*:\s*root\.chatStorageReady\s*\?\s*root\.chatFreshSites\s*:\s*\[\s*\]",
     r"readonly\s+property\s+var\s+chatPendingClears\s*:\s*"
     r"ChatStorage\.parsePendingClears\(\s*Plasmoid\.configuration\.chatPendingSiteClears\s*\)",
 )
@@ -1082,41 +1084,97 @@ CHAT_REMOVAL_PENDING_BODY = "{ return root.chatPendingClears.indexOf(siteId) >= 
 NOT_PENDING = r"\.filter\(\s*function\s*\(\s*id\s*\)\s*\{\s*return\s+!root\.chatRemovalPending\(\s*id\s*\)\s*\}\s*\)"
 
 
-def _prepared_site_problems(main, full_representation):
+def _prepared_site_problems(main, full_representation, storage=None):
+    """3f + SEC-L1: a new saved profile only for a site in chatFreshSites. Every
+    status reply empties it first; it grows only in an ok prepare reply (so
+    only from a prepare that came after the latest status: steps run one at a
+    time) and shrinks only when the site is cleared."""
     problems = [f"main.qml needs `{pattern}` once" for pattern in MAIN_SITE_GATE if len(re.findall(pattern, main)) != 1]
     if len(_hits(r"(?m)^\s*preparedSites\s*:\s*root\.chatReadySites\s*$", full_representation)) != 1 \
             or len(_hits(r"\bpreparedSites\s*:", full_representation)) != 1:
         problems.append("FullRepresentation must pass exactly `preparedSites: root.chatReadySites`")
-    grants = [match.start() for match in re.finditer(r"\bchatPreparedSites\s*=(?!=)", main)]
+    if _hits(r"\bchatPreparedSites\b", main):
+        problems.append("the old chatPreparedSites must not come back")
+    if len(re.findall(r"(?m)^\s*property\s+var\s+chatFreshSites\s*:\s*\[\s*\]\s*$", main)) != 1:
+        problems.append("`property var chatFreshSites: []` once")
+    grants = [match.start() for match in re.finditer(r"\bchatFreshSites\s*=(?!=)", main)]
     narrowing = [match.start() for match in re.finditer(
-        r"\bchatPreparedSites\s*=\s*root\.chatPreparedSites\.filter\(\s*function\s*\(\s*id\s*\)\s*\{\s*"
+        r"\bchatFreshSites\s*=\s*root\.chatFreshSites\.filter\(\s*function\s*\(\s*id\s*\)\s*\{\s*"
         r"return\s+id\s*!==\s*siteId\s*\}\s*\)", main)]
-    widening = [at for at in grants if at not in narrowing]
-    if len(narrowing) != 1 or len(widening) != 1 or not _in_prepare_reply_after_ok(main, widening[0]) \
-            or not re.match(r"chatPreparedSites\s*=\s*first\s*\?\s*created\s*:\s*root\.chatPreparedSites\.concat\(",
+    emptied = [match.start() for match in re.finditer(
+        r'case\s+"status"\s*:\s*case\s+"leave-status"\s*:\s*root\.(chatFreshSites)\s*=\s*\[\s*\]', main)]
+    empties = [match.start() for match in re.finditer(r"\bchatFreshSites\s*=\s*\[\s*\]", main)]
+    widening = [at for at in grants if at not in narrowing and at not in empties]
+    clear = _block_spans(main, r"\bfunction\s+chatClearSite\s*\([^)]*\)\s*\{")
+    if len(emptied) != 1 or len(empties) != 1:
+        problems.append('every status reply must start with `root.chatFreshSites = []`, before anything that can break')
+    if len(narrowing) != 1 or len(clear) != 1 or not clear[0][0] <= narrowing[0] < clear[0][1]:
+        problems.append("chatFreshSites may shrink only in chatClearSite")
+    if len(widening) != 1 or not _in_prepare_reply_after_ok(main, widening[0]) \
+            or not re.match(r"chatFreshSites\s*=\s*first\s*\?\s*created\s*:\s*root\.chatFreshSites\.concat\(",
                             main[widening[0]:]):
-        problems.append("chatPreparedSites may only grow in the prepare reply after reply.ok (to `created`), "
-                        "and only shrink in chatClearSite")
+        problems.append("chatFreshSites may only grow in the prepare reply after reply.ok (to `created`)")
+    # The request a waiting pane sends: only valid, enabled web sites, and it only
+    # leads to a prepare; it never grants anything itself.
+    wanted = _function_body(main, "chatSiteWanted") or ""
+    if not re.match(r"\{\s*if\s*\(\s*!ChatStorage\.isSiteId\(\s*siteId\s*\)\s*\|\|\s*"
+                    r"root\.chatWebSiteIds\.indexOf\(\s*siteId\s*\)\s*<\s*0\s*\)\s*return\b", wanted) \
+            or re.search(r"\bchatFreshSites\s*=|\bchatPreparedGeneration\s*=", wanted):
+        problems.append("chatSiteWanted must refuse ids that aren't enabled web sites first, and grant nothing")
+    if len(_hits(r"(?m)^\s*onSiteProfileWanted\s*:\s*\(\s*siteId\s*\)\s*=>\s*root\.chatSiteWanted\(\s*siteId\s*\)\s*$",
+                 full_representation)) != 1:
+        problems.append("FullRepresentation forwards the request only as root.chatSiteWanted(siteId)")
+    if storage is not None:
+        body = _function_body(storage, "listHas")
+        if body is None or _squashed(body) != LIST_HAS_BODY:
+            problems.append(f"ChatStorage.listHas must be exactly `{LIST_HAS_BODY}` (fails closed)")
     return problems
 
 
+LIST_HAS_BODY = (
+    '{ if (list === null || list === undefined || typeof list !== "object") return false '
+    "var length = list.length "
+    'if (typeof length !== "number" || !Number.isInteger(length) || length < 0 || length > MAX_INT) return false '
+    "for (var index = 0; index < length; index++) { if (list[index] === value) return true } return false }"
+)
+
+
 def test_saved_profiles_only_for_prepared_sites():
-    problems = _prepared_site_problems(_read_code(MAIN_QML), _read_code(FULL_REPRESENTATION))
+    problems = _prepared_site_problems(_read_code(MAIN_QML), _read_code(FULL_REPRESENTATION), _read_code(CHAT_STORAGE_JS))
     assert not problems, f"{_rel(MAIN_QML)}: {problems}"
 
 
 @pytest.mark.parametrize(("path", "old", "new"), [
-    (MAIN_QML, "root.chatStorageReady ? root.chatPreparedSites : []", "root.chatPreparedSites"),
+    (MAIN_QML, "root.chatStorageReady ? root.chatFreshSites : []", "root.chatFreshSites"),
+    (MAIN_QML, "root.chatStorageReady ? root.chatFreshSites : []", "root.chatStorageReady ? root.chatWantedSites : []"),
     (MAIN_QML, "    function chatNext() {",
-     "    function x() { root.chatPreparedSites = root.chatNeededSites }\n    function chatNext() {"),
-    (MAIN_QML, "                root.chatPreparedSites = first ? created : root.chatPreparedSites.concat(",
-     "                root.chatPreparedSites = first ? root.chatOpSites : root.chatPreparedSites.concat("),
-    (FULL_REPRESENTATION, "preparedSites: root.chatReadySites", "preparedSites: root.chatPreparedSites"),
+     "    function x() { root.chatFreshSites = root.chatNeededSites }\n    function chatNext() {"),
+    (MAIN_QML, "                root.chatFreshSites = first ? created : root.chatFreshSites.concat(",
+     "                root.chatFreshSites = first ? root.chatOpSites : root.chatFreshSites.concat("),
+    (FULL_REPRESENTATION, "preparedSites: root.chatReadySites", "preparedSites: root.chatFreshSites"),
+    # SEC-L1: a status reply keeps the fresh sites, or keeps them when busy.
+    (MAIN_QML, "            // A new profile needs a prepare newer than this check.\n            root.chatFreshSites = []\n", ""),
+    (MAIN_QML, "            root.chatFreshSites = []\n            // Another widget holds the folder's lock",
+     "            // Another widget holds the folder's lock"),
+    (MAIN_QML, "                break\n            if (reply.ok && reply.state) {",
+     "                break\n            root.chatFreshSites = []\n            if (reply.ok && reply.state) {"),
+    # SEC-L1: a request with any id, or one that grants a profile itself.
+    (MAIN_QML, "        if (!ChatStorage.isSiteId(siteId) || root.chatWebSiteIds.indexOf(siteId) < 0)\n            return\n"
+     "        if (root.chatWantedSites.indexOf(siteId) < 0)",
+     "        if (root.chatWantedSites.indexOf(siteId) < 0)"),
+    (MAIN_QML, "            root.chatWantedSites = root.chatWantedSites.concat([siteId])\n",
+     "            root.chatWantedSites = root.chatWantedSites.concat([siteId])\n"
+     "        root.chatFreshSites = root.chatFreshSites.concat([siteId])\n"),
+    (FULL_REPRESENTATION, "onSiteProfileWanted: (siteId) => root.chatSiteWanted(siteId)",
+     "onSiteProfileWanted: (siteId) => root.chatClearSite(siteId)"),
+    (CHAT_STORAGE_JS, '    if (list === null || list === undefined || typeof list !== "object")\n        return false\n', ""),
+    (CHAT_STORAGE_JS, "        if (list[index] === value)", "        if (list[index] == value)"),
 ])
 def test_proof_prepared_site_rule_catches(path, old, new):
     main = _mutated(MAIN_QML, old, new) if path == MAIN_QML else _read_code(MAIN_QML)
     full = _mutated(FULL_REPRESENTATION, old, new) if path == FULL_REPRESENTATION else _read_code(FULL_REPRESENTATION)
-    assert _prepared_site_problems(main, full)
+    storage = _mutated(CHAT_STORAGE_JS, old, new) if path == CHAT_STORAGE_JS else _read_code(CHAT_STORAGE_JS)
+    assert _prepared_site_problems(main, full, storage)
 
 
 def _pending_clear_problems(main, chat_view):
@@ -1127,17 +1185,21 @@ def _pending_clear_problems(main, chat_view):
     body = _function_body(main, "chatRemovalPending")
     if body is None or _squashed(body) != CHAT_REMOVAL_PENDING_BODY:
         problems.append(f"chatRemovalPending must be exactly `{CHAT_REMOVAL_PENDING_BODY}`")
-    op_sites = re.findall(r"\bchatOpSites\s*=(?!=)\s*([^\n]*(?:\n[^\n]*){0,2})", main)
-    if len(op_sites) != 1 or not re.match(
-            r'step\s*===\s*"prepare"\s*\?\s*root\.chatNeededSites' + NOT_PENDING + r"\s*:\s*\[\s*\]", op_sites[0]):
-        problems.append("chatOpSites (what prepare creates) must be the needed sites without the pending ones")
+    # What prepare creates: the shown sites and the requested ones, never a pending one.
+    op_sites = re.findall(
+        r'\bchatOpSites\s*=\s*step\s*===\s*"prepare"\s*\?\s*root\.chatNeededSites\.concat\(\s*'
+        r"root\.chatWantedSites\.filter\(\s*function\s*\(\s*id\s*\)\s*\{\s*return\s+root\.chatNeededSites\.indexOf\(\s*id\s*\)"
+        r"\s*<\s*0\s*\}\s*\)\s*\)" + NOT_PENDING + r"\s*:\s*\[\s*\]", main)
+    if len(op_sites) != 1 or len(_hits(r"\bchatOpSites\s*=(?!=)", main)) != 1:
+        problems.append("chatOpSites (what prepare creates) must be the needed and requested sites without the pending ones")
     if len(re.findall(r'webDataCommand\(\s*"prepare"[^)]*,\s*run\s*,\s*root\.chatOpSites\s*\)', main)) != 1 \
             or len(_hits(r'webDataCommand\(\s*"prepare"', main)) != 1:
         problems.append("the one prepare command takes exactly root.chatOpSites")
     if len(re.findall(r"var\s+created\s*=\s*root\.chatOpSites" + NOT_PENDING, main)) != 1:
         problems.append("the prepare reply may grant only the created sites that are not pending")
     missing = _function_body(main, "chatPrepareMissing") or ""
-    if not re.search(r"root\.chatPreparedSites\.indexOf\(\s*id\s*\)\s*<\s*0\s*&&\s*!root\.chatRemovalPending\(\s*id\s*\)",
+    if not re.search(r"root\.chatWantedSites\.some\(\s*function\s*\(\s*id\s*\)\s*\{\s*return\s+"
+                     r"root\.chatFreshSites\.indexOf\(\s*id\s*\)\s*<\s*0\s*&&\s*!root\.chatRemovalPending\(\s*id\s*\)",
                      missing):
         problems.append("chatPrepareMissing must not prepare again for a pending site")
     # Unlock: every owed delete first, then prepare.
@@ -1152,7 +1214,7 @@ def _pending_clear_problems(main, chat_view):
     clear = _function_body(main, "chatClearSite") or ""
     stored = re.search(r"if\s*\(\s*!root\.chatRemovalPending\(\s*siteId\s*\)\s*&&\s*!root\.chatWritePendingClears\(\s*"
                        r"root\.chatPendingClears\.concat\(\s*\[\s*siteId\s*\]\s*\)\s*\)\s*\)\s*return\b", clear)
-    narrowed = re.search(r"root\.chatPreparedSites\s*=", clear)
+    narrowed = re.search(r"root\.chatFreshSites\s*=", clear)
     if not stored or not narrowed or stored.start() > narrowed.start():
         problems.append("chatClearSite must store the owed delete (and stop if it can't) before anything else")
     # The debt ends only on an ok delete, or Clear chat data's ok remove.
@@ -1172,9 +1234,8 @@ def _pending_clear_problems(main, chat_view):
     if not re.search(r'case\s+"remove"\s*:\s*if\s*\(\s*reply\.ok\s*\)\s*root\.chatWritePendingClears\(\s*\[\s*\]\s*\)', main):
         problems.append("only Clear chat data's remove, after reply.ok, may empty the owed list")
     view = _function_body(chat_view, "clearSiteData") or ""
-    asked = re.search(r"chatView\.siteDataClearRequested\(\s*siteId\s*\)\s*if\s*\(\s*!Array\.isArray\(\s*"
-                      r"chatView\.pendingSiteClears\s*\)\s*\|\|\s*chatView\.pendingSiteClears\.indexOf\(\s*siteId\s*\)"
-                      r"\s*<\s*0\s*\)\s*return\b", view)
+    asked = re.search(r"chatView\.siteDataClearRequested\(\s*siteId\s*\)\s*if\s*\(\s*!ChatStorage\.listHas\(\s*"
+                      r"chatView\.pendingSiteClears\s*,\s*siteId\s*\)\s*\)\s*return\b", view)
     torn = re.search(r"chatView\.web\.clearSite\(\s*siteId\s*\)", view)
     if not asked or not torn or asked.start() > torn.start() or len(_hits(r"\.clearSite\s*\(", view)) != 1:
         problems.append("ChatView.clearSiteData with saved sign-ins must ask main.qml first and tear down only "
@@ -1188,9 +1249,11 @@ def test_owed_site_deletes_run_before_any_prepare_of_that_site():
 
 
 PENDING_CLEAR_MUTATIONS = {
-    "prepare a pending site": (MAIN_QML, "        root.chatOpSites = step === \"prepare\" ? root.chatNeededSites.filter(function (id) {\n"
-                               "            return !root.chatRemovalPending(id)\n        }) : []",
-                               "        root.chatOpSites = step === \"prepare\" ? root.chatNeededSites : []"),
+    "prepare a pending site": (MAIN_QML, "        })).filter(function (id) {\n            return !root.chatRemovalPending(id)\n        }) : []",
+                               "        })) : []"),
+    "prepare any requested id": (MAIN_QML, "root.chatNeededSites.concat(root.chatWantedSites.filter(function (id) {\n"
+                                 "            return root.chatNeededSites.indexOf(id) < 0\n        }))",
+                                 "root.chatNeededSites.concat(root.chatWantedSites)"),
     "grant a pending site": (MAIN_QML, "var created = root.chatOpSites.filter(function (id) { return !root.chatRemovalPending(id) })",
                              "var created = root.chatOpSites"),
     "missing prepare ignores pending": (MAIN_QML, " && !root.chatRemovalPending(id)\n        })\n        if (missing)",
@@ -1202,7 +1265,7 @@ PENDING_CLEAR_MUTATIONS = {
     "pending read loosely": (MAIN_QML, "return root.chatPendingClears.indexOf(siteId) >= 0",
                              "return root.chatPendingClears.indexOf(siteId) > 0"),
     "torn down before stored": (MAIN_QML, "        root.chatRemoveTried = root.chatRemoveTried.filter(function (id) { return id !== siteId })\n"
-                                "        root.chatPreparedSites = root.chatPreparedSites.filter(function (id) { return id !== siteId })\n",
+                                "        root.chatFreshSites = root.chatFreshSites.filter(function (id) { return id !== siteId })\n",
                                 ""),
     "failed delete ends the debt": (MAIN_QML, "            if (reply.ok)\n                root.chatWritePendingClears(",
                                     "            if (true)\n                root.chatWritePendingClears("),
@@ -1212,7 +1275,7 @@ PENDING_CLEAR_MUTATIONS = {
                     "    function x() { root.chatWritePendingClears(root.chatNeededSites) }\n    function chatNext() {"),
     "view tears down first": (CHAT_VIEW, "            chatView.siteDataClearRequested(siteId)\n",
                               "            chatView.web.clearSite(siteId)\n            chatView.siteDataClearRequested(siteId)\n"),
-    "view tears down although not stored": (CHAT_VIEW, "            if (!Array.isArray(chatView.pendingSiteClears) || chatView.pendingSiteClears.indexOf(siteId) < 0)\n                return\n",
+    "view tears down although not stored": (CHAT_VIEW, "            if (!ChatStorage.listHas(chatView.pendingSiteClears, siteId))\n                return\n",
                                             ""),
 }
 
@@ -1343,6 +1406,32 @@ def _web_data_store_offenders(sources):
         for match in re.finditer(r"(?<!function )\bwebDataCommand\s*\(\s*([^,]*),\s*([^,]*),", code)
         if match.group(2).strip() != '"encrypted"'
     ]
+
+
+def _web_data_operation_offenders(sources):
+    """REV-M1: the widget's only web-data operations are prepare (which also
+    clears after a rollback), prune, remove-site and remove; prepare is the
+    only one that makes folders, and every saved profile needs it (3f)."""
+    calls = [(name, match.group(1)) for name, code in sources.items()
+             for match in re.finditer(r"(?<!function )\bwebDataCommand\s*\(\s*([^,]*),", code)]
+    wrong = [f"{name}: {op}" for name, op in calls if op.strip() not in ('"prepare"', '"prune"', '"remove-site"', '"remove"')]
+    ops = sorted({op.strip() for _, op in calls})
+    if ops != sorted(['"prepare"', '"prune"', '"remove-site"', '"remove"']):
+        wrong.append(f"expected exactly the four operations, got {ops}")
+    return wrong
+
+
+def test_the_widget_uses_only_the_four_web_data_operations():
+    offenders = _web_data_operation_offenders(_all_code())
+    assert not offenders, offenders
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ('ChatStorage.webDataCommand("prune", "encrypted",', 'ChatStorage.webDataCommand(op, "encrypted",'),
+    ('ChatStorage.webDataCommand("prune", "encrypted",', 'ChatStorage.webDataCommand("purge", "encrypted",'),
+])
+def test_proof_web_data_operation_rule_catches(old, new):
+    assert _web_data_operation_offenders({"main.qml": _mutated(MAIN_QML, old, new)})
 
 
 def test_web_data_commands_always_use_the_encrypted_store():
@@ -2283,12 +2372,75 @@ def _lock_wait_problems(code):
             or len(_hits(r"\bchatProfileCloseWait\b", code)) != 2:
         problems.append("chatWaitTimer must exist once with `interval: root.chatProfileCloseWait`, a readonly "
                         "literal from 1000 to 3000 ms used nowhere else")
-    # Clear <site> data: the site's profile closes before its folder goes.
+    # Clear <site> data (SEC-L2): nothing is queued by the clear itself; the
+    # wait and the deletes follow the web view's siteReleased, i.e. the
+    # profile's destroy, through chatSiteReleased only.
     clear = _function_body(code, "chatClearSite") or ""
-    if not re.search(r'root\.chatEnqueue\(\s*\[\s*"wait"\s*\]\s*\.concat\(', clear) \
-            or len(_hits(r"\bchatEnqueue\s*\(", clear)) != 1:
-        problems.append('chatClearSite must queue its remove-site steps behind one "wait"')
+    released = _function_body(code, "chatSiteReleased") or ""
+    if clear == "" or _hits(r"\bchatEnqueue\s*\(|\bchatPrepareMissing\s*\(", clear):
+        problems.append("chatClearSite must queue nothing (the delete waits for siteReleased)")
+    if not re.match(r"\{\s*if\s*\(\s*!root\.chatRemovalPending\(\s*siteId\s*\)\s*\|\|\s*!root\.chatStorageReady\s*\)\s*return\b",
+                    released) \
+            or len(re.findall(r'root\.chatEnqueue\(\s*\[\s*"wait"\s*\]\s*\.concat\(\s*owed\.map\(\s*function\s*\(\s*\)\s*\{\s*'
+                              r'return\s+"remove-site"\s*\}\s*\)\s*\)\s*\)', released)) != 1 \
+            or len(_hits(r"\bchatEnqueue\s*\(", released)) != 1:
+        problems.append('chatSiteReleased (only for a pending site) queues one "wait", then remove-site per owed id')
+    queued = [match.start() for match in re.finditer(r'\bchatEnqueue\s*\([^\n]*"remove-site"', code)]
+    spans = [span for name in ("chatSiteReleased", "chatFinish")
+             for span in _block_spans(code, rf"\bfunction\s+{name}\s*\([^)]*\)\s*\{{")]
+    unlock = [match.start() for match in re.finditer(r'\bchatEnqueue\(\s*root\.chatPendingClears\.map\(', code)]
+    if len(queued) != 2 or any(not any(lo <= at < hi for lo, hi in spans) for at in queued) \
+            or len([at for at in queued if at in unlock]) != 1:
+        problems.append("remove-site is queued only by chatSiteReleased and by the unlock's owed deletes")
     return problems
+
+
+def _site_release_problems(web, view, full_representation):
+    """SEC-L2: the web view says a site is released only after its profile is
+    destroyed (or when it had none), and that reaches only chatSiteReleased."""
+    problems = []
+    release = _function_body(web, "releaseProfile") or ""
+    destroyed = re.search(r"\bprofile\.destroy\(\s*\)", release)
+    said = re.search(r"\bchatWeb\.siteReleased\(\s*siteId\s*\)", release)
+    if not destroyed or not said or destroyed.start() > said.start():
+        problems.append("releaseProfile must emit siteReleased(siteId) only after profile.destroy()")
+    clear = _function_body(web, "clearSite") or ""
+    if not re.search(r"if\s*\(\s*!profile\s*\)\s*\{\s*Qt\.callLater\(\s*function\s*\(\s*\)\s*\{\s*"
+                     r"chatWeb\.siteReleased\(\s*siteId\s*\)\s*\}\s*\)\s*return\b", clear):
+        problems.append("clearSite of a site without a profile says it is released (later), and returns")
+    if len(_hits(r"\bchatWeb\.siteReleased\s*\(", web)) != 2 or len(_hits(r"\bsiteReleased\s*\(", web)) != 3 or len(_hits(r"(?m)^\s*signal\s+siteReleased\s*\(\s*string\s+siteId\s*\)", web)) != 1:
+        problems.append("siteReleased: declared once, emitted only in releaseProfile and clearSite")
+    if len(re.findall(r"function\s+onSiteReleased\s*\(\s*siteId\s*\)\s*\{\s*chatView\.siteDataReleased\(\s*siteId\s*\)\s*\}", view)) != 1 \
+            or len(_hits(r"\bsiteDataReleased\s*\(", view)) != 2:
+        problems.append("ChatView forwards siteReleased only as siteDataReleased(siteId)")
+    if len(_hits(r"(?m)^\s*onSiteDataReleased\s*:\s*\(\s*siteId\s*\)\s*=>\s*root\.chatSiteReleased\(\s*siteId\s*\)\s*$",
+                 full_representation)) != 1 or len(_hits(r"\bchatSiteReleased\b", full_representation)) != 1:
+        problems.append("FullRepresentation forwards the release only as root.chatSiteReleased(siteId)")
+    return problems
+
+
+def test_a_cleared_site_is_deleted_only_after_its_profile_is_gone():
+    problems = _site_release_problems(_read_code(CHAT_WEB_VIEW), _read_code(CHAT_VIEW), _read_code(FULL_REPRESENTATION))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (CHAT_WEB_VIEW, "        profile.destroy()\n        Qt.callLater(function () {\n",
+     "        chatWeb.siteReleased(siteId)\n        profile.destroy()\n        Qt.callLater(function () {\n"),
+    (CHAT_WEB_VIEW, "        profile.destroy()\n", ""),
+    (CHAT_WEB_VIEW, "        if (!profile) {\n            Qt.callLater(function () { chatWeb.siteReleased(siteId) })\n            return\n        }",
+     "        if (!profile)\n            return"),
+    (CHAT_WEB_VIEW, "        delete chatWeb.profiles[siteId]\n",
+     "        chatWeb.siteReleased(siteId)\n        delete chatWeb.profiles[siteId]\n"),
+    (CHAT_VIEW, "            chatView.siteDataReleased(siteId)\n", ""),
+    (FULL_REPRESENTATION, "onSiteDataReleased: (siteId) => root.chatSiteReleased(siteId)",
+     "onSiteDataReleased: (siteId) => root.chatSiteWanted(siteId)"),
+])
+def test_proof_site_release_rule_catches(path, old, new):
+    web = _mutated(CHAT_WEB_VIEW, old, new) if path == CHAT_WEB_VIEW else _read_code(CHAT_WEB_VIEW)
+    view = _mutated(CHAT_VIEW, old, new) if path == CHAT_VIEW else _read_code(CHAT_VIEW)
+    full = _mutated(FULL_REPRESENTATION, old, new) if path == FULL_REPRESENTATION else _read_code(FULL_REPRESENTATION)
+    assert _site_release_problems(web, view, full)
 
 
 def test_every_lock_waits_for_the_profile_to_close():
@@ -2308,6 +2460,13 @@ def test_every_lock_waits_for_the_profile_to_close():
     ("readonly property int chatProfileCloseWait: 1000", "readonly property int chatProfileCloseWait: 5000"),
     ("readonly property int chatProfileCloseWait: 1000", "property int chatProfileCloseWait: 1000"),
     ('root.chatEnqueue(["wait"].concat(owed', "root.chatEnqueue([].concat(owed"),
+    # SEC-L2: the clear queues the delete itself, or the release does it for any site.
+    ("        root.chatFreshSites = root.chatFreshSites.filter(function (id) { return id !== siteId })\n    }",
+     "        root.chatFreshSites = root.chatFreshSites.filter(function (id) { return id !== siteId })\n"
+     "        root.chatEnqueue([\"wait\", \"remove-site\"])\n    }"),
+    ("        if (!root.chatRemovalPending(siteId) || !root.chatStorageReady)\n            return\n        var owed",
+     "        var owed"),
+    ("    function chatNext() {", "    function x() { root.chatEnqueue([\"wait\", \"remove-site\"]) }\n    function chatNext() {"),
 ])
 def test_proof_lock_wait_rule_catches(old, new):
     assert _lock_wait_problems(_mutated(MAIN_QML, old, new))
