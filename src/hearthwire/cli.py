@@ -21,7 +21,7 @@ _PORT_ARGUMENT = re.compile(r"[1-9][0-9]{0,4}")
 def _bounded_int(value: str) -> int:
     """A plain decimal 0..2**31: no sign, leading zero, spaces, underscores or other digits."""
     if not _INT_ARGUMENT.fullmatch(value) or int(value) > MAX_INT_ARGUMENT:
-        raise argparse.ArgumentTypeError("expected an integer from 0 to 2147483648")
+        raise argparse.ArgumentTypeError(f"expected an integer from 0 to {MAX_INT_ARGUMENT}")
     return int(value)
 
 
@@ -36,7 +36,7 @@ def _item_id(value: str) -> int:
     """A library item id: a plain decimal 1..2**31."""
     number = _bounded_int(value)
     if number < 1:
-        raise argparse.ArgumentTypeError("expected an integer from 1 to 2147483648")
+        raise argparse.ArgumentTypeError(f"expected an integer from 1 to {MAX_INT_ARGUMENT}")
     return number
 
 
@@ -269,7 +269,7 @@ def _check_history_and_backup_arguments(args: argparse.Namespace, argument_parse
     if args.usage_history is None and args.settings_backup is None:
         return
     if args.applet is not None and args.applet < 1:
-        argument_parser.error("--applet must be from 1 to 2147483648")
+        argument_parser.error(f"--applet must be from 1 to {MAX_INT_ARGUMENT}")
     if args.usage_history is not None and args.all_applets == (args.applet is not None):
         argument_parser.error("--usage-history clear needs exactly one of --applet and --all"
                               if args.usage_history == "clear" else f"--usage-history {args.usage_history} needs --applet")
@@ -355,7 +355,7 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
         argument_parser.error("--web-data needs --store and --applet")
     if args.applet < 1:
         # Plasma applet ids start at 1, as for --usage-history.
-        argument_parser.error("--applet must be from 1 to 2147483648")
+        argument_parser.error(f"--applet must be from 1 to {MAX_INT_ARGUMENT}")
     if args.web_data == "remove":
         if args.generation is not None:
             argument_parser.error("--generation is not for --web-data remove")

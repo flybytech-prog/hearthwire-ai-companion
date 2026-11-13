@@ -2791,7 +2791,91 @@ TestCase {
         var main = loadMain({chatSignInStorage: "encrypted"})
         compare(main.chatFreshWait, 3000)
         compare(main.chatRemoveRetryWait, 2000)
-        compare(main.chatRemoveRetryLimit, 30000)
+        compare(main.chatRemoveRetryLimit, 90000)
+    }
+
+    // I1: each site expires after its own latest prepare; a later prepare
+    // for other sites doesn't keep an unused one fresh (the lab's 3 s and
+    // 2.5 s, scaled down).
+    function test_freshnessIsPerSite() {
+        var main = unlockedMain()
+        var generation = main.chatGeneration
+        main.chatFreshWait = 1000
+        tryVerify(function () { return main.chatOp === "status" }, 3000)
+        answerStorage(main, testCase.unlockedReply)
+        compare(main.chatReadySites, [])
+        // gemini is prepared but never shown (grok is the shown site).
+        main.chatSiteId = "grok"
+        main.chatSiteWanted("gemini")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites grok,gemini"))
+        var first = Date.now()
+        compare(main.chatReadySites, ["grok", "gemini"])
+        wait(800)
+        main.chatSiteId = "chatgpt"
+        main.chatSiteWanted("chatgpt")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites chatgpt"))
+        verify(main.chatReadySites.indexOf("chatgpt") >= 0)
+        var statuses = countOf(main, "--vault status")
+        tryVerify(function () { return main.chatReadySites.indexOf("gemini") < 0 }, 2000)
+        var gone = Date.now() - first
+        verify(gone >= 1000 && gone < 1700, "gemini expired after its own prepare: " + gone + " ms")
+        compare(main.chatReadySites, ["chatgpt"], "the later prepare's site stays a while")
+        tryVerify(function () { return main.chatReadySites.length === 0 }, 2000)
+        compare(countOf(main, "--vault status"), statuses, "the expiry, not a status check")
+        // Opened now, gemini is prepared again.
+        main.chatSiteId = "gemini"
+        main.chatSiteWanted("gemini")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites gemini"))
+        compare(main.chatReadySites, ["gemini"])
+    }
+
+    // L1: an owed site whose delete failed this round, wanted again while
+    // ready, gets one more wait and delete; ok ends the debt.
+    function test_triedSiteWantedAgainDeletesOnceMore() {
+        var main = unlockedMain()
+        var generation = main.chatGeneration
+        var remove = webData("remove-site", " --generation " + generation + " --site claude")
+        clearedClaude(main, JSON.stringify({ok: false, error: "os-error"}))
+        tryVerify(function () { return main.chatStorageNotice === "site-remove-failed" }, 3000)
+        compare(main.chatRemoveTried, ["claude"])
+        main.chatSiteWanted("claude")
+        compare(main.chatRemoveTried, [])
+        tryVerify(function () { return main.chatOp === "wait" }, 3000)
+        expectRun(main, remove, 2)
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
+        expectRun(main, webData("prepare", " --generation " + generation + " --sites claude"), 2)
+        compare(main.chatReadySites, ["claude"])
+    }
+
+    // Only once per round: a second failure stays failed until the next
+    // unlock, however often the site is wanted.
+    function test_triedSiteWantedAgainOnlyOnce() {
+        var main = unlockedMain()
+        var remove = webData("remove-site", " --generation " + main.chatGeneration + " --site claude")
+        var failed = JSON.stringify({ok: false, error: "os-error"})
+        clearedClaude(main, failed)
+        main.chatSiteWanted("claude")
+        expectRun(main, remove, 2, failed)
+        compare(main.chatRemoveTried, ["claude"])
+        main.chatSiteWanted("claude")
+        main.chatSiteWanted("claude")
+        wait(main.chatProfileCloseWait + 300)
+        compare(countOf(main, remove), 2, "no third delete this round")
+        compare(main.chatRemoveRewanted, ["claude"])
+        compare(Plasmoid.configuration.chatPendingSiteClears, "claude")
+        // Not while locked either.
+        main.chatStorageRequest("lock")
+        tryVerify(function () {
+            // The recheck may still be queued in front of the lock.
+            if (main.chatOp === "status")
+                answerStorage(main, testCase.unlockedReply)
+            return lastStorageCommand(main) === "--vault lock"
+        }, 3000)
+        main.chatSiteWanted("claude")
+        answerStorage(main, testCase.okReply)
+        expectStorage(main, "--vault status", JSON.stringify({ok: true, state: "locked", wallet: "off"}))
+        wait(50)
+        compare(countOf(main, remove), 2)
     }
 
     // Memory mode: only the site's views and profile go; no helper.

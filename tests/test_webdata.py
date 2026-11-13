@@ -1,11 +1,13 @@
 """Chat profile folders (core/webdata.py) and the --web-data CLI."""
 
+import errno
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -1424,10 +1426,16 @@ def test_a_repeated_option_is_named_without_its_value(data, capsys):
 # --- L2-r: remove-site refuses with "busy" while a file in the site folder is open -----------
 
 
-def fake_process(proc, pid, fds=(), maps=()):
-    """A fake /proc/<pid>: ``fd/<n>`` links to ``fds`` and a ``maps`` file mapping ``maps``."""
+def fake_process(proc, pid, fds=(), maps=(), uid=None, uids=None):
+    """A fake /proc/<pid>: ``fd/<n>`` links to ``fds``, a ``maps`` file mapping ``maps``
+    and a ``status`` with all four uids ``uid`` (default: ours), or exactly ``uids``."""
     process = proc / str(pid)
     (process / "fd").mkdir(parents=True)
+    every = os.getuid() if uid is None else uid
+    fields = uids if uids is not None else (every,) * 4
+    (process / "status").write_text(
+        f"Name:\tplasmashell\nState:\tS (sleeping)\nPid:\t{pid}\n"
+        f"Uid:\t{chr(9).join(str(field) for field in fields)}\nGid:\t0\t0\t0\t0\n")
     for number, target in enumerate(fds):
         (process / "fd" / str(number)).symlink_to(target)
     lines = ["00400000-00452000 r-xp 00000000 08:02 173521 /usr/bin/plasmashell",
@@ -1552,33 +1560,135 @@ def test_the_owner_comes_from_the_proc_entry(data, mounted, _empty_proc):
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
-def test_unreadable_processes_are_skipped(data, capsys, mounted, _empty_proc):
+@pytest.mark.parametrize("closed", ["fd", "maps"])
+def test_an_unreadable_process_of_ours_counts_as_busy(data, capsys, mounted, _empty_proc, closed):
+    # Non-dumpable, or in a user namespace we can't inspect (review-3 L2):
+    # it could hold the folder open, so nothing is deleted.
     container = make_container(mounted, sites=("claude",), root_files=())
-    held = site_path(mounted) + "/Cookies"
-    closed_fds = fake_process(_empty_proc, 19, fds=[held])
-    closed_maps = fake_process(_empty_proc, 20, maps=[held])
-    (closed_fds / "fd").chmod(0)
-    (closed_maps / "maps").chmod(0)
+    process = fake_process(_empty_proc, 19, fds=["/dev/null"], maps=["/usr/lib/libc.so.6"])
+    (process / closed).chmod(0)
+    try:
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    finally:
+        (process / closed).chmod(0o700)
+    assert names(container) == ["site-claude"]
+
+
+@pytest.mark.parametrize("error", [PermissionError, lambda *a: OSError(errno.EPERM, "x")])
+def test_an_unreadable_fd_folder_of_ours_counts_as_busy(data, capsys, mounted, _empty_proc, monkeypatch, error):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    process = fake_process(_empty_proc, 23)
+    real_listdir = os.listdir
+
+    def listdir(path="."):
+        if path == str(process / "fd"):
+            raise error(errno.EACCES, "denied")
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    assert names(container) == ["site-claude"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
+def test_an_unreadable_process_of_another_user_is_skipped(data, capsys, mounted, _empty_proc):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    process = fake_process(_empty_proc, 24, fds=[site_path(mounted) + "/Cookies"], uid=os.getuid() + 1)
+    (process / "fd").chmod(0)
+    (process / "maps").chmod(0)
     try:
         assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
     finally:
-        (closed_fds / "fd").chmod(0o700)
-        (closed_maps / "maps").chmod(0o600)
+        (process / "fd").chmod(0o700)
+        (process / "maps").chmod(0o600)
+    assert names(container) == []
+
+
+@pytest.mark.parametrize("error", [errno.ENOENT, errno.ESRCH])
+@pytest.mark.parametrize("where", ["fd", "maps", "link"])
+def test_a_vanished_process_is_skipped(data, capsys, mounted, _empty_proc, monkeypatch, error, where):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    process = fake_process(_empty_proc, 25, fds=[site_path(mounted) + "/Cookies"],
+                           maps=[site_path(mounted) + "/Cookies"])
+    real_listdir, real_readlink, real_open = os.listdir, os.readlink, open
+    gone = OSError(error, os.strerror(error))
+
+    def listdir(path="."):
+        if where in ("fd", "maps") and path == str(process / "fd"):
+            raise gone
+        return real_listdir(path)
+
+    def readlink(path, *args, **kwargs):
+        if str(path).startswith(str(process)):
+            raise gone
+        return real_readlink(path, *args, **kwargs)
+
+    def opener(path, *args, **kwargs):
+        if str(path) == str(process / "maps"):
+            raise gone
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+    monkeypatch.setattr(os, "readlink", readlink)
+    monkeypatch.setattr("builtins.open", opener)
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
     assert names(container) == []
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
-def test_an_unreadable_process_does_not_hide_a_busy_one(data, capsys, mounted, _empty_proc):
+@pytest.mark.parametrize("uids", [
+    lambda me: (me, 0, 0, 0),       # sudo: real uid ours, running as root
+    lambda me: (me, 0, me, 0),      # a setuid-root program
+    lambda me: (me, me, 0, me),     # saved uid root
+    lambda me: (me, me, me, 0),     # fs uid root
+])
+def test_a_process_running_as_root_for_us_is_skipped_even_when_unreadable(
+        data, capsys, mounted, _empty_proc, uids):
     container = make_container(mounted, sites=("claude",), root_files=())
-    held = site_path(mounted) + "/Cookies"
-    closed = fake_process(_empty_proc, 21, fds=[held])
-    (closed / "fd").chmod(0)
-    fake_process(_empty_proc, 22, maps=[held])
+    process = fake_process(_empty_proc, 33, fds=[site_path(mounted) + "/Cookies"], uids=uids(os.getuid()))
+    (process / "fd").chmod(0)
+    (process / "maps").chmod(0)
+    try:
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    finally:
+        (process / "fd").chmod(0o700)
+        (process / "maps").chmod(0o600)
+    assert names(container) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
+def test_a_non_dumpable_process_with_all_uids_ours_is_busy(data, capsys, mounted, _empty_proc):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    me = os.getuid()
+    process = fake_process(_empty_proc, 34, uids=(me, me, me, me))
+    (process / "fd").chmod(0)
     try:
         assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
     finally:
-        (closed / "fd").chmod(0o700)
+        (process / "fd").chmod(0o700)
     assert names(container) == ["site-claude"]
+
+
+def test_a_status_with_too_few_uid_fields_is_skipped(data, mounted, _empty_proc):
+    make_container(mounted, sites=("claude",), root_files=())
+    fake_process(_empty_proc, 35, fds=[site_path(mounted) + "/Cookies"], uids=(os.getuid(),))
+    assert webdata.site_folder_in_use(site_path(mounted), proc_root=str(_empty_proc)) is False
+
+
+def test_the_real_uid_decides_not_the_proc_folder_owner(data, mounted, _empty_proc):
+    make_container(mounted, sites=("claude",), root_files=())
+    folder = site_path(mounted)
+    # The folder is ours, but the real uid in status is someone else's: skipped.
+    fake_process(_empty_proc, 26, fds=[folder + "/Cookies"], uid=os.getuid() + 1)
+    assert webdata.site_folder_in_use(folder, proc_root=str(_empty_proc)) is False
+    # A process with an unparsable or missing status is skipped too.
+    odd = fake_process(_empty_proc, 27, fds=[folder + "/Cookies"])
+    (odd / "status").write_text("Name:\tx\nUid:\tnot-a-number\n")
+    missing = fake_process(_empty_proc, 28, fds=[folder + "/Cookies"])
+    (missing / "status").unlink()
+    assert webdata.site_folder_in_use(folder, proc_root=str(_empty_proc)) is False
+    fake_process(_empty_proc, 29, fds=[folder + "/Cookies"])
+    assert webdata.site_folder_in_use(folder, proc_root=str(_empty_proc)) is True
 
 
 def test_gone_or_odd_process_entries_are_skipped(data, capsys, mounted, _empty_proc):
@@ -1664,3 +1774,203 @@ def test_the_default_proc_root_is_the_real_proc():
 
     spec = importlib.util.find_spec("hearthwire.core.webdata")
     assert 'PROC_ROOT = "/proc"' in Path(spec.origin).read_text(encoding="utf-8")
+
+
+# --- review-3 L2: the LevelDB LOCK probe (fcntl and flock, never waiting) ---------------------
+
+
+_HOLDER = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+if sys.argv[2] == "fcntl":
+    fcntl.lockf(fd, fcntl.LOCK_EX)
+else:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+print("held", flush=True)
+sys.stdin.read()
+"""
+
+
+@contextmanager
+def lock_held(path, kind="fcntl"):
+    """Hold ``path`` locked in another process: POSIX locks are per process."""
+    child = subprocess.Popen(
+        [sys.executable, "-I", "-c", _HOLDER, str(path), kind],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env={"PATH": os.defpath},
+    )
+    try:
+        assert child.stdout.readline() == "held\n"
+        yield
+    finally:
+        child.stdin.close()
+        child.wait(timeout=30)
+        child.stdout.close()
+
+
+def leveldb(folder, *parts):
+    store = folder.joinpath(*parts)
+    store.mkdir(parents=True, exist_ok=True)
+    for name in ("LOCK", "LOG", "MANIFEST-000001", "000003.log"):
+        (store / name).write_text("")
+    return store / "LOCK"
+
+
+@pytest.mark.parametrize("kind", ["fcntl", "flock"])
+def test_a_held_leveldb_lock_makes_it_busy(data, capsys, mounted, kind):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    lock = leveldb(container / "site-claude", "IndexedDB", "https_claude.ai_0.indexeddb.leveldb")
+    with lock_held(lock, kind):
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+        assert lock.exists()
+        assert names(container) == ["site-claude"]
+    # Released: the probe itself left no lock behind, and the delete works.
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == []
+
+
+def test_a_deeply_nested_lock_counts(data, capsys, mounted):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    lock = leveldb(container / "site-claude", "Service Worker", "Database", "a", "b", "c")
+    with lock_held(lock):
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    assert names(container) == ["site-claude"]
+
+
+def test_free_locks_and_other_names_are_not_busy(data, capsys, mounted, tmp_path):
+    container = make_container(mounted, sites=("claude", "gemini"), root_files=())
+    leveldb(container / "site-claude", "Local Storage", "leveldb")
+    leveldb(container / "site-claude", "IndexedDB", "x.leveldb")
+    other = leveldb(container / "site-gemini", "Local Storage", "leveldb")
+    held_elsewhere = container / "site-claude" / "LOCKED"
+    held_elsewhere.write_text("")
+    (container / "site-claude" / "LOCK.old").write_text("")
+    with lock_held(other), lock_held(held_elsewhere):
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == ["site-gemini"]
+
+
+def test_a_symlinked_lock_is_never_probed_or_followed(data, capsys, tmp_path, mounted, monkeypatch):
+    target = outside_target(tmp_path)
+    held = target / "precious"
+    container = make_container(mounted, sites=("claude",), root_files=())
+    (container / "site-claude" / "LOCK").symlink_to(held)
+    (container / "site-claude" / "db").symlink_to(target, target_is_directory=True)
+    opened = []
+    real_open = os.open
+    monkeypatch.setattr(os, "open", lambda path, *a, **k: opened.append(path) or real_open(path, *a, **k))
+    with lock_held(held):
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert "LOCK" not in opened and "db" not in opened
+    assert names(container) == []
+    assert_target_intact(target)
+
+
+def test_a_lock_swapped_for_a_symlink_counts_as_held(data, mounted, tmp_path):
+    folder = make_container(mounted, sites=("claude",), root_files=()) / "site-claude"
+    (folder / "LOCK").symlink_to(outside_target(tmp_path) / "precious")
+    descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        # As if the scan had seen a file: O_NOFOLLOW refuses the link (ELOOP).
+        assert webdata._lock_is_held(descriptor, "LOCK") is True
+        assert webdata._lock_is_held(descriptor, "missing") is False
+    finally:
+        os.close(descriptor)
+
+
+def test_a_lock_swapped_for_a_fifo_counts_as_held_without_blocking(data, mounted):
+    folder = make_container(mounted, sites=("claude",), root_files=()) / "site-claude"
+    os.mkfifo(folder / "LOCK")
+    descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert webdata._lock_is_held(descriptor, "LOCK") is True
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
+def test_an_unopenable_lock_counts_as_held(data, capsys, mounted):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    lock = leveldb(container / "site-claude", "IndexedDB", "x.leveldb")
+    lock.chmod(0o400)
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    assert lock.exists()
+    lock.chmod(0o600)
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
+def test_an_unreadable_subfolder_counts_as_held(data, capsys, mounted):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    hidden = container / "site-claude" / "IndexedDB"
+    hidden.mkdir()
+    hidden.chmod(0)
+    try:
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    finally:
+        hidden.chmod(0o700)
+    assert names(container) == ["site-claude"]
+
+
+def test_the_lock_walk_is_bounded(data, capsys, mounted, monkeypatch):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    deep = container / "site-claude"
+    for level in range(webdata.MAX_LOCK_DEPTH + 1):
+        deep = deep / f"d{level}"
+    deep.mkdir(parents=True)
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "os-error"}
+    assert names(container) == ["site-claude"]
+    monkeypatch.setattr(webdata, "MAX_LOCK_DEPTH", webdata.MAX_LOCK_DEPTH + 1)
+    monkeypatch.setattr(webdata, "MAX_LOCK_ENTRIES", 5)
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "os-error"}
+    monkeypatch.setattr(webdata, "MAX_LOCK_ENTRIES", 100)
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == []
+
+
+def test_the_lock_probe_closes_every_descriptor(data, capsys, mounted):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    for index in range(5):
+        leveldb(container / "site-claude", f"db{index}", "x.leveldb")
+    before = len(os.listdir("/proc/self/fd"))
+    descriptor = os.open(container / "site-claude", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert webdata.site_locks_held(descriptor) is False
+    finally:
+        os.close(descriptor)
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_the_order_is_proc_scan_then_lock_probe_then_delete(data, capsys, mounted, monkeypatch):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    calls = []
+    real_scan, real_locks, real_remove = webdata.site_folder_in_use, webdata.site_locks_held, webdata.remove_entry
+    monkeypatch.setattr(webdata, "site_folder_in_use", lambda f, **k: calls.append("scan") or real_scan(f, **k))
+    monkeypatch.setattr(webdata, "site_locks_held", lambda fd: calls.append("locks") or real_locks(fd))
+    monkeypatch.setattr(webdata, "remove_entry", lambda p, n: calls.append("delete") or real_remove(p, n))
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert calls == ["scan", "locks", "delete"]
+    assert names(container) == []
+
+
+@pytest.mark.parametrize("argv", [
+    ["--web-data", "prepare", "--store", "encrypted", "--applet", "2147483649", "--generation", "0"],
+    ["--usage-history", "read", "--applet", "2147483649"],
+    ["--usage-history", "read", "--applet", "0"],
+    ["--web-data", "remove", "--store", "encrypted", "--applet", "0"],
+])
+def test_the_applet_bound_message_matches_the_accepted_range(data, capsys, argv):
+    with pytest.raises(SystemExit):
+        cli.main(argv)
+    err = capsys.readouterr().err
+    assert str(cli.MAX_INT_ARGUMENT) in err and cli.MAX_INT_ARGUMENT == 2**31
+    assert "2147483647" not in err
+
+
+def test_the_largest_applet_id_is_accepted_everywhere(data, capsys, mounted):
+    top = str(cli.MAX_INT_ARGUMENT)
+    assert prepare(capsys, top, 0) == {"ok": True}
+    with pytest.raises(SystemExit):
+        cli.main(["--usage-history", "read", "--applet", str(cli.MAX_INT_ARGUMENT + 1)])
+    capsys.readouterr()
+    assert cli.main(["--usage-history", "read", "--applet", top]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] in (True, False)

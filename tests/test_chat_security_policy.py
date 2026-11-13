@@ -1080,10 +1080,23 @@ MAIN_SITE_GATE = (
     r"readonly\s+property\s+var\s+chatPendingClears\s*:\s*"
     r"ChatStorage\.parsePendingClears\(\s*Plasmoid\.configuration\.chatPendingSiteClears\s*\)",
 )
-# L1-r: the one other place chatFreshSites is emptied; group 1 is the assignment.
-FRESH_EXPIRY = (
-    r"Timer\s*\{\s*id\s*:\s*chatFreshTimer\s+interval\s*:\s*root\.chatFreshWait\s+repeat\s*:\s*false\s+"
-    r"onTriggered\s*:\s*root\.(chatFreshSites\s*=\s*\[\s*\])\s*\}"
+# L1-r + I1: each fresh site expires chatFreshWait after its own latest ok
+# prepare (chatFreshAt); the timer only runs chatExpireFresh again.
+FRESH_TIMER = (
+    r"Timer\s*\{\s*id\s*:\s*chatFreshTimer\s+repeat\s*:\s*false\s+"
+    r"onTriggered\s*:\s*root\.chatExpireFresh\(\s*\)\s*\}"
+)
+EXPIRE_FRESH_BODY = (
+    "{ var now = Date.now() var left = root.chatFreshSites.filter(function (id) { var at = "
+    "Object.prototype.hasOwnProperty.call(root.chatFreshAt, id) ? root.chatFreshAt[id] : null "
+    'return typeof at === "number" && now >= at && now - at < root.chatFreshWait }) '
+    "if (left.length !== root.chatFreshSites.length) root.chatFreshSites = left chatFreshTimer.stop() "
+    "if (left.length === 0) return var next = Math.min.apply(null, left.map(function (id) { return root.chatFreshAt[id] })) "
+    "chatFreshTimer.interval = Math.max(1, next + root.chatFreshWait - now) chatFreshTimer.start() }"
+)
+FRESH_MARKS = (
+    "var at = Date.now() var marks = {} root.chatFreshSites.forEach(function (id) { "
+    "marks[id] = created.indexOf(id) >= 0 ? at : root.chatFreshAt[id] }) root.chatFreshAt = marks root.chatExpireFresh()"
 )
 CHAT_REMOVAL_PENDING_BODY = "{ return root.chatPendingClears.indexOf(siteId) >= 0 }"
 NOT_PENDING = r"\.filter\(\s*function\s*\(\s*id\s*\)\s*\{\s*return\s+!root\.chatRemovalPending\(\s*id\s*\)\s*\}\s*\)"
@@ -1093,9 +1106,10 @@ def _prepared_site_problems(main, full_representation, storage=None):
     """3f + SEC-L1: a new saved profile only for a site in chatFreshSites. Every
     status reply empties it first; it grows only in an ok prepare reply (so
     only from a prepare that came after the latest status: steps run one at a
-    time) and shrinks only when the site is cleared. L1-r: it also expires
-    chatFreshWait after the latest ok prepare reply (chatFreshTimer), so a
-    site no view took is prepared again before it gets a profile."""
+    time) and shrinks only when the site is cleared or expires. L1-r + I1:
+    each site expires chatFreshWait after its own latest ok prepare
+    (chatFreshAt, chatExpireFresh), so a site no view took is prepared again
+    before it gets a profile, and later prepares of other sites don't keep it."""
     problems = [f"main.qml needs `{pattern}` once" for pattern in MAIN_SITE_GATE if len(re.findall(pattern, main)) != 1]
     if len(_hits(r"(?m)^\s*preparedSites\s*:\s*root\.chatReadySites\s*$", full_representation)) != 1 \
             or len(_hits(r"\bpreparedSites\s*:", full_representation)) != 1:
@@ -1111,24 +1125,33 @@ def _prepared_site_problems(main, full_representation, storage=None):
     emptied = [match.start() for match in re.finditer(
         r'case\s+"status"\s*:\s*case\s+"leave-status"\s*:\s*root\.(chatFreshSites)\s*=\s*\[\s*\]', main)]
     empties = [match.start() for match in re.finditer(r"\bchatFreshSites\s*=\s*\[\s*\]", main)]
-    expiry = [match.start(1) for match in re.finditer(FRESH_EXPIRY, main)]
-    widening = [at for at in grants if at not in narrowing and at not in empties]
+    expire = _block_spans(main, r"\bfunction\s+chatExpireFresh\s*\([^)]*\)\s*\{")
+    expiry = [at for at in grants if any(lo <= at < hi for lo, hi in expire)]
+    widening = [at for at in grants if at not in narrowing and at not in empties and at not in expiry]
     clear = _block_spans(main, r"\bfunction\s+chatClearSite\s*\([^)]*\)\s*\{")
-    emptied_at = [match.start(1) for match in re.finditer(
-        r'case\s+"status"\s*:\s*case\s+"leave-status"\s*:\s*root\.(chatFreshSites)\s*=\s*\[\s*\]', main)]
-    if len(emptied) != 1 or len(expiry) != 1 or sorted(empties) != sorted(emptied_at + expiry):
-        problems.append('every status reply must start with `root.chatFreshSites = []`, before anything that can break; '
-                        'the only other empty is chatFreshTimer\'s')
-    # L1-r: the expiry runs from every ok prepare reply and is never held off.
-    restarts = [match.start() for match in re.finditer(r"\bchatFreshTimer\s*\.\s*restart\s*\(\s*\)", main)]
-    if len(restarts) != 1 or not _in_prepare_reply_after_ok(main, restarts[0]) \
-            or len(_hits(r"\bchatFreshTimer\b", main)) != 2 \
-            or len(_hits(r"(?m)^\s*property\s+int\s+chatFreshWait\s*:\s*3000\s*$", main)) != 1 \
-            or len(_hits(r"\bchatFreshWait\b", main)) != 2:
-        problems.append("chatFreshTimer (interval chatFreshWait: 3000) must be restarted only in the ok prepare reply, "
-                        "and touched nowhere else")
+    if len(emptied) != 1 or len(empties) != 1:
+        problems.append('every status reply must start with `root.chatFreshSites = []`, before anything that can break')
+    # L1-r + I1: per-site expiry, timed from each site's own ok prepare only.
+    body = _function_body(main, "chatExpireFresh")
+    if body is None or _squashed(body) != EXPIRE_FRESH_BODY or len(expiry) != 1:
+        problems.append(f"chatExpireFresh must be exactly `{EXPIRE_FRESH_BODY}`")
+    if len(re.findall(FRESH_TIMER, main)) != 1 or len(_hits(r"\bchatFreshTimer\b", main)) != 4 \
+            or any(not any(lo <= _offset < hi for lo, hi in expire)
+                   for _offset in [m.start() for m in re.finditer(r"\bchatFreshTimer\s*\.", main)]):
+        problems.append("chatFreshTimer: declared once (onTriggered: root.chatExpireFresh()), used only in chatExpireFresh")
+    marks = [match.start() for match in re.finditer(r"\bvar\s+at\s*=\s*Date\.now\(\)\s*var\s+marks\b", main)]
+    if len(marks) != 1 or not _squashed(main[marks[0]:]).startswith(FRESH_MARKS) \
+            or not _in_prepare_reply_after_ok(main, marks[0]) or not widening or marks[0] < widening[0] \
+            or len(_hits(r"\bchatFreshAt\s*=(?!=)", main)) != 1 \
+            or len(_hits(r"(?m)^\s*property\s+var\s+chatFreshAt\s*:\s*\(\s*\{\s*\}\s*\)\s*$", main)) != 1 \
+            or len(_hits(r"\bchatExpireFresh\s*\(", main)) != 3:
+        problems.append(f"the ok prepare reply, after the grant, must time only the sites it created: `{FRESH_MARKS}`; "
+                        "chatFreshAt is set nowhere else, chatExpireFresh runs only there and from chatFreshTimer")
+    if len(_hits(r"(?m)^\s*property\s+int\s+chatFreshWait\s*:\s*3000\s*$", main)) != 1 \
+            or len(_hits(r"\bchatFreshWait\b", main)) != 3:
+        problems.append("chatFreshWait: 3000, used only in chatExpireFresh")
     if len(narrowing) != 1 or len(clear) != 1 or not clear[0][0] <= narrowing[0] < clear[0][1]:
-        problems.append("chatFreshSites may shrink only in chatClearSite")
+        problems.append("chatFreshSites may shrink only in chatClearSite (and expire in chatExpireFresh)")
     if len(widening) != 1 or not _in_prepare_reply_after_ok(main, widening[0]) \
             or not re.match(r"chatFreshSites\s*=\s*first\s*\?\s*created\s*:\s*root\.chatFreshSites\.concat\(",
                             main[widening[0]:]):
@@ -1186,18 +1209,27 @@ def test_saved_profiles_only_for_prepared_sites():
      "        root.chatFreshSites = root.chatFreshSites.concat([siteId])\n"),
     (FULL_REPRESENTATION, "onSiteProfileWanted: (siteId) => root.chatSiteWanted(siteId)",
      "onSiteProfileWanted: (siteId) => root.chatClearSite(siteId)"),
-    # L1-r: the expiry gone, held off, made longer, or another empty.
-    (MAIN_QML, "                chatFreshTimer.restart()\n", ""),
-    (MAIN_QML, "        onTriggered: root.chatFreshSites = []\n", "        onTriggered: {}\n"),
+    # L1-r + I1: the expiry gone, held off, made longer, shared, or another empty.
+    (MAIN_QML, "                root.chatExpireFresh()\n", ""),
+    (MAIN_QML, "        onTriggered: root.chatExpireFresh()\n", "        onTriggered: {}\n"),
     (MAIN_QML, "    property int chatFreshWait: 3000\n", "    property int chatFreshWait: 300000\n"),
-    (MAIN_QML, "        repeat: false\n        onTriggered: root.chatFreshSites = []\n",
-     "        repeat: false\n        running: false\n        onTriggered: root.chatFreshSites = []\n"),
+    (MAIN_QML, "        repeat: false\n        onTriggered: root.chatExpireFresh()\n",
+     "        repeat: false\n        running: false\n        onTriggered: root.chatExpireFresh()\n"),
     (MAIN_QML, "    function chatNext() {",
      "    function x() { chatFreshTimer.stop() }\n    function chatNext() {"),
     (MAIN_QML, "    function chatNext() {",
      "    function x() { root.chatFreshWait = 600000 }\n    function chatNext() {"),
     (MAIN_QML, "    function chatNext() {",
      "    function x() { root.chatFreshSites = [] }\n    function chatNext() {"),
+    # I1: a later prepare times every fresh site, not only the ones it created.
+    (MAIN_QML, "marks[id] = created.indexOf(id) >= 0 ? at : root.chatFreshAt[id]", "marks[id] = at"),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { root.chatFreshAt = ({}) }\n    function chatNext() {"),
+    (MAIN_QML, "            return typeof at === \"number\" && now >= at && now - at < root.chatFreshWait",
+     "            return typeof at !== \"number\" || now - at < root.chatFreshWait"),
+    (MAIN_QML, "        if (left.length !== root.chatFreshSites.length)\n            root.chatFreshSites = left\n", ""),
+    (MAIN_QML, "        chatFreshTimer.interval = Math.max(1, next + root.chatFreshWait - now)",
+     "        chatFreshTimer.interval = root.chatFreshWait"),
     (CHAT_STORAGE_JS, '    if (list === null || list === undefined || typeof list !== "object")\n        return false\n', ""),
     (CHAT_STORAGE_JS, "        if (list[index] === value)", "        if (list[index] == value)"),
 ])
@@ -2490,10 +2522,31 @@ def _remove_retry_problems(code):
                      r'root\.chatStorageNotice\s*=\s*"site-remove-failed"', code):
         problems.append('remove-site: ok ends the debt; only "busy" may be retried; anything else is tried and told')
     if not re.search(r"(?m)^\s*property\s+int\s+chatRemoveRetryWait\s*:\s*2000\s*$", code) \
-            or not re.search(r"(?m)^\s*property\s+int\s+chatRemoveRetryLimit\s*:\s*30000\s*$", code) \
+            or not re.search(r"(?m)^\s*property\s+int\s+chatRemoveRetryLimit\s*:\s*90000\s*$", code) \
             or _hits(r"\bchatRemoveRetry(Wait|Limit)\s*=(?!=)", code):
-        problems.append("chatRemoveRetryWait 2000 and chatRemoveRetryLimit 30000, never changed by the widget")
+        problems.append("chatRemoveRetryWait 2000 and chatRemoveRetryLimit 90000, never changed by the widget")
+    # L1 (round 4b): a tried site wanted again while ready gets one more delete
+    # per round, through chatSiteReleased (its wait, its guards); no loop.
+    wanted = _function_body(code, "chatSiteWanted") or ""
+    if _squashed(REWANTED_BLOCK) not in _squashed(wanted) \
+            or len(_hits(r"\bchatSiteReleased\s*\(", code)) != 2 \
+            or len(_hits(r"\bchatRemoveRewanted\s*=(?!=)", code)) != 3 \
+            or len(_hits(r"(?m)^\s*root\.chatRemoveRewanted\s*=\s*\[\s*\]\s*$", code)) != 1 \
+            or not re.search(r"root\.chatRemoveTried\s*=\s*\[\s*\]\s*root\.chatRemoveRewanted\s*=\s*\[\s*\]", code) \
+            or _squashed("root.chatRemoveRewanted = root.chatRemoveRewanted.filter(function (id) { return id !== siteId })") \
+            not in _squashed(_function_body(code, "chatClearSite") or ""):
+        problems.append("chatSiteWanted re-runs a tried site's delete only once per round (chatRemoveRewanted, reset "
+                        "only at the unlock and by a new Clear), only while ready, through chatSiteReleased")
     return problems
+
+
+REWANTED_BLOCK = (
+    "if (root.chatStorageReady && root.chatRemovalPending(siteId) && root.chatRemoveTried.indexOf(siteId) >= 0 "
+    "&& root.chatRemoveRewanted.indexOf(siteId) < 0) { "
+    "root.chatRemoveRewanted = root.chatRemoveRewanted.concat([siteId]) "
+    "root.chatRemoveTried = root.chatRemoveTried.filter(function (id) { return id !== siteId }) "
+    "root.chatSiteReleased(siteId) }"
+)
 
 
 def test_busy_site_delete_is_retried_only_in_its_own_state():
@@ -2514,7 +2567,16 @@ REMOVE_RETRY_MUTATIONS = {
                           '            else if (removed !== "" && root.chatRemoveBusy(removed))'),
     "busy ends the debt": ('            else if (reply.error === "busy" && removed !== "" && root.chatRemoveBusy(removed))\n                break\n',
                            '            else if (reply.error === "busy")\n                root.chatWritePendingClears([])\n'),
-    "longer limit": ("    property int chatRemoveRetryLimit: 30000\n", "    property int chatRemoveRetryLimit: 3000000\n"),
+    "longer limit": ("    property int chatRemoveRetryLimit: 90000\n", "    property int chatRemoveRetryLimit: 9000000\n"),
+    "shorter limit": ("    property int chatRemoveRetryLimit: 90000\n", "    property int chatRemoveRetryLimit: 30000\n"),
+    # L1 (round 4b): a loop, a delete while not ready, or another way in.
+    "rewanted without the once": ("\n                && root.chatRemoveTried.indexOf(siteId) >= 0 && root.chatRemoveRewanted.indexOf(siteId) < 0) {",
+                                  "\n                && root.chatRemoveTried.indexOf(siteId) >= 0) {"),
+    "rewanted while not ready": ("        if (root.chatStorageReady && root.chatRemovalPending(siteId)\n",
+                                 "        if (root.chatRemovalPending(siteId)\n"),
+    "rewanted never marked": ("            root.chatRemoveRewanted = root.chatRemoveRewanted.concat([siteId])\n", ""),
+    "rewanted reset elsewhere": ("    function chatNext() {", "    function x() { root.chatRemoveRewanted = [] }\n    function chatNext() {"),
+    "another release": ("    function chatNext() {", "    function x() { root.chatSiteReleased(\"claude\") }\n    function chatNext() {"),
     "other waiting": ("    function chatNext() {", "    function x() { root.chatRemoveWaiting = root.chatPendingClears }\n    function chatNext() {"),
     "other start": ("    function chatNext() {", "    function x() { chatRemoveRetryTimer.start() }\n    function chatNext() {"),
 }
@@ -2592,8 +2654,8 @@ def test_every_lock_waits_for_the_profile_to_close():
     ("readonly property int chatProfileCloseWait: 1000", "property int chatProfileCloseWait: 1000"),
     ('root.chatEnqueue(["wait"].concat(owed', "root.chatEnqueue([].concat(owed"),
     # SEC-L2: the clear queues the delete itself, or the release does it for any site.
-    ("        root.chatFreshSites = root.chatFreshSites.filter(function (id) { return id !== siteId })\n    }",
-     "        root.chatFreshSites = root.chatFreshSites.filter(function (id) { return id !== siteId })\n"
+    ("        root.chatRemoveRewanted = root.chatRemoveRewanted.filter(function (id) { return id !== siteId })\n    }",
+     "        root.chatRemoveRewanted = root.chatRemoveRewanted.filter(function (id) { return id !== siteId })\n"
      "        root.chatEnqueue([\"wait\", \"remove-site\"])\n    }"),
     ("        if (!root.chatRemovalPending(siteId) || !root.chatStorageReady)\n            return\n        var owed",
      "        var owed"),

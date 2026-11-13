@@ -391,29 +391,55 @@ def _names_folder(path: str, folder: str) -> bool:
     return path.endswith(_DELETED_SUFFIX) and _is_below(path[: -len(_DELETED_SUFFIX)], folder)
 
 
-def _process_owner(process: str) -> Optional[int]:
-    """The uid owning ``/proc/<pid>``, or None when it is gone or unreadable.
+class _Unreadable(Exception):
+    """A process of ours whose fd or maps can't be read: it counts as busy."""
 
-    The kernel shows a non-dumpable process as root's; it is skipped like any
-    other user's process (its fds could not be read anyway).
+
+# A process that exited mid-scan: skip it (or that one fd).
+_VANISHED = (errno.ENOENT, errno.ESRCH)
+
+
+def _process_owner(process: str) -> Optional[int]:
+    """The process's uid from ``/proc/<pid>/status``, or None.
+
+    Only when all four ``Uid:`` fields (real, effective, saved, fs) are the
+    same uid. A process running as root through sudo or a setuid program
+    (real uid ours, others 0) is not ours: root can read the vault anyway,
+    so it is outside the threat model, and counting it while unreadable
+    would block Clear <site> whenever a terminal has sudo open. None too when
+    the process is gone or its status can't be read or parsed: it is skipped
+    like another user's. Not the owner of the ``/proc/<pid>`` folder, which
+    the kernel shows as root's for a non-dumpable process (review-3 L2).
     """
     try:
-        return os.stat(process, follow_symlinks=False).st_uid
+        with open(os.path.join(process, "status"), "rb") as status:
+            for line in status:
+                if line.startswith(b"Uid:"):
+                    fields = line.split()[1:]
+                    if len(fields) != 4 or not all(field.isdigit() for field in fields):
+                        return None
+                    return int(fields[0]) if len(set(fields)) == 1 else None
     except OSError:
         return None
+    return None
 
 
 def _fd_paths(process: str) -> Iterator[str]:
     fd_dir = os.path.join(process, "fd")
     try:
         entries = os.listdir(fd_dir)
-    except OSError:
-        return
+    except OSError as error:
+        if error.errno in _VANISHED:
+            return
+        raise _Unreadable from None
     for entry in entries:
         try:
             yield os.readlink(os.path.join(fd_dir, entry))
-        except OSError:
-            continue
+        except OSError as error:
+            # EINVAL: not a link (never in the real /proc); gone: closed meanwhile.
+            if error.errno in _VANISHED or error.errno == errno.EINVAL:
+                continue
+            raise _Unreadable from None
 
 
 def _mapped_paths(process: str) -> Iterator[str]:
@@ -424,17 +450,24 @@ def _mapped_paths(process: str) -> Iterator[str]:
                 fields = line.rstrip(b"\n").split(None, 5)
                 if len(fields) == 6 and fields[5].startswith(b"/"):
                     yield os.fsdecode(fields[5])
-    except OSError:
-        return
+    except OSError as error:
+        if error.errno in _VANISHED:
+            return
+        raise _Unreadable from None
 
 
 def site_folder_in_use(folder: str, *, proc_root: Optional[str] = None, uid: Optional[int] = None) -> bool:
     """True when a process of ``uid`` (default: ours) has a file under ``folder`` open or mapped.
 
     ``folder`` must be the resolved path; the kernel's fd links and maps
-    paths are resolved too. Processes of other users and processes (or single
-    entries) that can't be read are skipped. When ``proc_root`` itself can't
-    be listed nothing can be known, so that fails as os-error, not as free.
+    paths are resolved too. A process counts as ``uid``'s only when its
+    real, effective, saved and fs uids all are ``uid``; any other process is
+    skipped, and so is a process (or one fd) that
+    vanished mid-scan. A process of ours whose fd or maps can't be read
+    (non-dumpable, or in a user namespace we can't inspect) counts as busy:
+    it could hold the folder open and we can't tell (fail closed). When
+    ``proc_root`` itself can't be listed nothing can be known, so that fails
+    as os-error.
     """
     root = PROC_ROOT if proc_root is None else proc_root
     owner = os.getuid() if uid is None else uid
@@ -446,12 +479,113 @@ def site_folder_in_use(folder: str, *, proc_root: Optional[str] = None, uid: Opt
         process = os.path.join(root, pid)
         if _process_owner(process) != owner:
             continue
-        for path in _fd_paths(process):
-            if _names_folder(path, folder):
-                return True
-        for path in _mapped_paths(process):
-            if _names_folder(path, folder):
-                return True
+        try:
+            for path in _fd_paths(process):
+                if _names_folder(path, folder):
+                    return True
+            for path in _mapped_paths(process):
+                if _names_folder(path, folder):
+                    return True
+        except _Unreadable:
+            return True
+    return False
+
+
+# The LevelDB lock probe: Chromium's LevelDB (third_party/leveldatabase,
+# env_chromium.cc) locks <db>/LOCK with base::File::Lock, which on POSIX is
+# fcntl(F_SETLK) with F_WRLCK on the whole file, held while the database is
+# open (from Chromium's sources as known to us; not re-read from this Qt
+# WebEngine build). That lock is visible to any process, whatever /proc lets
+# us read. An open file description lock (F_OFD_SETLK) conflicts with it
+# too; a flock() lock is separate, so it is probed as well.
+LOCK_NAME = "LOCK"
+# Bounds of the walk: deeper folders or more entries than any profile has
+# mean something odd lives there, so nothing is deleted (os-error).
+MAX_LOCK_DEPTH = 16
+MAX_LOCK_ENTRIES = 200_000
+_LOCK_FLAGS = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0)
+
+
+def _lock_is_held(directory: int, name: str) -> bool:
+    """Probe one ``LOCK`` file without waiting; True when held or not probeable.
+
+    Opened without creating it, never following a link; a non-regular file
+    swapped in counts as held. Any open or lock failure other than "gone"
+    counts as held as well (fail closed: busy deletes nothing and the widget
+    tries again, while a wrong "free" would delete a store in use). The
+    probe's own lock is released at once, and closing drops it in any case.
+    """
+    import fcntl
+
+    try:
+        descriptor = os.open(name, _LOCK_FLAGS, dir_fd=directory)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return True
+        try:
+            fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # EAGAIN / EACCES: another process holds it; anything else: unknown.
+            return True
+        fcntl.lockf(descriptor, fcntl.LOCK_UN)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    except OSError:
+        return True
+    finally:
+        _close(descriptor)
+
+
+def site_locks_held(site: int) -> bool:
+    """True when any regular ``LOCK`` file below the open ``site`` folder is locked.
+
+    Walks with directory fds only (``O_NOFOLLOW``; symlinks are neither
+    followed nor probed), at most MAX_LOCK_DEPTH levels and MAX_LOCK_ENTRIES
+    entries (beyond that: os-error). A folder that can't be read counts as
+    held; one that vanished is skipped.
+    """
+    seen = 0
+    pending: list[tuple[int, int]] = [(os.dup(site), 0)]
+    try:
+        while pending:
+            directory, depth = pending.pop()
+            try:
+                try:
+                    with os.scandir(directory) as entries:
+                        listed = [(entry.name, entry.is_dir(follow_symlinks=False),
+                                   entry.is_file(follow_symlinks=False)) for entry in entries]
+                except OSError:
+                    return True
+                seen += len(listed)
+                if seen > MAX_LOCK_ENTRIES:
+                    raise HelperError("os-error")
+                for name, is_dir, is_file in listed:
+                    if is_file and name == LOCK_NAME:
+                        if _lock_is_held(directory, name):
+                            return True
+                    elif is_dir:
+                        if depth + 1 > MAX_LOCK_DEPTH:
+                            raise HelperError("os-error")
+                        try:
+                            child = os.open(name, _DIR_FLAGS, dir_fd=directory)
+                        except FileNotFoundError:
+                            continue
+                        except OSError:
+                            return True
+                        pending.append((child, depth + 1))
+            finally:
+                _close(directory)
+    finally:
+        for directory, _depth in pending:
+            _close(directory)
     return False
 
 
@@ -500,6 +634,15 @@ def _remove_site_encrypted(
             folder = os.path.join(_container_path(applet, generation, container, environ), name)
             if site_folder_in_use(folder):
                 raise HelperError("busy")
+            # Then, as close to the delete as possible, the LevelDB locks:
+            # they show a store still open even in a process /proc hides.
+            site_fd = open_child_dir(container, name, create=False)
+            if site_fd is not None:
+                try:
+                    if site_locks_held(site_fd):
+                        raise HelperError("busy")
+                finally:
+                    _close(site_fd)
         remove_entry(container, name)
 
 
@@ -548,7 +691,8 @@ def remove_site(
     """Delete one site's folder inside one generation folder; missing is success.
 
     Refused with ``busy`` (nothing deleted) while a process of this user has
-    a file under that folder open or mapped.
+    a file under that folder open or mapped, can't be inspected, or a
+    LevelDB ``LOCK`` file below it is locked.
     """
     if store != "encrypted":
         raise ValueError("Unsupported web data store.")

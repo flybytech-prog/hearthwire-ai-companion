@@ -200,11 +200,13 @@ PlasmoidItem {
     // that prepare also verified the mount again. Only these may get a new
     // saved profile; every status reply empties the list, so a site opened
     // later is prepared (and the mount verified) once more first. They count
-    // only while chatPreparedGeneration is the current generation. The list
-    // also expires chatFreshWait after the latest prepare's answer: a shown
+    // only while chatPreparedGeneration is the current generation. Each site
+    // also expires chatFreshWait after its own latest ok prepare: a shown
     // site's view takes its profile as the answer arrives, so a site still
     // without one then (the pane moved on) is prepared again when opened.
     property var chatFreshSites: []
+    // {siteId: ms} of each fresh site's own latest ok prepare.
+    property var chatFreshAt: ({})
     // Plain properties, not readonly, so the tests can shorten them (ms).
     property int chatFreshWait: 3000
     // Shown sites the Chat tab asked a fresh prepare for (siteWanted).
@@ -237,10 +239,14 @@ PlasmoidItem {
     property string chatRemoveSite: ""
     // remove-site answers busy while Chromium still has files open below the
     // site's folder (seen up to ~21 s after the profile went under heavy
-    // writes): the site is tried again every chatRemoveRetryWait, until
-    // chatRemoveRetryLimit after its first busy, then counts as failed.
+    // writes, ~31 s in the lab): the site is tried again every
+    // chatRemoveRetryWait, until chatRemoveRetryLimit after its first busy,
+    // then counts as failed.
     property int chatRemoveRetryWait: 2000
-    property int chatRemoveRetryLimit: 30000
+    property int chatRemoveRetryLimit: 90000
+    // Owed sites whose failed delete already ran once more this round,
+    // because the Chat tab wanted them again (see chatSiteWanted).
+    property var chatRemoveRewanted: []
     // Sites waiting for that retry, and {siteId: ms} of each one's first busy.
     property var chatRemoveWaiting: []
     property var chatRemoveBusySince: ({})
@@ -951,6 +957,24 @@ PlasmoidItem {
             root.chatEnqueue(["prepare"])
     }
 
+    // Drops every fresh site whose own latest prepare is chatFreshWait old
+    // (or has no readable time), then waits for the next one to expire.
+    function chatExpireFresh() {
+        var now = Date.now()
+        var left = root.chatFreshSites.filter(function (id) {
+            var at = Object.prototype.hasOwnProperty.call(root.chatFreshAt, id) ? root.chatFreshAt[id] : null
+            return typeof at === "number" && now >= at && now - at < root.chatFreshWait
+        })
+        if (left.length !== root.chatFreshSites.length)
+            root.chatFreshSites = left
+        chatFreshTimer.stop()
+        if (left.length === 0)
+            return
+        var next = Math.min.apply(null, left.map(function (id) { return root.chatFreshAt[id] }))
+        chatFreshTimer.interval = Math.max(1, next + root.chatFreshWait - now)
+        chatFreshTimer.start()
+    }
+
     // The Chat tab's web view has no profile for a shown site and may not
     // make one: prepare its folder (verifying the mount) right before.
     function chatSiteWanted(siteId) {
@@ -958,6 +982,15 @@ PlasmoidItem {
             return
         if (root.chatWantedSites.indexOf(siteId) < 0)
             root.chatWantedSites = root.chatWantedSites.concat([siteId])
+        // An owed site whose delete failed this round is opened again: its
+        // delete runs once more (once per round, so no loop), through the
+        // same wait and delete as after Clear <site> data.
+        if (root.chatStorageReady && root.chatRemovalPending(siteId)
+                && root.chatRemoveTried.indexOf(siteId) >= 0 && root.chatRemoveRewanted.indexOf(siteId) < 0) {
+            root.chatRemoveRewanted = root.chatRemoveRewanted.concat([siteId])
+            root.chatRemoveTried = root.chatRemoveTried.filter(function (id) { return id !== siteId })
+            root.chatSiteReleased(siteId)
+        }
         root.chatPrepareMissing()
     }
 
@@ -974,6 +1007,7 @@ PlasmoidItem {
             return
         root.chatRemoveTried = root.chatRemoveTried.filter(function (id) { return id !== siteId })
         root.chatFreshSites = root.chatFreshSites.filter(function (id) { return id !== siteId })
+        root.chatRemoveRewanted = root.chatRemoveRewanted.filter(function (id) { return id !== siteId })
     }
 
     // The web view destroyed the cleared site's profile: after the wait its
@@ -1019,6 +1053,7 @@ PlasmoidItem {
                 // Every owed site delete first, then prepare (keep and prune
                 // follow it).
                 root.chatRemoveTried = []
+                root.chatRemoveRewanted = []
                 root.chatEnqueue(root.chatPendingClears.map(function () { return "remove-site" }).concat(["prepare"]))
             }
             break
@@ -1034,8 +1069,15 @@ PlasmoidItem {
                 root.chatWantedSites = root.chatWantedSites.filter(function (id) {
                     return root.chatFreshSites.indexOf(id) < 0
                 })
-                // The shown sites' views took their profiles just now.
-                chatFreshTimer.restart()
+                // The shown sites' views took their profiles just now; only
+                // the sites this prepare created get a new time.
+                var at = Date.now()
+                var marks = {}
+                root.chatFreshSites.forEach(function (id) {
+                    marks[id] = created.indexOf(id) >= 0 ? at : root.chatFreshAt[id]
+                })
+                root.chatFreshAt = marks
+                root.chatExpireFresh()
                 if (first) {
                     // Old generations of this widget (e.g. after Clear, or the
                     // old shared profile after the update) go away, then
@@ -1706,15 +1748,14 @@ PlasmoidItem {
         }
     }
 
-    // L1-r: the prepares' say ends a moment after the latest one answered.
+    // L1-r, I1: each site's say ends chatFreshWait after its own prepare.
     // A view that has its profile keeps it; one made later needs a new
     // prepare (siteWanted → chatPrepareMissing). Fails closed: at worst
     // one prepare more.
     Timer {
         id: chatFreshTimer
-        interval: root.chatFreshWait
         repeat: false
-        onTriggered: root.chatFreshSites = []
+        onTriggered: root.chatExpireFresh()
     }
 
     // Tries the sites whose delete answered busy again, through the queue
