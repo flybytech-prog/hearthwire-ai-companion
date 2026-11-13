@@ -1560,33 +1560,71 @@ def test_the_owner_comes_from_the_proc_entry(data, mounted, _empty_proc):
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
-@pytest.mark.parametrize("closed", ["fd", "maps"])
-def test_an_unreadable_process_of_ours_counts_as_busy(data, capsys, mounted, _empty_proc, closed):
-    # Non-dumpable, or in a user namespace we can't inspect (review-3 L2):
-    # it could hold the folder open, so nothing is deleted.
+@pytest.mark.parametrize("closed", ["fd", "maps", "both"])
+def test_an_unrelated_unreadable_process_of_ours_is_not_busy(data, capsys, mounted, _empty_proc, closed):
+    # The kwin_wayland case (review-4 H1): all four uids ours, but file
+    # capabilities make its fd folder unreadable. With nothing open in the
+    # folder the delete must go through; the LOCK probe covers hidden stores.
     container = make_container(mounted, sites=("claude",), root_files=())
-    process = fake_process(_empty_proc, 19, fds=["/dev/null"], maps=["/usr/lib/libc.so.6"])
-    (process / closed).chmod(0)
+    me = os.getuid()
+    process = fake_process(_empty_proc, 19, fds=["/dev/null"], maps=["/usr/lib/libc.so.6"], uids=(me,) * 4)
+    hidden = ["fd", "maps"] if closed == "both" else [closed]
+    for name in hidden:
+        (process / name).chmod(0)
+    try:
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    finally:
+        (process / "fd").chmod(0o700)
+        (process / "maps").chmod(0o600)
+    assert names(container) == []
+
+
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EPERM])
+@pytest.mark.parametrize("where", ["fd", "link", "maps"])
+def test_an_unreadable_process_is_skipped_for_any_part(data, capsys, mounted, _empty_proc, monkeypatch, code, where):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    process = fake_process(_empty_proc, 23, fds=["/dev/null"], maps=["/usr/lib/libc.so.6"])
+    real_listdir, real_readlink, real_open = os.listdir, os.readlink, open
+    denied = OSError(code, os.strerror(code))
+
+    def listdir(path="."):
+        if where == "fd" and path == str(process / "fd"):
+            raise denied
+        return real_listdir(path)
+
+    def readlink(path, *args, **kwargs):
+        if where == "link" and str(path).startswith(str(process)):
+            raise denied
+        return real_readlink(path, *args, **kwargs)
+
+    def opener(path, *args, **kwargs):
+        if where == "maps" and str(path) == str(process / "maps"):
+            raise denied
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+    monkeypatch.setattr(os, "readlink", readlink)
+    monkeypatch.setattr("builtins.open", opener)
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
+    assert names(container) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
+@pytest.mark.parametrize("busy_via", ["fd", "maps"])
+def test_an_unreadable_process_does_not_hide_a_busy_readable_one(data, capsys, mounted, _empty_proc, busy_via):
+    container = make_container(mounted, sites=("claude",), root_files=())
+    held = site_path(mounted) + "/IndexedDB/LOCK"
+    hidden = [fake_process(_empty_proc, pid) for pid in (5, 6, 7)]
+    for process in hidden:
+        (process / "fd").chmod(0)
+        (process / "maps").chmod(0)
+    fake_process(_empty_proc, 8, **{"fds" if busy_via == "fd" else "maps": [held]})
     try:
         assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
     finally:
-        (process / closed).chmod(0o700)
-    assert names(container) == ["site-claude"]
-
-
-@pytest.mark.parametrize("error", [PermissionError, lambda *a: OSError(errno.EPERM, "x")])
-def test_an_unreadable_fd_folder_of_ours_counts_as_busy(data, capsys, mounted, _empty_proc, monkeypatch, error):
-    container = make_container(mounted, sites=("claude",), root_files=())
-    process = fake_process(_empty_proc, 23)
-    real_listdir = os.listdir
-
-    def listdir(path="."):
-        if path == str(process / "fd"):
-            raise error(errno.EACCES, "denied")
-        return real_listdir(path)
-
-    monkeypatch.setattr(os, "listdir", listdir)
-    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+        for process in hidden:
+            (process / "fd").chmod(0o700)
+            (process / "maps").chmod(0o600)
     assert names(container) == ["site-claude"]
 
 
@@ -1657,16 +1695,19 @@ def test_a_process_running_as_root_for_us_is_skipped_even_when_unreadable(
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
-def test_a_non_dumpable_process_with_all_uids_ours_is_busy(data, capsys, mounted, _empty_proc):
+def test_a_hidden_process_holding_a_lock_is_caught_by_the_probe(data, capsys, mounted, _empty_proc):
+    # /proc can't show it (unreadable), but its LevelDB lock is visible.
     container = make_container(mounted, sites=("claude",), root_files=())
-    me = os.getuid()
-    process = fake_process(_empty_proc, 34, uids=(me, me, me, me))
+    lock = leveldb(container / "site-claude", "IndexedDB", "x.leveldb")
+    process = fake_process(_empty_proc, 34, fds=[str(lock)])
     (process / "fd").chmod(0)
     try:
-        assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+        with lock_held(lock):
+            assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
     finally:
         (process / "fd").chmod(0o700)
-    assert names(container) == ["site-claude"]
+    assert names(container) == []
 
 
 def test_a_status_with_too_few_uid_fields_is_skipped(data, mounted, _empty_proc):
@@ -1849,20 +1890,105 @@ def test_free_locks_and_other_names_are_not_busy(data, capsys, mounted, tmp_path
     assert names(container) == ["site-gemini"]
 
 
-def test_a_symlinked_lock_is_never_probed_or_followed(data, capsys, tmp_path, mounted, monkeypatch):
+def test_a_symlinked_lock_counts_as_held_and_is_never_followed(data, capsys, tmp_path, mounted, monkeypatch):
+    # Chromium never makes one; LevelDB would lock the target out of sight.
     target = outside_target(tmp_path)
-    held = target / "precious"
     container = make_container(mounted, sites=("claude",), root_files=())
-    (container / "site-claude" / "LOCK").symlink_to(held)
+    (container / "site-claude" / "LOCK").symlink_to(target / "precious")
+    opened = []
+    real_open = os.open
+    monkeypatch.setattr(os, "open", lambda path, *a, **k: opened.append(path) or real_open(path, *a, **k))
+    assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    assert "LOCK" not in opened
+    assert names(container / "site-claude") == ["Cookies", "LOCK"]
+    assert_target_intact(target)
+    # Clear chat data (remove, no probe) still deletes it, link only.
+    assert remove(capsys) == {"ok": True}
+    assert not container.exists()
+    assert_target_intact(target)
+
+
+def test_a_symlinked_folder_is_never_followed_by_the_walk(data, capsys, tmp_path, mounted, monkeypatch):
+    target = outside_target(tmp_path)
+    held = target / "LOCK"
+    held.write_text("")
+    container = make_container(mounted, sites=("claude",), root_files=())
     (container / "site-claude" / "db").symlink_to(target, target_is_directory=True)
     opened = []
     real_open = os.open
     monkeypatch.setattr(os, "open", lambda path, *a, **k: opened.append(path) or real_open(path, *a, **k))
     with lock_held(held):
         assert web_op(capsys, "remove-site", site="claude") == {"ok": True}
-    assert "LOCK" not in opened and "db" not in opened
+    assert "db" not in opened
     assert names(container) == []
-    assert_target_intact(target)
+    assert names(target) == ["LOCK", "precious"]
+
+
+def test_a_socket_or_device_lock_entry_counts_as_held(data, capsys, mounted, monkeypatch):
+    # Without binding a socket: the walk sees a LOCK entry that is neither a
+    # regular file nor a folder (what scandir reports for a socket or device).
+    container = make_container(mounted, sites=("claude",), root_files=())
+    real_scandir = os.scandir
+
+    class Odd:
+        name = "LOCK"
+
+        def is_dir(self, follow_symlinks=True):
+            return False
+
+        def is_file(self, follow_symlinks=True):
+            return False
+
+    class Listing:
+        def __init__(self, directory):
+            self.entries = list(real_scandir(directory)) + [Odd()]
+
+        def __enter__(self):
+            return iter(self.entries)
+
+        def __exit__(self, *exc):
+            return False
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "scandir", Listing)
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    assert names(container) == ["site-claude"]
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory", "socket"])
+def test_a_lock_that_is_not_a_regular_file_counts_as_held(data, capsys, mounted, kind):
+    import socket
+
+    container = make_container(mounted, sites=("claude",), root_files=())
+    store = container / "site-claude" / "IndexedDB" / "x.leveldb"
+    store.mkdir(parents=True)
+    lock = store / "LOCK"
+    bound = None
+    if kind == "fifo":
+        os.mkfifo(lock)
+    elif kind == "directory":
+        lock.mkdir()
+    else:
+        try:
+            bound = socket.socket(socket.AF_UNIX)
+        except PermissionError:
+            pytest.skip("this sandbox forbids unix sockets")
+        here = os.getcwd()
+        os.chdir(store)  # AF_UNIX paths are short; bind relative to the store
+        try:
+            bound.bind("LOCK")
+        except PermissionError:
+            bound.close()
+            pytest.skip("this sandbox forbids binding a unix socket")
+        finally:
+            os.chdir(here)
+    try:
+        assert web_op(capsys, "remove-site", site="claude") == {"ok": False, "error": "busy"}
+    finally:
+        if bound is not None:
+            bound.close()
+    assert os.path.lexists(lock)
+    assert names(container) == ["site-claude"]
 
 
 def test_a_lock_swapped_for_a_symlink_counts_as_held(data, mounted, tmp_path):

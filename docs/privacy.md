@@ -415,11 +415,11 @@ about a second for them to finish writing, and deletes only that site's
 programs still has a file in that folder open (Qt WebEngine can keep its site
 storage open for a while after the profile closed), the helper answers
 `busy` and deletes nothing. To find out it reads only the open-file and
-mapped-file lists of your own processes under `/proc` (one running fully as
-you that it can't inspect counts as busy; one running as root through sudo
-is not yours), and it tries, without waiting, to lock each of the
-site's own `LOCK` files (the lock Qt WebEngine's site storage holds while it
-is open) and lets go at once. It changes nothing there, and its answer holds
+mapped-file lists of your own processes under `/proc` (ones it isn't allowed
+to read, and ones running as root through sudo, are skipped), and it tries,
+without waiting, to lock each of the site's own `LOCK` files (the lock Qt
+WebEngine's site storage holds while it is open, whichever program that is)
+and lets go at once. It changes nothing there, and its answer holds
 no path or name. The note goes only once
 the delete worked, and the site gets a new, empty folder the next time it is
 opened. If the delete fails, the Chat tab says so. Clear chat data clears the

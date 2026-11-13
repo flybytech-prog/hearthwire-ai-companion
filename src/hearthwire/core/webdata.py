@@ -391,10 +391,6 @@ def _names_folder(path: str, folder: str) -> bool:
     return path.endswith(_DELETED_SUFFIX) and _is_below(path[: -len(_DELETED_SUFFIX)], folder)
 
 
-class _Unreadable(Exception):
-    """A process of ours whose fd or maps can't be read: it counts as busy."""
-
-
 # A process that exited mid-scan: skip it (or that one fd).
 _VANISHED = (errno.ENOENT, errno.ESRCH)
 
@@ -425,24 +421,21 @@ def _process_owner(process: str) -> Optional[int]:
 
 
 def _fd_paths(process: str) -> Iterator[str]:
+    """The fd link targets; nothing for an fd folder or link that can't be read."""
     fd_dir = os.path.join(process, "fd")
     try:
         entries = os.listdir(fd_dir)
-    except OSError as error:
-        if error.errno in _VANISHED:
-            return
-        raise _Unreadable from None
+    except OSError:
+        return
     for entry in entries:
         try:
             yield os.readlink(os.path.join(fd_dir, entry))
-        except OSError as error:
-            # EINVAL: not a link (never in the real /proc); gone: closed meanwhile.
-            if error.errno in _VANISHED or error.errno == errno.EINVAL:
-                continue
-            raise _Unreadable from None
+        except OSError:
+            continue
 
 
 def _mapped_paths(process: str) -> Iterator[str]:
+    """The mapped file paths; nothing for a maps file that can't be read."""
     try:
         with open(os.path.join(process, "maps"), "rb") as maps:
             for line in maps:
@@ -450,10 +443,8 @@ def _mapped_paths(process: str) -> Iterator[str]:
                 fields = line.rstrip(b"\n").split(None, 5)
                 if len(fields) == 6 and fields[5].startswith(b"/"):
                     yield os.fsdecode(fields[5])
-    except OSError as error:
-        if error.errno in _VANISHED:
-            return
-        raise _Unreadable from None
+    except OSError:
+        return
 
 
 def site_folder_in_use(folder: str, *, proc_root: Optional[str] = None, uid: Optional[int] = None) -> bool:
@@ -462,12 +453,14 @@ def site_folder_in_use(folder: str, *, proc_root: Optional[str] = None, uid: Opt
     ``folder`` must be the resolved path; the kernel's fd links and maps
     paths are resolved too. A process counts as ``uid``'s only when its
     real, effective, saved and fs uids all are ``uid``; any other process is
-    skipped, and so is a process (or one fd) that
-    vanished mid-scan. A process of ours whose fd or maps can't be read
-    (non-dumpable, or in a user namespace we can't inspect) counts as busy:
-    it could hold the folder open and we can't tell (fail closed). When
-    ``proc_root`` itself can't be listed nothing can be known, so that fails
-    as os-error.
+    skipped. So is a process whose fd folder, fd links or maps can't be read
+    (vanished, non-dumpable, with file capabilities such as kwin_wayland's
+    cap_sys_nice, or in a user namespace we can't inspect): on a normal
+    Plasma desktop several always are, so counting them as busy would make
+    every remove-site busy (review-4 H1). Such a hidden process is covered by
+    the LevelDB lock probe (site_locks_held), which sees locks from any
+    process. When ``proc_root`` itself can't be listed nothing can be known,
+    so that fails as os-error.
     """
     root = PROC_ROOT if proc_root is None else proc_root
     owner = os.getuid() if uid is None else uid
@@ -479,15 +472,12 @@ def site_folder_in_use(folder: str, *, proc_root: Optional[str] = None, uid: Opt
         process = os.path.join(root, pid)
         if _process_owner(process) != owner:
             continue
-        try:
-            for path in _fd_paths(process):
-                if _names_folder(path, folder):
-                    return True
-            for path in _mapped_paths(process):
-                if _names_folder(path, folder):
-                    return True
-        except _Unreadable:
-            return True
+        for path in _fd_paths(process):
+            if _names_folder(path, folder):
+                return True
+        for path in _mapped_paths(process):
+            if _names_folder(path, folder):
+                return True
     return False
 
 
@@ -545,12 +535,18 @@ def _lock_is_held(directory: int, name: str) -> bool:
 
 
 def site_locks_held(site: int) -> bool:
-    """True when any regular ``LOCK`` file below the open ``site`` folder is locked.
+    """True when a ``LOCK`` entry below the open ``site`` folder is locked or odd.
 
-    Walks with directory fds only (``O_NOFOLLOW``; symlinks are neither
-    followed nor probed), at most MAX_LOCK_DEPTH levels and MAX_LOCK_ENTRIES
-    entries (beyond that: os-error). A folder that can't be read counts as
-    held; one that vanished is skipped.
+    Every entry named ``LOCK`` is checked without following links. A regular
+    file is probed (_lock_is_held). Anything else named ``LOCK`` counts as
+    held: a FIFO, directory, socket or device, and a symlink too (never
+    followed or probed). Chromium never makes one, and a symlinked LOCK
+    would put LevelDB's lock on its target, out of our sight, so "held" is
+    the safe answer; only one of our own processes can plant one in the
+    0700 folder, and Clear chat data (``remove``, no probe) still deletes it.
+    Walks with directory fds only (``O_NOFOLLOW``), at most MAX_LOCK_DEPTH
+    levels and MAX_LOCK_ENTRIES entries (beyond that: os-error). A folder
+    that can't be read counts as held; one that vanished is skipped.
     """
     seen = 0
     pending: list[tuple[int, int]] = [(os.dup(site), 0)]
@@ -568,8 +564,8 @@ def site_locks_held(site: int) -> bool:
                 if seen > MAX_LOCK_ENTRIES:
                     raise HelperError("os-error")
                 for name, is_dir, is_file in listed:
-                    if is_file and name == LOCK_NAME:
-                        if _lock_is_held(directory, name):
+                    if name == LOCK_NAME:
+                        if not is_file or _lock_is_held(directory, name):
                             return True
                     elif is_dir:
                         if depth + 1 > MAX_LOCK_DEPTH:
@@ -691,8 +687,9 @@ def remove_site(
     """Delete one site's folder inside one generation folder; missing is success.
 
     Refused with ``busy`` (nothing deleted) while a process of this user has
-    a file under that folder open or mapped, can't be inspected, or a
-    LevelDB ``LOCK`` file below it is locked.
+    a file under that folder open or mapped (processes /proc won't show are
+    skipped), or while a LevelDB ``LOCK`` entry below it is locked or not a
+    regular file.
     """
     if store != "encrypted":
         raise ValueError("Unsupported web data store.")
