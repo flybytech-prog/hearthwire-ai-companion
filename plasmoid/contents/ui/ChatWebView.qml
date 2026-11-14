@@ -25,10 +25,12 @@ import "SettingsLogic.js" as SettingsLogic
 // Pages are never read or scripted, and their console output is dropped.
 //
 // Local web UI pages on this computer, and those of added sites on this
-// computer (ChatSites.ownerChecked), load only after the helper said the
-// port belongs to this user or the system (LocalOwnerCheck): before the
-// site's view is created and before each of its main-frame navigations to
-// this computer. Anything else loads nothing and shows a message instead.
+// computer or the home network (ChatSites.ownerChecked), load only after
+// the helper said the port belongs to this user or the system, or (a home
+// network site, with its address) that the address isn't this computer's
+// (LocalOwnerCheck): before the site's view is created and before each of
+// its main-frame navigations to its own pages. Anything else loads nothing
+// and shows a message instead.
 //
 // Split view: a second pane (b) shows siteIdB next to the first, with its
 // own pages; the same site in both panes shares that site's profile. Its
@@ -148,13 +150,15 @@ Item {
     property string localOwnerProblem: ""
     property int localOwnerPort: 0
     readonly property bool localOwnerChecking: localOwner.busy
-    // What waits for the check: {view, url, port, form, create, pane, site},
-    // or null.
+    // What waits for the check: {view, url, port, form, create, pane, site,
+    // address}, or null.
     property var ownerPending: null
     // The address a good check before creating an owner-checked view was
     // made for, and that view's site; handed to it as its first pass.
     property string localCreatePass: ""
     property string localCreateSite: ""
+    // Retry's views still to check, one at a time (REV M-1).
+    property var ownerRetries: []
     // How long a pass is good for (ms); overridable by tests only.
     property int ownerPassLifetime: 10000
 
@@ -267,31 +271,42 @@ Item {
         var site = typeof siteId === "string" ? siteId : ""
         var port = ChatSites.localOwnerPort({ siteId: site, customUrls: chatWeb.customUrls,
                                               userSites: chatWeb.userSites, url: url })
+        // A home-network site's address, checked with the port (LOW-2).
+        var address = ChatSites.localOwnerAddress({ siteId: site, customUrls: chatWeb.customUrls,
+                                                    userSites: chatWeb.userSites, url: url })
+        // A Retry check this one replaces waits for its turn again.
+        var replaced = chatWeb.ownerPending
+        if (replaced && replaced.retry === true && replaced.view)
+            chatWeb.ownerRetries = [replaced.view].concat(chatWeb.ownerRetries)
         // A late answer of an earlier check must not count for this one.
         localOwner.cancel()
         chatWeb.ownerPending = { view: view, url: url, port: port, form: form, create: create,
-                                 pane: pane === "b" ? "b" : "a", site: site }
+                                 pane: pane === "b" ? "b" : "a", site: site, address: address }
         chatWeb.localOwnerPort = port
         // Never from inside the navigation request itself.
         Qt.callLater(function () {
-            if (chatWeb.ownerPending && chatWeb.ownerPending.url === url)
-                localOwner.start(port)
+            // chatWeb is null once this item is gone.
+            if (chatWeb && chatWeb.ownerPending && chatWeb.ownerPending.url === url)
+                localOwner.start(port, address)
         })
     }
 
     function localOwnerFinished(port, problem) {
         var pending = chatWeb.ownerPending
-        if (!pending || pending.port !== port)
+        if (!pending || pending.port !== port || (pending.address || "") !== localOwner.address)
             return
         chatWeb.ownerPending = null
         if (problem !== "") {
             // Fail closed: nothing from this computer stays on screen, so a
             // page loaded earlier can't keep talking to the new listener.
             chatWeb.localOwnerProblem = problem
+            chatWeb.ownerRetries = []
             chatWeb.blankLocalViews(port)
             return
         }
         chatWeb.localOwnerProblem = ""
+        // The next view Retry waits to check, once this one is done.
+        Qt.callLater(chatWeb.nextOwnerRetry)
         // A pane's owner-checked view still to create (its check waited for
         // this one).
         if (!pending.create && chatWeb.localViewMissing())
@@ -374,21 +389,49 @@ Item {
         return false
     }
 
-    // Retry after a problem: create a missing owner-checked view again, else
-    // load each shown owner-checked view's own home again (through the
-    // owner check).
+    // Retry after a problem: create a missing owner-checked view again, and
+    // check again only the shown owner-checked views that are blank or on
+    // the failed port, one at a time; a healthy view on another port keeps
+    // its page (REV M-1).
     function retryLocalOwner() {
+        var failedPort = chatWeb.localOwnerPort
         chatWeb.localOwnerProblem = ""
-        if (chatWeb.localViewMissing()) {
-            chatWeb.syncViews()
-            return
-        }
+        var queue = []
         var panes = [["a", chatWeb.siteId], ["b", chatWeb.splitActive ? chatWeb.siteIdB : ""]]
         for (var index = 0; index < panes.length; index++) {
             var site = panes[index][1]
             var view = site !== "" && chatWeb.ownerChecked(site) ? chatWeb.viewFor(site, panes[index][0]) : null
-            if (view && view.homeUrl !== "")
+            if (!view || view.homeUrl === "")
+                continue
+            var url = view.url.toString()
+            var port = ChatSites.localOwnerPort({ siteId: site, customUrls: chatWeb.customUrls,
+                                                  userSites: chatWeb.userSites, url: url })
+            if (url === "" || ChatSites.isAboutBlank(url) || (port > 0 && port === failedPort))
+                queue.push(view)
+        }
+        chatWeb.ownerRetries = queue
+        // A missing view comes through its own check (syncViews runs one
+        // at a time); the queue waits for it.
+        if (chatWeb.localViewMissing())
+            chatWeb.syncViews()
+        chatWeb.nextOwnerRetry()
+    }
+
+    // Starts the next Retry check unless one is running; never cancels one.
+    function nextOwnerRetry() {
+        while (!chatWeb.ownerPending && chatWeb.ownerRetries.length > 0) {
+            var queue = chatWeb.ownerRetries.slice()
+            var view = queue.shift()
+            chatWeb.ownerRetries = queue
+            if (chatWeb.viewList().indexOf(view) < 0 || view.homeUrl === "")
+                continue
+            if (ChatSites.localOwnerPort({ siteId: view.site, customUrls: chatWeb.customUrls,
+                                           userSites: chatWeb.userSites, url: view.homeUrl }) === 0) {
                 view.url = view.homeUrl
+                continue
+            }
+            chatWeb.checkLocalOwner(view, view.homeUrl, false, false, view.pane, view.site)
+            chatWeb.ownerPending.retry = true
         }
     }
 

@@ -1062,39 +1062,128 @@ TestCase {
         compare(web.localOwnerProblem, "")
     }
 
-    // A home-network site never runs a check. Its loads are rejected here,
-    // so nothing goes to the network.
-    function test_privateAddedSiteNeverRunsACheck() {
+    // LOW-2: a home-network site's view and its own pages wait for a check
+    // that names its address. Its loads are rejected here, so nothing goes
+    // to the network.
+    readonly property string lanCheck: "--port-owner 9 --address '[fd00::77]'"
+
+    function waitForLanCheck(count) {
+        tryVerify(function () { return testCase.commands.length === count }, 3000,
+                  "expected " + count + " owner checks, got " + testCase.commands.length)
+        var command = testCase.commands[count - 1]
+        compare(command.slice(-testCase.lanCheck.length - 1), " " + testCase.lanCheck)
+    }
+
+    function makeLan() {
         var web = createTemporaryObject(webComponent, testCase, {})
         ownerCheck(web).runOwnerCheck = function (command) { testCase.commands.push(command) }
         web.userSites = [testCase.loopSite, testCase.lanSite]
         web.siteIds = [testCase.lanSite.id]
-        verify(!web.ownerChecked(testCase.lanSite.id))
-        var asked = []
         web.siteId = testCase.lanSite.id
+        return web
+    }
+
+    // Answers, and right away rejects every load of the view that comes.
+    property var lanLoads: []
+    property var heldViews: []
+    function answerAndHold(web, owner) {
+        testCase.lanLoads = []
+        answer(web, owner)
         var view = web.currentView
-        verify(view !== null, "created at once")
-        view.navigationRequested.connect(function (request) {
-            asked.push(request.url.toString())
-            request.reject()
-        })
+        if (view && testCase.heldViews.indexOf(view) < 0) {
+            testCase.heldViews = testCase.heldViews.concat([view])
+            view.navigationRequested.connect(function (request) {
+                testCase.lanLoads.push(request.url.toString())
+                request.reject()
+            })
+        }
+        return view
+    }
+
+    function test_privateAddedSiteIsCheckedWithItsAddress() {
+        var web = makeLan()
+        verify(web.ownerChecked(testCase.lanSite.id))
+        waitForLanCheck(1)
+        compare(web.currentView, null)
+        compare(ownerCheck(web).address, "[fd00::77]")
+        // remote: not this computer; the view comes with its pass.
+        var view = answerAndHold(web, "remote")
+        verify(view !== null, "created after the check")
+        compare(web.localOwnerProblem, "")
         compare(view.homeUrl, testCase.lanSite.url)
-        tryVerify(function () { return asked.indexOf(testCase.lanSite.url) >= 0 }, 3000)
-        wait(100)
-        compare(testCase.commands, [])
-        compare(web.ownerPending, null)
-        verify(!web.localViewMissing())
+        tryVerify(function () { return testCase.lanLoads.indexOf(testCase.lanSite.url) >= 0 }, 3000)
+        // Its own pages are checked again on every main-frame navigation.
+        testCase.lanLoads = []
+        view.url = testCase.lanSite.url + "c/1"
+        waitForLanCheck(2)
+        compare(testCase.lanLoads, [testCase.lanSite.url + "c/1"], "rejected by the gate first")
+        answer(web, "self")
+        tryVerify(function () { return testCase.lanLoads.length === 2 }, 3000)
+        compare(testCase.commands.length, 2)
+        // other or none: that port's views go blank.
+        view.url = testCase.lanSite.url + "c/2"
+        waitForLanCheck(3)
+        answer(web, "other")
+        compare(web.localOwnerProblem, "other")
+        compare(view.url.toString(), "about:blank")
+        // An error fails closed, with the message.
+        web.retryLocalOwner()
+        waitForLanCheck(4)
+        ownerCheck(web).ownerDone(ownerCheck(web).sourceName, { ok: false, error: "unreadable" })
+        compare(web.localOwnerProblem, "owner-unknown")
+        compare(view.url.toString(), "about:blank")
+        // A good Retry loads its home again.
+        web.retryLocalOwner()
+        waitForLanCheck(5)
+        answer(web, "remote")
+        compare(view.url.toString(), testCase.lanSite.url)
+    }
+
+    function test_privateAddedSiteBadFirstAnswerCreatesNothing() {
+        var web = makeLan()
+        waitForLanCheck(1)
+        answer(web, "none")
+        compare(web.currentView, null)
+        compare(web.localOwnerProblem, "not-running")
+        compare(web.localOwnerPort, 9)
+        web.retryLocalOwner()
+        waitForLanCheck(2)
+        ownerCheck(web).timeout = 50
+        // No answer: the timeout fails closed.
+        ownerCheck(web).cancel()
+        ownerCheck(web).start(9, "[fd00::77]")
+        tryVerify(function () { return web.localOwnerProblem === "owner-unknown" }, 3000)
+        compare(web.currentView, null)
+    }
+
+    // remote is a good answer only for a check that named an address; a
+    // stale answer of another address never counts.
+    function test_remoteNeedsAnAddress() {
+        var check = ownerCheck(makeLan())
+        var ended = []
+        check.finished.connect(function (port, problem) { ended.push([port, problem]) })
+        check.cancel()
+        check.start(9)
+        check.ownerDone(check.sourceName, { ok: true, owner: "remote" })
+        compare(ended, [[9, "owner-unknown"]])
+        check.start(9, "[fd00::77]")
+        var old = check.sourceName
+        check.start(9, "192.168.1.20")
+        check.ownerDone(old, { ok: true, owner: "remote" })
+        compare(ended.length, 1, "the earlier check's answer is dropped")
+        check.ownerDone(check.sourceName, { ok: true, owner: "remote" })
+        compare(ended, [[9, "owner-unknown"], [9, ""]])
+        // A bad address makes no command at all.
+        check.start(9, "[fd00::77]; rm -rf ~")
+        compare(ended[2], [9, "owner-unknown"])
     }
 
     // M1 for IPv6 hosts: another literal blanks the view.
     function test_addedIpv6SiteOnAnotherHostIsBlanked() {
-        var web = createTemporaryObject(webComponent, testCase, {})
-        web.userSites = [testCase.lanSite]
-        web.siteIds = [testCase.lanSite.id]
-        web.siteId = testCase.lanSite.id
-        var view = web.currentView
+        var web = makeLan()
+        waitForLanCheck(1)
+        var view = answerAndHold(web, "remote")
         verify(view !== null)
-        view.navigationRequested.connect(function (request) { request.reject() })
         compare(web.hostOf("http://[FD00::77]:9/"), "[fd00::77]")
         // Same host, another port: moves home with the same profile (M-H).
         var profile = web.profileFor(testCase.lanSite.id)
@@ -1104,5 +1193,108 @@ TestCase {
         web.userSites = [{ id: testCase.lanSite.id, name: "NAS chat", url: "http://[fd00::78]:8/" }]
         compare(view.url.toString(), "about:blank")
         compare(view.homeUrl, "http://[fd00::77]:8/", "not moved")
+    }
+
+    // REV M-1: Retry checks again only the pane that failed (blank or on
+    // the failed port), never the healthy one on another port, and runs its
+    // checks one at a time without cancelling another.
+    function splitLocalAndLoop() {
+        testCase.tried = []
+        var web = makeLoop("local")
+        waitForPortCheck(1, 9)
+        answer(web, "self")
+        // Pane a's first load used its pass before anything else happens.
+        watch(web.currentView)
+        waitForTry(testCase.home)
+        web.splitMinWidth = 300
+        web.siteIdB = testCase.loopSite.id
+        web.splitActive = true
+        waitForPortCheck(2, 7)
+        answer(web, "self")
+        verify(web.currentView !== null && web.currentViewB !== null)
+        tryVerify(function () { return web.currentViewB.url.toString() === testCase.loopSite.url }, 3000)
+        return web
+    }
+
+    function test_retryChecksOnlyTheFailedPane() {
+        var web = splitLocalAndLoop()
+        var a = web.currentView
+        var b = web.currentViewB
+        var asked = []
+        a.navigationRequested.connect(function (request) { asked.push("a " + request.url.toString()) })
+        b.navigationRequested.connect(function (request) { asked.push("b " + request.url.toString()) })
+        // Pane b's port changes hands.
+        b.url = testCase.loopSite.url + "x"
+        waitForPortCheck(3, 7)
+        answer(web, "other")
+        tryVerify(function () { return b.url.toString() === "about:blank" }, 5000)
+        compare(a.url.toString(), testCase.home)
+        asked = []
+        web.retryLocalOwner()
+        waitForPortCheck(4, 7)
+        wait(200)
+        compare(testCase.commands.length, 4, "pane a (port 9) is not checked again")
+        compare(asked.filter(function (line) { return line.indexOf("a ") === 0 }), [], "pane a not reloaded")
+        answer(web, "self")
+        tryVerify(function () { return b.url.toString() === testCase.loopSite.url }, 3000)
+        compare(web.localOwnerProblem, "")
+        wait(200)
+        compare(testCase.commands.length, 4)
+        compare(asked.filter(function (line) { return line.indexOf("a ") === 0 }), [])
+    }
+
+    function test_retryChecksBlankPanesOneAtATime() {
+        var web = splitLocalAndLoop()
+        var a = web.currentView
+        var b = web.currentViewB
+        // Both blank: port 9 failed, and port 7's view went blank too.
+        a.url = testCase.home + "x"
+        waitForPortCheck(3, 9)
+        answer(web, "none")
+        tryVerify(function () { return a.url.toString() === "about:blank" }, 5000)
+        web.blankLocalViews(7)
+        compare(b.url.toString(), "about:blank")
+        web.retryLocalOwner()
+        waitForPortCheck(4, 9)
+        wait(200)
+        compare(testCase.commands.length, 4, "one check at a time")
+        answer(web, "self")
+        // Then pane b's own check, after pane a's ended.
+        waitForPortCheck(5, 7)
+        tryVerify(function () { return a.url.toString() === testCase.home }, 3000)
+        answer(web, "system")
+        tryVerify(function () { return b.url.toString() === testCase.loopSite.url }, 3000)
+        wait(200)
+        compare(testCase.commands.length, 5)
+        // A problem stops the rest: its message stays.
+        a.url = testCase.home + "y"
+        waitForPortCheck(6, 9)
+        answer(web, "other")
+        web.blankLocalViews(7)
+        web.retryLocalOwner()
+        waitForPortCheck(7, 9)
+        answer(web, "other")
+        wait(200)
+        compare(testCase.commands.length, 7, "pane b waits for the next Retry")
+        compare(web.localOwnerProblem, "other")
+        compare(web.ownerRetries, [])
+    }
+
+    // A navigation check that replaces a Retry check sends it back to the queue.
+    function test_retryCheckReplacedByANavigationComesBack() {
+        var web = splitLocalAndLoop()
+        var a = web.currentView
+        var b = web.currentViewB
+        web.blankLocalViews(7)
+        web.retryLocalOwner()
+        waitForPortCheck(3, 7)
+        verify(web.ownerPending.retry === true)
+        a.url = testCase.home + "z"
+        waitForPortCheck(4, 9)
+        compare(web.ownerRetries.length, 1)
+        answer(web, "self")
+        waitForPortCheck(5, 7)
+        answer(web, "self")
+        tryVerify(function () { return b.url.toString() === testCase.loopSite.url }, 3000)
     }
 }

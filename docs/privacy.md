@@ -674,8 +674,10 @@ pages, sets no `QTWEBENGINE_*` variables or Chromium flags, and does not pass
 chat data to the Python helper, process arguments, or the environment. For
 Stay signed in the widget runs the helper with fixed words and numbers only
 (see [Provider contracts](provider-contracts.md#stay-signed-in-helper)); its
-replies are short codes, never paths. For the Ollama chat and Local web UI it
-runs the helper with the port number only ([port owner helper](provider-contracts.md#port-owner-helper)). A settings export passes
+replies are short codes, never paths. For the Ollama chat, Local web UI and
+the sites you added on this computer it runs the helper with the port number
+only, and for a site you added by a home-network IP address also with that IP
+address ([port owner helper](provider-contracts.md#port-owner-helper)). A settings export passes
 only the widget's id; the helper reads the applied settings itself (see
 [Settings backup](#settings-backup)). Load errors show generic text and are
 not logged. The system file dialog may remember recently used folders, as it
@@ -715,7 +717,9 @@ helper (one set of rules, tested against each other):
   because pages are matched against the exact address the engine reports;
 - IPv6 zone ids (`fe80::1%eth0`) and IPv4 inside IPv6 (`[::ffff:192.168.1.1]`);
 - link-local addresses (`169.254.0.0/16`, `fe80::/10`): they aren't stable,
-  and `169.254.169.254` is the cloud metadata address;
+  and `169.254.169.254` is the cloud metadata address; `fd00:ec2::/32`, the
+  cloud (AWS) IPv6 metadata range, is refused the same way, although it is
+  inside `fc00::/7`;
 - every other IP address: public ones, and `100.64.0.0/10` (carrier-grade
   NAT, which on many providers is their side of the line; Tailscale's IPv4
   range). Tailscale's IPv6 addresses are inside `fc00::/7` and are accepted.
@@ -761,8 +765,21 @@ WebSocket, images and similar) to this computer or to names that resolve to it
   loaded, and embedded frames, are not checked again.
 - **A server elsewhere on your home network** can be added with Add site… by
   its IP address (see
-  [Custom and added addresses](#custom-and-added-addresses)). There is no
-  owner check for it: the widget can't ask another machine who is listening.
+  [Custom and added addresses](#custom-and-added-addresses)). Before its
+  page is created, and before each main-frame navigation to that address,
+  the widget asks the helper whether the address is one of **this
+  computer's own**. The helper reads only the kernel's address and route
+  tables, not a test connection, which another program could fool.
+  - If it is this computer's address, another local user could listen on it,
+    and the page would load from them. So the same owner check as above
+    applies, counting the listeners on that address and on all addresses
+    (`0.0.0.0`, `::`).
+  - If it isn't, the connection leaves this computer, no local program can
+    answer it, and the page loads. The widget can't ask another machine who
+    is listening there.
+  - For a server on this computer, use `localhost` rather than its network
+    address.
+
   Over plain `http://`:
   - anyone on the network can read and change the traffic, including the
     site's cookies;
@@ -986,7 +1003,8 @@ The Chat tab protects against:
 - with the Ollama chat: other users' programs on the Ollama port, cloud
   models, and leftovers of the conversation on disk from Hearthwire;
 - with Local web UI and sites you added on this computer: other users'
-  programs on their port;
+  programs on their port; with a site you added by a home-network address
+  that is this computer's own, the same;
 - one chat site's page using or reading another chat site's sign-in or data
   (each site has its own profile; see the limits under
   [One profile per chat site](#one-profile-per-chat-site));

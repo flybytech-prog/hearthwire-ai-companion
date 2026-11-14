@@ -395,8 +395,19 @@ KCM.SimpleKCM {
         }
     }
 
-    // A fixed text for each code of an added site (ChatSites.validateUserSite).
-    function userSiteError(code) {
+    // Whether url's host is a short name (no dot, not a number), like nas:
+    // refused as possibly this computer, but most likely a device on the
+    // network (REV L-1).
+    function isShortName(url) {
+        var parsed = ChatSites.parseUserUrl(String(url || "").trim())
+        var host = parsed ? parsed.host : ""
+        return host !== "" && host.indexOf(".") < 0 && host.charAt(0) !== "["
+            && !/^(0x[0-9a-f]*|[0-9]+)$/.test(host) && ChatSites.LOCAL_NAMES.indexOf(host) < 0
+    }
+
+    // A fixed text for each code of an added site (ChatSites.validateUserSite);
+    // url: the address it was given, for loopback-not-allowed.
+    function userSiteError(code, url) {
         switch (code) {
         case "":
             return ""
@@ -429,13 +440,15 @@ KCM.SimpleKCM {
         case "scheme":
             return i18n("Use an address that starts with https:// or http://.")
         case "loopback-not-allowed":
-            return i18n("On this computer, use localhost, 127.0.0.1 or [::1].")
+            return page.isShortName(url)
+                ? i18n("http is allowed only for this computer (localhost, 127.0.0.1, [::1]) or a home-network IP address like 192.168.1.20. Other names need https and a full name, like nas.example.org.")
+                : i18n("On this computer, use localhost, 127.0.0.1 or [::1].")
         case "ip-literal":
             return i18n("Use the site's name. IP addresses are allowed only on your home network (10.x, 172.16–31.x, 192.168.x, fc00::/7).")
         case "ip-form":
             return i18n("Write the IP address as four numbers, like 192.168.1.20, or IPv6 in its short form, like [fd00::1].")
         case "link-local":
-            return i18n("Link-local addresses (169.254.x.x, fe80::) can't be added.")
+            return i18n("Link-local and cloud metadata addresses (169.254.x.x, fe80::, fd00:ec2::) can't be added.")
         default:
             return i18n("This isn't a valid web address.")
         }
@@ -505,6 +518,9 @@ KCM.SimpleKCM {
             ? ChatSites.addressClass(addressField.text.trim()) : ""
         readonly property bool addressHttp: /^http:/i.test(addressField.text.trim())
         readonly property bool notEncrypted: editor.addressKind === "private" && editor.addressHttp
+        // An https address on the home network: it may be this computer's
+        // own, which is checked like localhost would be (LOW-2).
+        readonly property bool homeHttps: editor.addressKind === "private" && !editor.addressHttp
 
         Layout.fillWidth: true
         Layout.leftMargin: page.onColumnWidth + page.iconColumnWidth + Kirigami.Units.smallSpacing * 2
@@ -615,14 +631,15 @@ KCM.SimpleKCM {
             }
 
             // Under Address, live while typing: a home-network http address
-            // isn't encrypted; one on this computer is owner-checked.
+            // isn't encrypted; one on this computer is owner-checked; a
+            // home-network one should be localhost when it is this computer.
             Item {
                 visible: editorNoteRow.visible
             }
             RowLayout {
                 id: editorNoteRow
                 Layout.fillWidth: true
-                visible: editor.notEncrypted || editor.addressKind === "loopback"
+                visible: editor.notEncrypted || editor.homeHttps || editor.addressKind === "loopback"
                 spacing: Kirigami.Units.smallSpacing
                 QQC2.Label {
                     objectName: "editorNote"
@@ -631,12 +648,14 @@ KCM.SimpleKCM {
                     textFormat: Text.PlainText
                     text: editor.notEncrypted
                         ? i18n("Not encrypted on your network. https is recommended.")
-                        : i18n("Checked before loading: the program on this port must be yours or the system's.")
+                        : editor.homeHttps
+                            ? i18n("For a server on this computer, use localhost.")
+                            : i18n("Checked before loading: the program on this port must be yours or the system's.")
                 }
                 Kirigami.ContextualHelpButton {
                     objectName: "editorNoteHelp"
                     visible: editor.notEncrypted
-                    toolTipText: i18n("Anyone on your network can read and change this traffic. On another network (a café, a hotel) a different device can have the same address and would get this site's sign-in and saved data. Use https with a certificate your system trusts to rule this out.")
+                    toolTipText: i18n("Anyone on your network can read and change this traffic. On another network (a café, a hotel) a different device can have the same address and would get this site's sign-in and saved data. Use https with a certificate your system trusts to rule this out. For a server on this computer, use localhost: when this address is this computer's own, Hearthwire still checks that the program on the port is yours or the system's.")
                 }
             }
         }
@@ -662,7 +681,7 @@ KCM.SimpleKCM {
             color: Kirigami.Theme.negativeTextColor
             text: editor.kind === "builtin" ? page.customUrlError(editor.siteId, editor.error)
                 : editor.kind === "ollama" ? page.ollamaAddressError(editor.error)
-                : page.userSiteError(editor.error)
+                : page.userSiteError(editor.error, addressField.text)
         }
 
         RowLayout {

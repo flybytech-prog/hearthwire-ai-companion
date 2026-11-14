@@ -811,8 +811,11 @@ function userAddress(url) {
     if (host.charAt(0) === "[") {
         if (canonicalIpv6(host) !== host)
             return fail("ip-form")
-        var group = ipv6Groups(host)[0]
-        if ((group & 0xffc0) === 0xfe80)
+        var groups = ipv6Groups(host)
+        var group = groups[0]
+        // fe80::/10, and fd00:ec2::/32, a cloud metadata range inside
+        // fc00::/7 (like 169.254.169.254).
+        if ((group & 0xffc0) === 0xfe80 || (group === 0xfd00 && groups[1] === 0x0ec2))
             return fail("link-local")
         if ((group & 0xfe00) === 0xfc00)
             return { error: "", kind: "private" }
@@ -843,8 +846,8 @@ function userAddress(url) {
 // failure wins: url-empty, too-long, whitespace, url-chars, userinfo,
 // malformed (no scheme), scheme (not http or https), malformed (unreadable),
 // then by host: localhost, 127.0.0.1 or [::1] is loopback; a bracketed IPv6
-// literal is ip-form (not canonical), link-local (fe80::/10), private
-// (fc00::/7) or ip-literal; another address of this computer is
+// literal is ip-form (not canonical), link-local (fe80::/10 or the
+// fd00:ec2::/32 metadata range), private (fc00::/7) or ip-literal; another address of this computer is
 // loopback-not-allowed; an IPv4 literal is ip-form (not a canonical dotted
 // quad), link-local (169.254/16), private (10/8, 172.16/12, 192.168/16) or
 // ip-literal; a DNS name is http-not-allowed over http, else public.
@@ -1220,18 +1223,20 @@ function badgeLetter(name) {
 
 // --- Local web UI owner check -------------------------------------------------
 
-// Local, and added sites on this computer (class loopback): their pages on
-// this computer load only after the owner check. The one predicate the
-// views use.
+// Local, and added sites on this computer or the home network (class
+// loopback or private): their own pages load only after the owner check
+// (a private site's names its address: LOW-2). The one predicate the views
+// use.
 function ownerChecked(siteId, customUrls, userSites) {
     var site = effectiveSite(siteId, customUrls, userSites)
-    return site !== null && (site.local === true || (site.user === true && site.local_kind === "loopback"))
+    return site !== null && (site.local === true || isHomeSite(site))
 }
 
 // The port whose owner the helper must vouch for (self or system) before
 // the main frame of a Local page, or of an added loopback site's page, goes
-// to url: any address on this computer, default port by scheme. 0 when no
-// check applies (other sites, other hosts, about:blank, unreadable
+// to url: any address on this computer, default port by scheme; for an added
+// home-network site, its own host only (the helper may answer remote: not
+// this computer, nothing to vouch for). 0 when no check applies (other sites, other hosts, about:blank, unreadable
 // addresses; those are blocked by classifyNavigation).
 function localOwnerPort(request) {
     var info = request || {}
@@ -1239,16 +1244,31 @@ function localOwnerPort(request) {
     if (!site)
         return 0
     var loopbackUser = site.user === true && site.local_kind === "loopback"
-    if (site.local !== true && !loopbackUser)
+    var privateUser = site.user === true && site.local_kind === "private"
+    if (site.local !== true && !loopbackUser && !privateUser)
         return 0
-    var parsed = loopbackUser ? parseUserUrl(info.url) : parseUrl(info.url)
+    var parsed = loopbackUser || privateUser ? parseUserUrl(info.url) : parseUrl(info.url)
     if (parsed === null || parsed.host === ""
-            || (parsed.scheme !== "http" && parsed.scheme !== "https")
-            || !isLocalAddress(parsed.host))
+            || (parsed.scheme !== "http" && parsed.scheme !== "https"))
+        return 0
+    // A home-network site: its own host only (anything else is blocked),
+    // checked with that address (localOwnerAddress).
+    if (privateUser ? parsed.host !== site.exact_hosts[0] : !isLocalAddress(parsed.host))
         return 0
     if (parsed.port !== "")
         return parseInt(parsed.port, 10)
     return parsed.scheme === "https" ? 443 : 80
+}
+
+// The --address of the owner check localOwnerPort asks for: the host of a
+// home-network site's own page (it may be this computer's own address,
+// LOW-2); "" for this computer's addresses and when no check applies.
+function localOwnerAddress(request) {
+    var info = request || {}
+    var site = effectiveSite(info.siteId, info.customUrls, info.userSites)
+    if (!site || site.user !== true || site.local_kind !== "private" || localOwnerPort(info) === 0)
+        return ""
+    return site.exact_hosts[0]
 }
 
 // "skip" | "go" | "check" for a navigation request: "check" means reject it

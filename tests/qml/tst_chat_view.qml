@@ -524,9 +524,10 @@ TestCase {
         view.web.localOwnerProblem = "not-running"
         verify(message.visible)
         compare(message.text, "Nothing is using port 3000. Is your local chat server running?")
-        // Not for a home-network or public added site.
+        // A home-network site is checked too (LOW-2); a public one isn't.
         view.siteId = "user-0000a001"
-        verify(!message.visible)
+        verify(view.ownerCheckedSite)
+        verify(message.visible)
         view.siteId = "user-3fa9c01b"
         verify(!message.visible)
         // In the other pane too.

@@ -820,6 +820,32 @@ TestCase {
                     JSON.stringify(bad[index]))
     }
 
+    // Task 006 LOW-2: a home-network site's check names its address, quoted.
+    function test_ownerCommandWithAnAddress() {
+        compare(OllamaChat.ownerCommand(3000, 3, 12, "192.168.1.20"),
+                "env HEARTHWIRE_RUN=3 HEARTHWIRE_APPLET=12 python3 -P -m hearthwire --port-owner 3000"
+                + " --address '192.168.1.20'")
+        compare(OllamaChat.ownerCommand(9, 0, 0, "[fd00::77]"),
+                "env HEARTHWIRE_RUN=0 HEARTHWIRE_APPLET=0 python3 -P -m hearthwire --port-owner 9 --address '[fd00::77]'")
+        compare(OllamaChat.ownerCommand(9, 0, 0, ""), OllamaChat.ownerCommand(9, 0, 0))
+        compare(OllamaChat.ownerCommand(9, 0, 0, undefined), OllamaChat.ownerCommand(9, 0, 0))
+        ;["fd00::77", "[FD00::77]", "192.168.1.020", "192.168.1", "[fd00::77]'; rm -rf ~; '", "a.example",
+          "192.168.1.20 ", "[fd00::1%eth0]", "'", 7, "[" + new Array(41).join("a") + "]"].forEach(function (address) {
+            compare(OllamaChat.ownerCommand(9, 0, 0, address), "", String(address))
+        })
+    }
+
+    function test_parseOwnerReplyRemoteOnlyWithAnAddress() {
+        var remote = '{"ok":true,"owner":"remote"}'
+        compare(OllamaChat.parseOwnerReply(0, remote, true), { ok: true, owner: "remote" })
+        compare(OllamaChat.parseOwnerReply(0, remote), { ok: false, error: "bad-reply" })
+        compare(OllamaChat.parseOwnerReply(0, remote, false), { ok: false, error: "bad-reply" })
+        compare(OllamaChat.parseOwnerReply(0, '{"ok":true,"owner":"self"}', true), { ok: true, owner: "self" })
+        compare(OllamaChat.OWNERS, ["none", "self", "system", "other"], "Ollama never takes remote")
+        compare(OllamaChat.trusted("remote"), false)
+        compare(OllamaChat.ownerProblem({ ok: true, owner: "remote" }), "owner-unknown")
+    }
+
     function test_parseOwnerReply() {
         var owners = ["none", "self", "system", "other"]
         for (var index = 0; index < owners.length; index++)

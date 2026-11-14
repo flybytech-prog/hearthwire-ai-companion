@@ -184,6 +184,14 @@ TestCase {
             ["http://[::ffff:c0a8:101]/", "ip-literal", ""], ["http://[::]/", "ip-literal", ""],
             ["http://[ff02::1]/", "ip-literal", ""], ["http://[0:0:0:0:0:0:0:1]/", "ip-form", ""],
             ["http://[1::2::3]/", "ip-form", ""], ["http://[fd00::1]:0/", "malformed", ""],
+            // LOW-1: fd00:ec2::/32, the cloud metadata range, as link-local.
+            ["http://[fd00:ec2::254]/", "link-local", ""], ["https://[fd00:ec2::254]/", "link-local", ""],
+            ["http://[fd00:ec2::]/", "link-local", ""],
+            ["http://[fd00:ec2:ffff:ffff:ffff:ffff:ffff:ffff]:8080/", "link-local", ""],
+            ["http://[FD00:EC2::254]/", "link-local", ""], ["http://[fd00:0ec2::254]/", "ip-form", ""],
+            ["http://[fd00:ec1:ffff:ffff:ffff:ffff:ffff:ffff]/", "", "private"],
+            ["http://[fd00:ec3::1]/", "", "private"], ["http://[fd01:ec2::1]/", "", "private"],
+            ["http://[fd00::ec2]/", "", "private"],
             // DNS names: https only.
             ["http://nas.local/", "http-not-allowed", ""], ["http://nas.lan:3000/", "http-not-allowed", ""],
             ["https://nas.local/", "", "public"], ["http://chat.example.org/", "http-not-allowed", ""],
@@ -295,9 +303,22 @@ TestCase {
               "https://169.254.169.254/"].forEach(function (url) {
                 verify(!ChatSites.isPageUrl(effective, url), url)
             })
-            // No owner check for private sites.
-            compare(ChatSites.localOwnerPort({siteId: site.id, userSites: testCase.homeSites, url: own}), 0)
-            verify(!ChatSites.ownerChecked(site.id, {}, testCase.homeSites))
+            // LOW-2: its own host is checked, with its address (it may be
+            // this computer's own); nothing else is.
+            var owner = function (url) {
+                var request = {siteId: site.id, userSites: testCase.homeSites, url: url}
+                return [ChatSites.localOwnerPort(request), ChatSites.localOwnerAddress(request)]
+            }
+            compare(owner(own), [3000, host])
+            compare(owner(own + "c/1?x"), [3000, host])
+            compare(owner(own.replace(":3000/", ":3001/")), [3001, host], "blocked anyway, still fails closed")
+            compare(owner(own.replace(":3000/", "/")), [80, host])
+            compare(owner("https://cdn.example.org/"), [0, ""])
+            compare(owner("http://localhost:3000/"), [0, ""])
+            compare(owner("about:blank"), [0, ""])
+            verify(ChatSites.ownerChecked(site.id, {}, testCase.homeSites))
+            compare(ChatSites.localOwnerGate({siteId: site.id, userSites: testCase.homeSites, url: own,
+                                              isMainFrame: true, pass: ""}), "check")
             // The off-site notice knows its own host.
             compare(ChatSites.offSiteHost({siteId: site.id, userSites: testCase.homeSites, url: own}).off, false)
             compare(ChatSites.offSiteHost({siteId: site.id, userSites: testCase.homeSites,
@@ -335,6 +356,11 @@ TestCase {
         compare(port(site, "about:blank"), 0)
         compare(port(testCase.mistral, "https://localhost/"), 0, "public added sites: none")
         compare(port(testCase.nas, "http://localhost:3000/"), 0)
+        compare(ChatSites.localOwnerAddress({siteId: site.id, userSites: testCase.homeSites,
+                                             url: "http://localhost:3000/"}), "", "this computer: no address")
+        compare(ChatSites.localOwnerAddress({siteId: "local", url: "http://localhost:3000/"}), "")
+        compare(ChatSites.localOwnerAddress({siteId: testCase.mistral.id, userSites: testCase.homeSites,
+                                             url: "https://chat.mistral.ai/"}), "")
         verify(ChatSites.ownerChecked(site.id, {}, testCase.homeSites))
         verify(ChatSites.ownerChecked(testCase.secureUi.id, {}, testCase.homeSites))
         verify(ChatSites.ownerChecked("local"))

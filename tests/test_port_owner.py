@@ -375,3 +375,265 @@ def test_cli_refuses_a_repeated_port_owner(monkeypatch, capsys, argv):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "--port-owner may be given only once" in captured.err
+
+
+# --- --address: a home-network address of an added site (006 round 2, SEC LOW-2) ---------------
+#
+# Fake /proc/net/fib_trie, if_inet6 and ipv6_route in tmp_path, in the kernel's
+# own layout (net/ipv4/fib_trie.c, net/ipv6/addrconf.c, net/ipv6/route.c).
+
+import ipaddress  # noqa: E402
+
+LAN = "192.168.1.20"
+LAN6 = "fd00::20"
+HTTP = 3000
+
+
+def kernel_hex(address):
+    """An address as /proc/net/tcp{,6} prints it: 32-bit words in host (here little-endian) order."""
+    packed = ipaddress.ip_address(address).packed
+    return "".join(f"{int.from_bytes(packed[at:at + 4], 'little'):08X}" for at in range(0, len(packed), 4))
+
+
+def tcp_at(*sockets):
+    """sockets: (address, port, state, uid), any IPv4 address."""
+    return TCP_HEADER + "".join(_line(index, kernel_hex(address), port, state, uid, "00000000")
+                                for index, (address, port, state, uid) in enumerate(sockets))
+
+
+def tcp6_at(*sockets):
+    return TCP6_HEADER + "".join(_line(index, kernel_hex(address), port, state, uid, "0" * 32)
+                                 for index, (address, port, state, uid) in enumerate(sockets))
+
+
+def fib_trie(*local, extra=""):
+    """A Main and a Local table with 127.0.0.1 and each (address, prefix) of ``local`` as LOCAL."""
+    leaves = "".join(f"        |-- {address}\n           /{prefix} host LOCAL\n" for address, prefix in local)
+    table = ("  +-- 0.0.0.0/0 3 0 5\n"
+             "     |-- 0.0.0.0\n        /0 universe UNICAST\n"
+             "     +-- 127.0.0.0/8 2 0 2\n"
+             "        +-- 127.0.0.0/31 1 0 0\n"
+             "           |-- 127.0.0.0\n              /8 host LOCAL\n"
+             "           |-- 127.0.0.1\n              /32 host LOCAL\n"
+             "        |-- 127.255.255.255\n           /32 link BROADCAST\n"
+             "     +-- 192.168.1.0/24 2 0 2\n"
+             "        |-- 192.168.1.0\n           /24 link UNICAST\n"
+             "        |-- 192.168.1.255\n           /32 link BROADCAST\n" + leaves + extra)
+    return "Main:\n" + table + "Local:\n" + table
+
+
+def if_inet6(*addresses):
+    rows = ["00000000000000000000000000000001 01 80 10 80       lo"]
+    rows += [f"{ipaddress.IPv6Address(address).exploded.replace(':', '')} 02 40 00 80     eth0" for address in addresses]
+    return "\n".join(rows) + "\n"
+
+
+def ipv6_route(*routes):
+    """routes: (network, flags); always the loopback local route."""
+    rows = []
+    for network, flags in (("::1/128", 0x80200001), *routes):
+        net = ipaddress.IPv6Network(network)
+        rows.append(f"{net.network_address.exploded.replace(':', '')} {net.prefixlen:02x} {'0' * 32} 00 {'0' * 32} "
+                    f"00000000 00000002 00000000 {flags:08x}     eth0")
+    return "\n".join(rows) + "\n"
+
+
+@pytest.fixture
+def lan(proc):
+    """proc plus the address tables: by default this computer has none of the LAN addresses."""
+
+    def write(v4=None, v6=None, trie=None, inet6=None, route6=None):
+        path = proc(tcp_at() if v4 is None else v4, tcp6_at() if v6 is None else v6)
+        (path / "fib_trie").write_text(fib_trie() if trie is None else trie, encoding="ascii")
+        (path / "if_inet6").write_text(if_inet6() if inet6 is None else inet6, encoding="ascii")
+        (path / "ipv6_route").write_text(ipv6_route() if route6 is None else route6, encoding="ascii")
+        return path
+
+    write.path = proc.path
+    return write
+
+
+def owner_at(address, port=HTTP):
+    reply = portowner.run(port, address=address)
+    assert reply["ok"] is True, reply
+    return reply["owner"]
+
+
+@pytest.mark.parametrize("text", ["192.168.1.20", "10.0.0.0", "10.255.255.255", "172.16.0.1", "172.31.255.255",
+                                  "192.168.0.0", "[fd00::20]", "[fc00::]", "[fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]",
+                                  "[fd00:ec1::1]", "[fd00:ec3::1]"])
+def test_private_addresses_are_accepted(text):
+    assert portowner.private_address(text) is not None
+
+
+@pytest.mark.parametrize("text", [
+    "", "localhost", "127.0.0.1", "0.0.0.0", "8.8.8.8", "100.64.0.1", "169.254.169.254", "172.15.255.255",
+    "172.32.0.0", "192.169.0.1", "192.168.1.020", "192.168.01.1", "192.168.1", "192.168.1.20.", "0xc0.168.1.20",
+    "3232235796", " 192.168.1.20", "192.168.1.20 ", "192.168.1.256", "192.168.1.20:3000", "[192.168.1.20]",
+    "fd00::20", "[FD00::20]", "[fd00:0::20]", "[fd00::0:20]", "[fd00:ec2::254]", "[fd00:ec2::]", "[fe80::1]",
+    "[::1]", "[::]", "[2001:db8::1]", "[::ffff:192.168.1.20]", "[::ffff:c0a8:114]", "[fd00::20%25eth0]",
+    "[fd00::20]:3000", "[[fd00::20]]", "[fd00::1::2]", "[fd000::1]", "nas.local", "-1", None, 3232235796,
+])
+def test_other_addresses_are_refused(text):
+    assert portowner.private_address(text) is None
+
+
+def test_an_address_of_another_machine_is_remote(lan):
+    # Another user's wildcard listener can't answer a connection that leaves the machine.
+    lan(tcp_at(("0.0.0.0", HTTP, "0A", OTHER), (LAN, HTTP, "0A", OTHER)), tcp6_at(("::", HTTP, "0A", OTHER)))
+    assert owner_at(LAN) == "remote"
+    assert owner_at(f"[{LAN6}]") == "remote"
+
+
+def test_a_nonlocal_bind_never_makes_an_address_local(lan):
+    """With net.ipv4.ip_nonlocal_bind a user can bind any address; only the route tables count."""
+    lan(tcp_at((LAN, HTTP, "0A", OTHER)), tcp6_at((LAN6, HTTP, "0A", OTHER)))
+    assert owner_at(LAN) == "remote" and owner_at(f"[{LAN6}]") == "remote"
+
+
+@pytest.mark.parametrize(("bound", "table"), [
+    (LAN, "tcp"), ("0.0.0.0", "tcp"), ("::", "tcp6"), (f"::ffff:{LAN}", "tcp6"), ("::ffff:0.0.0.0", "tcp6"),
+])
+def test_an_own_ipv4_address_counts_its_listeners_and_the_wildcards(lan, bound, table):
+    sockets = ((bound, HTTP, "0A", OTHER),)
+    lan(tcp_at(*sockets) if table == "tcp" else None, tcp6_at(*sockets) if table == "tcp6" else None,
+        trie=fib_trie((LAN, 32)))
+    assert owner_at(LAN) == "other"
+
+
+@pytest.mark.parametrize(("uid", "expected"), [(SELF, "self"), (OLLAMA, "system"), (0, "system")])
+def test_an_own_address_has_the_usual_owners(lan, uid, expected):
+    lan(tcp_at((LAN, HTTP, "0A", uid)), tcp6_at((LAN6, HTTP, "0A", uid)), trie=fib_trie((LAN, 32)),
+        inet6=if_inet6(LAN6))
+    assert owner_at(LAN) == expected
+    assert owner_at(f"[{LAN6}]") == expected
+
+
+def test_listeners_on_other_addresses_or_ports_do_not_count(lan):
+    lan(tcp_at(("127.0.0.1", HTTP, "0A", OTHER), ("192.168.1.21", HTTP, "0A", OTHER), (LAN, HTTP + 1, "0A", OTHER),
+               (LAN, HTTP, "01", OTHER)),
+        tcp6_at(("::1", HTTP, "0A", OTHER), ("fd00::21", HTTP, "0A", OTHER), ("::ffff:192.168.1.21", HTTP, "0A", OTHER)),
+        trie=fib_trie((LAN, 32)), inet6=if_inet6(LAN6))
+    assert owner_at(LAN) == "none"
+    assert owner_at(f"[{LAN6}]") == "none"
+
+
+def test_an_ipv6_address_ignores_ipv4_listeners(lan):
+    lan(tcp_at(("0.0.0.0", HTTP, "0A", OTHER)), tcp6_at(("::", HTTP, "0A", SELF)), inet6=if_inet6(LAN6))
+    assert owner_at(f"[{LAN6}]") == "self"
+
+
+def test_a_local_range_makes_every_address_in_it_local(lan):
+    """`ip route add local 192.168.1.0/24 dev lo` (AnyIP): the whole range is this computer."""
+    lan(tcp_at(("0.0.0.0", HTTP, "0A", OTHER)), trie=fib_trie(("192.168.1.0", 24)))
+    assert owner_at(LAN) == "other"
+    assert owner_at("192.168.2.20") == "remote"
+
+
+@pytest.mark.parametrize("route", [" link UNICAST", " link BROADCAST", " universe UNICAST", " host type 12"])
+def test_only_local_routes_count(lan, route):
+    trie = fib_trie(extra=f"        |-- {LAN}\n           /32{route}\n")
+    lan(tcp_at(("0.0.0.0", HTTP, "0A", OTHER)), trie=trie)
+    assert owner_at(LAN) == "remote"
+
+
+def test_route_lines_with_tos_and_other_tables_parse(lan):
+    trie = fib_trie() + "Id 100:\n  +-- 10.0.0.0/8 2 0 2\n     |-- 10.0.0.5\n        /32 host LOCAL tos=4\n"
+    lan(tcp_at(("0.0.0.0", HTTP, "0A", SELF)), trie=trie)
+    assert owner_at("10.0.0.5") == "self"
+
+
+def test_an_ipv6_local_route_counts_and_others_do_not(lan):
+    lan(v6=tcp6_at(("::", HTTP, "0A", OTHER)), route6=ipv6_route(("fd00::/64", 0x80200001), ("fd01::/64", 0x00200001)))
+    assert owner_at(f"[{LAN6}]") == "other"
+    assert owner_at("[fd01::20]") == "remote"
+
+
+@pytest.mark.parametrize(("name", "content"), [
+    ("fib_trie", None), ("fib_trie", ""), ("fib_trie", "Main:\n  +-- 0.0.0.0/0 3 0 5\n"),
+    ("fib_trie", fib_trie() + "garbage\n"), ("fib_trie", "Main:\n           /32 host LOCAL\n"),
+    ("fib_trie", fib_trie() + "     |-- 999.1.1.1\n        /32 host LOCAL\n"),
+    ("fib_trie", fib_trie() + "     |-- 10.0.0.1\n        /33 host LOCAL\n"),
+    ("fib_trie", fib_trie().replace("/8 host LOCAL", "/8 host local")),
+])
+def test_an_unreadable_ipv4_table_is_unreadable(lan, name, content):
+    lan(tcp_at(("0.0.0.0", HTTP, "0A", SELF)))
+    if content is None:
+        (lan.path / name).unlink()
+    else:
+        (lan.path / name).write_text(content, encoding="ascii")
+    assert portowner.run(HTTP, address=LAN) == UNREADABLE
+
+
+@pytest.mark.parametrize(("name", "content"), [
+    ("if_inet6", None), ("ipv6_route", None), ("if_inet6", "zz\n"), ("if_inet6", "0" * 32 + " 01 80 10\n"),
+    ("ipv6_route", "0" * 32 + " 80 x\n"), ("ipv6_route", ipv6_route().replace(" 80 ", " 81 ", 1)),
+])
+def test_an_unreadable_ipv6_table_is_unreadable(lan, name, content):
+    lan(v6=tcp6_at(("::", HTTP, "0A", SELF)))
+    if content is None:
+        (lan.path / name).unlink()
+    else:
+        (lan.path / name).write_text(content, encoding="ascii")
+    assert portowner.run(HTTP, address=f"[{LAN6}]") == UNREADABLE
+
+
+def test_a_bad_tcp_table_is_unreadable_for_an_own_address(lan):
+    lan("not a table\n", trie=fib_trie((LAN, 32)))
+    assert portowner.run(HTTP, address=LAN) == UNREADABLE
+
+
+@pytest.mark.parametrize("address", ["8.8.8.8", "127.0.0.1", "[fd00:ec2::254]", "fd00::20", ""])
+def test_run_refuses_an_address_that_is_not_private(lan, address):
+    lan()
+    assert portowner.run(HTTP, address=address) == UNREADABLE
+
+
+def test_the_loopback_check_is_unchanged_without_an_address(lan):
+    lan(tcp_at((LAN, HTTP, "0A", OTHER), ("127.0.0.1", HTTP, "0A", SELF)), trie=fib_trie((LAN, 32)))
+    assert portowner.run(HTTP) == {"ok": True, "owner": "self"}
+
+
+def test_cli_passes_the_address_and_prints_only_the_word(lan, capsys):
+    lan(tcp_at(("0.0.0.0", HTTP, "0A", OTHER)), trie=fib_trie((LAN, 32)))
+    out = _cli(["--port-owner", str(HTTP), "--address", LAN], capsys)
+    assert out == '{"ok":true,"owner":"other"}\n'
+    out = _cli(["--address", f"[{LAN6}]", "--port-owner", str(HTTP)], capsys)
+    assert out == '{"ok":true,"owner":"remote"}\n'
+    for leak in (LAN, LAN6, str(OTHER), str(lan.path), "fib_trie", "/proc"):
+        assert leak not in out
+
+
+def test_cli_without_an_address_calls_the_loopback_check(monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(portowner, "run", lambda *args, **kwargs: seen.append((args, kwargs)) or {"ok": True, "owner": "none"})
+    _cli(["--port-owner", "3000"], capsys)
+    _cli(["--port-owner", "3000", "--address", LAN], capsys)
+    assert seen == [((3000,), {}), ((3000,), {"address": LAN})]
+
+
+@pytest.mark.parametrize("argv", [
+    ["--address", LAN], ["--address", LAN, "--json"], ["--address", LAN, "--install-info"],
+    ["--port-owner", "3000", "--address", LAN, "--address", LAN],
+    ["--port-owner", "3000", "--address", "8.8.8.8"], ["--port-owner", "3000", "--address", "fd00::20"],
+    ["--port-owner", "3000", "--address", "[FD00::20]"], ["--port-owner", "3000", "--address", "127.0.0.1"],
+    ["--port-owner", "3000", "--address", "[fd00:ec2::254]"], ["--port-owner", "3000", "--address", "192.168.1.020"],
+    ["--port-owner", "3000", "--address", ""], ["--port-owner", "3000", "--address"],
+])
+def test_cli_refuses_a_bad_address_with_exit_2(monkeypatch, capsys, argv):
+    monkeypatch.setattr(portowner, "run", lambda *args, **kwargs: pytest.fail("must not run"))
+    with pytest.raises(SystemExit) as raised:
+        cli.main(argv)
+    assert raised.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "usage:" in captured.err
+
+
+def test_cli_turns_any_surprise_with_an_address_into_unreadable(monkeypatch, capsys):
+    def boom(*args, **kwargs):
+        raise RuntimeError("secret /proc/net/fib_trie detail 192.168.1.20")
+
+    monkeypatch.setattr(portowner, "run", boom)
+    out = _cli(["--port-owner", "3000", "--address", LAN], capsys)
+    assert json.loads(out) == UNREADABLE and LAN not in out

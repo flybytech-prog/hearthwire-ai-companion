@@ -138,8 +138,9 @@ ColumnLayout {
     // whichever pane has the focus.
     readonly property bool localSite: chatView.siteId === "local"
         || (!!chatView.web && chatView.web.splitShown === true && chatView.siteIdB === "local")
-    // Local or an added site on this computer is shown in either pane: owner
-    // problems are said whichever pane has the focus.
+    // Local or an added site on this computer or the home network (all are
+    // owner-checked) is shown in either pane: owner problems are said
+    // whichever pane has the focus.
     readonly property bool ownerCheckedSite: ChatSites.ownerChecked(chatView.siteId, chatView.customUrls,
                                                                     chatView.userSites)
         || (!!chatView.web && chatView.web.splitShown === true

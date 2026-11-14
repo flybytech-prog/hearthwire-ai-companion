@@ -3558,8 +3558,11 @@ TestCase {
         compare(note.text, "Not encrypted on your network. https is recommended.")
         verify(help.visible)
         verify(help.toolTipText.indexOf("Anyone on your network can read and change this traffic.") === 0)
+        verify(help.toolTipText.indexOf("For a server on this computer, use localhost") > 0, "LOW-2")
         address.text = "https://192.168.1.20:3000"
-        tryVerify(function () { return !note.visible }, 3000)
+        tryVerify(function () { return note.text === "For a server on this computer, use localhost." }, 3000)
+        verify(note.visible)
+        verify(!help.visible)
         address.text = "http://localhost:3000"
         tryVerify(function () { return note.visible }, 3000)
         compare(note.text, "Checked before loading: the program on this port must be yours or the system's.")
@@ -3577,7 +3580,25 @@ TestCase {
                 "Write the IP address as four numbers, like 192.168.1.20, or IPv6 in its short form, like [fd00::1].")
         address.text = "http://169.254.169.254/"
         partOf(page, "editorSave").clicked()
-        compare(partOf(page, "editorError").text, "Link-local addresses (169.254.x.x, fe80::) can't be added.")
+        compare(partOf(page, "editorError").text,
+                "Link-local and cloud metadata addresses (169.254.x.x, fe80::, fd00:ec2::) can't be added.")
+        address.text = "http://[fd00:ec2::254]/"
+        partOf(page, "editorSave").clicked()
+        compare(partOf(page, "editorError").text,
+                "Link-local and cloud metadata addresses (169.254.x.x, fe80::, fd00:ec2::) can't be added.")
+        // REV L-1: a short name is most likely a device on the network.
+        var shortName = "http is allowed only for this computer (localhost, 127.0.0.1, [::1]) or a home-network IP address like 192.168.1.20. Other names need https and a full name, like nas.example.org."
+        ;["http://nas:3000/", "https://nas/", "http://NAS/"].forEach(function (url) {
+            address.text = url
+            partOf(page, "editorSave").clicked()
+            compare(partOf(page, "editorError").text, shortName, url)
+        })
+        ;["http://3232235777/", "http://0x7f000001/", "http://ip6-localhost/", "http://localhost./",
+          "http://foo.localhost/"].forEach(function (url) {
+            address.text = url
+            partOf(page, "editorSave").clicked()
+            compare(partOf(page, "editorError").text, "On this computer, use localhost, 127.0.0.1 or [::1].", url)
+        })
         address.text = "https://8.8.8.8/"
         partOf(page, "editorSave").clicked()
         compare(partOf(page, "editorError").text,
@@ -4060,6 +4081,24 @@ TestCase {
         compare(sites[0].url, testCase.lechatMoved.url)
         compare(JSON.parse(page.cfg_chatSites), ["claude", sites[0].id])
         compare(generalPart(page, "removalWarning").visible, true)
+    }
+
+    // SEC INFO-3: an add shows a port that isn't the scheme's default.
+    function test_backupAddsShowANonDefaultPort() {
+        var page = backupPage()
+        Plasmoid.configuration.chatUserSites = "[]"
+        page.cfg_chatUserSites = "[]"
+        importing(page, {chatUserSites: userSites([
+            {id: "user-0000a001", name: "NAS", url: "http://192.168.77.10:3000/"},
+            {id: "user-0000a002", name: "V6", url: "http://[fd00:77::10]:80/"},
+            {id: "user-0000a003", name: "Secure", url: "https://10.0.0.5:8443/"},
+            {id: "user-0000a004", name: "Plain", url: "https://chat.example.org:443/x"}])})
+        compare(generalPart(page, "backupAddressChanges").text,
+                ["This changes 4 chat sites or addresses:",
+                 "Adds NAS (192.168.77.10:3000, not encrypted)",
+                 "Adds V6 ([fd00:77::10], not encrypted)",
+                 "Adds Secure (10.0.0.5:8443)",
+                 "Adds Plain (chat.example.org)"].join("\n"))
     }
 
     // Task 006: an http add says "not encrypted".

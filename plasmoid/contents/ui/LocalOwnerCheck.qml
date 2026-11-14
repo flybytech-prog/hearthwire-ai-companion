@@ -19,19 +19,24 @@ Item {
 
     property string sourceName: ""
     property int port: 0
+    // The home-network address checked with the port, "" for this computer.
+    property string address: ""
     // See ChatStorage.firstRun.
     property int run: ChatStorage.firstRun(Date.now(), Math.random())
     readonly property bool busy: ownerCheck.sourceName !== ""
 
-    // problem: "" (self or system), "not-running", "other" or "owner-unknown".
+    // problem: "" (self or system; with an address also remote: not this
+    // computer), "not-running", "other" or "owner-unknown".
     signal finished(int port, string problem)
 
-    function start(port) {
+    // address (optional): a home-network site's host (OllamaChat.ownerCommand).
+    function start(port, address) {
         ownerCheck.cancel()
         ownerCheck.run = ChatStorage.nextRun(ownerCheck.run)
         ownerCheck.port = port
+        ownerCheck.address = typeof address === "string" ? address : ""
         var command = OllamaChat.ownerCommand(port, ownerCheck.run,
-            Math.max(0, ChatStorage.validInt(ownerCheck.appletId)))
+            Math.max(0, ChatStorage.validInt(ownerCheck.appletId)), ownerCheck.address)
         if (command === "") {
             ownerCheck.finished(port, "owner-unknown")
             return
@@ -55,7 +60,12 @@ Item {
             return
         ownerTimer.stop()
         ownerCheck.sourceName = ""
-        ownerCheck.finished(ownerCheck.port, OllamaChat.ownerProblem(reply))
+        // remote: the address isn't this computer's, so no listener here
+        // can answer; only for a check that named one.
+        if (ownerCheck.address !== "" && reply && reply.ok === true && reply.owner === "remote")
+            ownerCheck.finished(ownerCheck.port, "")
+        else
+            ownerCheck.finished(ownerCheck.port, OllamaChat.ownerProblem(reply))
     }
 
     Plasma5Support.DataSource {
@@ -65,7 +75,8 @@ Item {
         onNewData: (source, data) => {
             ownerSource.disconnectSource(source)
             // Only stdout's known words are used.
-            ownerCheck.ownerDone(source, OllamaChat.parseOwnerReply(data["exit code"], data["stdout"]))
+            ownerCheck.ownerDone(source, OllamaChat.parseOwnerReply(data["exit code"], data["stdout"],
+                                                                    ownerCheck.address !== ""))
         }
     }
 

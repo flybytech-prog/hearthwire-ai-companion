@@ -587,6 +587,12 @@ USER_URL_CASES = [
     ("http://[FDFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF]:65535/", "", V), ("http://[fbff::1]/", "ip-literal", ""),
     ("http://[fe00::1]/", "ip-literal", ""),
     ("http://[fe80::1]/", "link-local", ""), ("https://[febf::1]/", "link-local", ""), ("http://[fec0::1]/", "ip-literal", ""),
+    # Round 2 (SEC LOW-1): fd00:ec2::/32 is the cloud (AWS) IPv6 metadata range, refused as link-local.
+    ("http://[fd00:ec2::254]/", "link-local", ""), ("https://[fd00:ec2::254]/", "link-local", ""),
+    ("http://[fd00:ec2::]/", "link-local", ""), ("http://[fd00:ec2:ffff:ffff:ffff:ffff:ffff:ffff]:8080/", "link-local", ""),
+    ("http://[FD00:EC2::254]/", "link-local", ""), ("http://[fd00:0ec2::254]/", "ip-form", ""),
+    ("http://[fd00:ec1:ffff:ffff:ffff:ffff:ffff:ffff]/", "", V), ("http://[fd00:ec3::1]/", "", V),
+    ("http://[fd01:ec2::1]/", "", V), ("http://[fd00::ec2]/", "", V),
     ("http://[fe80::1%25eth0]/", "malformed", ""), ("http://[fe80::1%eth0]/", "malformed", ""),
     ("http://[2001:db8::1]/", "ip-literal", ""), ("https://[2606:4700::1111]/", "ip-literal", ""),
     ("http://[::ffff:192.168.1.1]/", "malformed", ""), ("http://[::ffff:c0a8:101]/", "ip-literal", ""),
@@ -795,7 +801,7 @@ def ipv6_expected(literal):
         return ("ip-form", "")
     if address == ipaddress.IPv6Address("::1"):
         return ("", "loopback")
-    if address in ipaddress.IPv6Network("fe80::/10"):
+    if address in ipaddress.IPv6Network("fe80::/10") or address in ipaddress.IPv6Network("fd00:ec2::/32"):
         return ("link-local", "")
     if address in ipaddress.IPv6Network("fc00::/7"):
         return ("", "private")
@@ -804,8 +810,10 @@ def ipv6_expected(literal):
 
 def test_ipv6_addresses_get_the_code_ipaddress_gives():
     rng = random.Random(60062)
-    for _ in range(400):
+    for index in range(400):
         groups = random_groups(rng, rng.choice(IPV6_FIRST_GROUPS))
+        if index % 8 == 0:  # Around the metadata range (LOW-1): fd00:ec2::/32 and its neighbours.
+            groups[:2] = [0xFD00, rng.choice((0x0EC1, 0x0EC2, 0x0EC2, 0x0EC3))]
         for literal in ipv6_spellings(rng, groups):
             url = f"{rng.choice(('http', 'https'))}://[{literal}]/"
             if len(literal) > 39:
@@ -877,6 +885,11 @@ def url_fuzz_cases():
     for _ in range(250):
         hosts.extend(f"[{literal}]" for literal in ipv6_spellings(rng, random_groups(rng, rng.choice(IPV6_FIRST_GROUPS))))
     hosts.extend(("[fe80::1%25eth0]", "[::ffff:192.168.1.1]", "[fd00::1", "fd00::1]", "[]", "[fd00::g]", "[:]"))
+    metadata = random.Random(60065)  # Round 2 (LOW-1): fd00:ec2::/32 and its neighbours, its own seed.
+    for _ in range(40):
+        groups = random_groups(metadata, 0xFD00)
+        groups[1] = metadata.choice((0x0EC1, 0x0EC2, 0x0EC2, 0x0EC3))
+        hosts.extend(f"[{literal}]" for literal in ipv6_spellings(metadata, groups))
     cases = []
     for host in hosts:
         for _ in range(8 if host in URL_FUZZ_NAMES else 2):

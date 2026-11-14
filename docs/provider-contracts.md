@@ -973,18 +973,48 @@ before each main-frame navigation to this computer
 `plasmoid/contents/ui/OllamaChat.js` (`ownerCommand`), from integers only:
 
     env HEARTHWIRE_RUN=<n> HEARTHWIRE_APPLET=<applet> python3 -P -m hearthwire --port-owner <port>
+    env HEARTHWIRE_RUN=<n> HEARTHWIRE_APPLET=<applet> python3 -P -m hearthwire --port-owner <port> --address <ip>
 
 The env words only keep DataSource names unique (as for the Stay signed in
 helper); the helper ignores them. The command carries no prompt, model name,
-or address, touches no credentials, and makes no network request.
+or web address, touches no credentials, and makes no network request.
 
-- Reads only `/proc/net/tcp` and `/proc/net/tcp6`; opens no socket and starts
-  no program (`src/hearthwire/core/portowner.py`).
+The `--address` form (task 006, round 2) is for a chat site you added by a
+home-network IP address. `<ip>` is exactly that site's host:
+- a canonical dotted quad in `10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16`
+  (`192.168.1.20`);
+- or a bracketed, lower-case, short-form IPv6 literal in `fc00::/7` outside
+  `fd00:ec2::/32` (`[fd00::20]`).
+
+Anything else (loopback, public, link-local, upper case, leading zeros, a
+zone id, IPv6 without brackets) exits 2. If `<ip>` is not one of this
+computer's own addresses, a connection to it leaves the machine, so no local
+listener can take it: the reply is `remote`. If it is one, another local user
+could listen on it, so the usual owner check applies to the listeners on
+`<ip>` and on the wildcard. Loopback sites, Ollama and Local web UI keep the
+plain form.
+
+- Reads only `/proc/net/tcp` and `/proc/net/tcp6`, and with `--address`
+  also `/proc/net/fib_trie`, `/proc/net/if_inet6` and `/proc/net/ipv6_route`;
+  opens no socket and starts no program (`src/hearthwire/core/portowner.py`).
+- With `--address`, this computer's addresses come from the kernel's tables:
+  - IPv4: every `LOCAL` route in `fib_trie`, in every table. A `/N` local
+    route makes its whole range local, so `ip route add local` (AnyIP)
+    counts.
+  - IPv6: the addresses in `if_inet6`, and every `ipv6_route` route flagged
+    `RTF_LOCAL` (`0x80000000`).
+  - There is no bind test: with `net.ipv4.ip_nonlocal_bind` any user can
+    bind any address, and that says nothing about where a connection goes.
+  - A missing or unreadable table, a line of another shape, or a `fib_trie`
+    without a single `LOCAL` route gives `unreadable`.
 - Counts sockets in state LISTEN (`0A`) on `<port>` whose local address a
   connection to `127.0.0.1`, `localhost`, or `[::1]` can reach: `127.0.0.1`,
   `0.0.0.0`, `::1`, `::`, `::ffff:127.0.0.1`, `::ffff:0.0.0.0`. Other bind
   addresses (for example `127.0.0.2` or a LAN address) and connections in any
-  other state are ignored.
+  other state are ignored. With `--address <ip>`, the counted addresses are:
+  - for an IPv4 `<ip>`: `<ip>` and `0.0.0.0`, plus `::`, `::ffff:<ip>` and
+    `::ffff:0.0.0.0` in `tcp6` (dual-stack sockets);
+  - for an IPv6 `<ip>`: `<ip>` and `::`.
 - Trusted owners are your own uid, root (uid 0), and the system `ollama`
   account when that user exists (`getpwnam("ollama")`).
 - A missing `/proc/net/tcp6` (kernel without IPv6) counts as no IPv6 sockets.
@@ -999,15 +1029,18 @@ Reply (one JSON object on stdout, exit 0):
 | `{"ok":true,"owner":"self"}` | Every listener is yours |
 | `{"ok":true,"owner":"system"}` | Every listener is trusted and at least one is root or `ollama` (the packaged `ollama.service`) |
 | `{"ok":true,"owner":"other"}` | At least one listener belongs to another user |
+| `{"ok":true,"owner":"remote"}` | Only with `--address`: the address is not this computer's, so no local listener can answer |
 | `{"ok":false,"error":"unreadable"}` | The tables could not be read or parsed, or anything unexpected happened |
 
 Replies never contain uids, user names, inodes, or addresses. `<port>` is a
 plain decimal integer from 1 to 65535 (at most 5 digits; no sign, leading
-zero, spaces, or underscores), `--port-owner` may be given only once, and it
-cannot be combined with any other option;
+zero, spaces, or underscores), `--port-owner` and `--address` may each be
+given only once, `--address` needs `--port-owner`, and they can't be
+combined with any other option;
 otherwise argparse exits 2 with a usage message on stderr and prints nothing on
-stdout. The plasmoid sends (or, for Local web UI, loads) only for `self` or `system`
-and fails closed on everything else, including a non-zero exit, any other
+stdout. The plasmoid sends (or, for Local web UI and the sites on this
+computer, loads) only for `self` or `system`, and a home-network site also
+for `remote`, and fails closed on everything else, including a non-zero exit, any other
 output (`bad-reply`), or no answer within 15 seconds. For Local web UI, a
 server bound only to another loopback address (for example `127.0.0.2`) is
 not seen and so reads as `none`: nothing loads.

@@ -874,22 +874,35 @@ function validInt(value) {
 // The helper command that reports who listens on port. The env words only
 // make the DataSource source name unique (same shape as
 // ChatStorage.helperPrefix); the helper ignores them. Invalid → "".
-function ownerCommand(port, run, applet) {
+// The --address a home-network site's check names (task 006, LOW-2): a
+// dotted quad or a bracketed lower-case IPv6 literal, as ChatSites stores
+// the host of a private added site. The helper refuses any other.
+var OWNER_ADDRESS = /^(?:(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}|\[[0-9a-f:]{2,39}\])$/
+
+// address (optional): only for an added site on the home network; then the
+// helper may also answer "remote" (not this computer). Quoted, as "[" is a
+// shell pattern character.
+function ownerCommand(port, run, applet, address) {
     if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535
             || validInt(run) < 0 || validInt(applet) < 0)
         return ""
+    var named = address !== undefined && address !== null && address !== ""
+    if (named && (typeof address !== "string" || !OWNER_ADDRESS.test(address)))
+        return ""
     return "env HEARTHWIRE_RUN=" + run + " HEARTHWIRE_APPLET=" + applet
-        + " python3 -P -m hearthwire --port-owner " + port
+        + " python3 -P -m hearthwire --port-owner " + port + (named ? " --address '" + address + "'" : "")
 }
 
-function parseOwnerReply(exitCode, stdout) {
+// withAddress: the check named an --address, so "remote" is a known word
+// too; never for Ollama.
+function parseOwnerReply(exitCode, stdout, withAddress) {
     var bad = { ok: false, error: "bad-reply" }
     if (exitCode !== 0 || typeof stdout !== "string" || stdout.length > 200)
         return bad
     var reply = parseObject(stdout)
     if (reply === null)
         return bad
-    if (reply.ok === true && OWNERS.indexOf(reply.owner) >= 0)
+    if (reply.ok === true && (OWNERS.indexOf(reply.owner) >= 0 || (withAddress === true && reply.owner === "remote")))
         return { ok: true, owner: reply.owner }
     if (reply.ok === false && OWNER_ERRORS.indexOf(reply.error) >= 0)
         return { ok: false, error: reply.error }

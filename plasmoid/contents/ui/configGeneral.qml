@@ -495,7 +495,15 @@ KCM.SimpleKCM {
                 effectiveUrl: ChatSites.homeUrl,
                 shownText: UsageLogic.shownText,
                 parseUserSites: ChatSites.parseUserSites,
-                hostOf: function (url) { return ChatSites.shortHost(ChatSites.displayHost(url)) }
+                // An added site's host, with a port that isn't its scheme's
+                // default (SEC INFO-3).
+                hostOf: function (url) {
+                    var host = ChatSites.shortHost(ChatSites.displayHost(url))
+                    var parsed = ChatSites.parseUserUrl(url)
+                    var standard = parsed && parsed.scheme === "http" ? "80" : "443"
+                    return host !== "" && parsed && parsed.port !== "" && parsed.port !== standard
+                        ? host + ":" + parsed.port : host
+                }
             })
         page.backupExportedAt = reply.exportedAt
         page.confirmingImport = true

@@ -32,6 +32,14 @@ def _port(value: str) -> int:
     return int(value)
 
 
+def _private_address(value: str) -> str:
+    """--address: exactly a private added site's host (192.168.1.20, [fd00::20]); see portowner."""
+    if portowner.private_address(value) is None:
+        raise argparse.ArgumentTypeError(
+            "expected a canonical home-network IP address (10/8, 172.16/12, 192.168/16, or [IPv6] in fc00::/7)")
+    return value
+
+
 def _item_id(value: str) -> int:
     """A library item id: a plain decimal 1..2**31."""
     number = _bounded_int(value)
@@ -189,6 +197,13 @@ def parser() -> argparse.ArgumentParser:
         "this loopback port (reads /proc/net only; no network, no credentials).",
     )
     result.add_argument(
+        "--address",
+        type=_private_address,
+        metavar="IP",
+        help="With --port-owner: a home-network address instead of loopback; 'remote' when it isn't "
+        "one of this computer's own addresses (reads /proc/net only).",
+    )
+    result.add_argument(
         "--install-info",
         action="store_true",
         help="Say where the helper and the widget are installed (user, system or other) and which "
@@ -282,6 +297,8 @@ def _check_helper_arguments(args: argparse.Namespace, argument_parser: argparse.
     --usage-history, --settings-backup and --migrate stand alone."""
     if args.method is not None and args.vault is None:
         argument_parser.error("--method needs --vault")
+    if args.address is not None and args.port_owner is None:
+        argument_parser.error("--address needs --port-owner")
     if args.vault is not None:
         if args.method is not None and args.vault not in vault.METHOD_OPERATIONS:
             argument_parser.error(f"--method cannot be combined with --vault {args.vault}")
@@ -390,7 +407,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = argument_parser.parse_args(argv)
     _check_helper_arguments(args, argument_parser)
     if args.port_owner is not None:
-        payload = _port_owner_reply(args.port_owner)
+        payload = _port_owner_reply(args.port_owner, args.address)
     elif args.install_info:
         payload = _helper_reply(installinfo.run)
     elif args.web_data == "purge":
@@ -447,10 +464,10 @@ def _dropped_reply(value: str) -> dict[str, object]:
         return {"ok": False, "error": "os-error"}
 
 
-def _port_owner_reply(port: int) -> dict[str, object]:
+def _port_owner_reply(port: int, address: str | None = None) -> dict[str, object]:
     """The owner word only; any surprise fails closed as unreadable."""
     try:
-        return portowner.run(port)
+        return portowner.run(port) if address is None else portowner.run(port, address=address)
     except Exception:  # noqa: BLE001 - fail closed with a code only
         return {"ok": False, "error": "unreadable"}
 

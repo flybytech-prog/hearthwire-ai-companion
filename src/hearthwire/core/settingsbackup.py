@@ -612,7 +612,8 @@ def _user_site_check(url: object) -> tuple[str, str]:
     11 an IPv4 literal (last label numeric or hex): ip-form when not canonical,
        link-local in 169.254/16, private in 10/8, 172.16/12 and 192.168/16, else ip-literal;
     12 a bracketed IPv6 literal: ip-form when not canonical (or not an address),
-       link-local in fe80::/10, private in fc00::/7, else ip-literal;
+       link-local in fe80::/10 and fd00:ec2::/32 (cloud metadata), private in fc00::/7,
+       else ip-literal;
     13 a DNS name: http-not-allowed over http, public over https.
     """
     if not isinstance(url, str) or url == "":
@@ -641,9 +642,12 @@ def _user_site_check(url: object) -> tuple[str, str]:
         literal = host[1:-1]
         if canonical_ipv6(literal) != literal:
             return ("ip-form", "")
-        first = _ipv6_groups(literal)[0]  # type: ignore[index]  # canonical, so it parses.
+        groups = _ipv6_groups(literal)
+        first, second = groups[0], groups[1]  # type: ignore[index]  # canonical, so it parses.
         if first & 0xFFC0 == 0xFE80:
             return ("link-local", "")
+        if first == 0xFD00 and second == 0x0EC2:
+            return ("link-local", "")  # fd00:ec2::/32, the cloud (AWS) IPv6 metadata range (006 LOW-1).
         if first & 0xFE00 == 0xFC00:
             return ("", "private")
         return ("ip-literal", "")

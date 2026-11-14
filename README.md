@@ -237,6 +237,10 @@ starts with Plasma while it remains on a panel.
       UI: the program on that port must belong to you, to root or to the
       `ollama` account, never to another user. The editor says so under the
       address. If the check fails, only the pages on that port go blank.
+    - A home-network address is checked too. If it is one of this
+      computer's own addresses, another user on this computer could be
+      listening there, so the same owner check applies. Otherwise the page
+      loads. For a server on this computer, use `localhost`.
     - Plain `http://` to a home-network address isn't encrypted. The editor
       notes it, the table shows the address as `http://…`, and a backup
       import says "not encrypted". Anyone on your network can read and
@@ -257,7 +261,8 @@ starts with Plasma while it remains on a panel.
         `0xc0.168.1.1`, `[fd00:0:0:0:0:0:0:1]`; write `[fd00::1]`), because
         the page must match the address the engine reports;
       - link-local addresses (`169.254.x.x`, `fe80::`), which aren't
-        stable and include the cloud metadata address;
+        stable and include the cloud metadata address, and the IPv6 cloud
+        metadata range `fd00:ec2::/32`;
       - every other IP address, including public ones and `100.64.0.0/10`
         (carrier-grade NAT, also Tailscale's IPv4 range): use a name.
         Tailscale's IPv6 addresses are inside `fc00::/7` and work.
