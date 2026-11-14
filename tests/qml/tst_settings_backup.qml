@@ -404,6 +404,37 @@ TestCase {
         return site("user-0000beef", "Pi", "https://pi.ai/talk")
     }
 
+    // Round 3 (SEC L-2b): an id the applied settings hold but the page can't
+    // read has no known host, so a backup entry with it is renewed too.
+    function test_planRenewsAnUnreadableId() {
+        var evil = site("user-0000beef", "Pi", "https://evil.example/")
+        var tools = renewTools([mistral])
+        tools.unreadableIds = ["user-0000beef"]
+        var result = SettingsBackup.importPlan({chatUserSites: sitesText([mistral, evil]),
+                                                chatDefaultSite: "user-0000beef"}, 0, tools)
+        compare(result.settings.chatUserSites,
+                sitesText([mistral, site("user-0000aaaa", "Pi", "https://evil.example/")]))
+        compare(result.settings.chatDefaultSite, "user-0000aaaa")
+        verify(tools.asked[0].indexOf("user-0000beef") >= 0, "never the unreadable id itself")
+        // Listed as an add with a new id; the old one goes through the
+        // removal warning (it is in the applied text).
+        compare(SettingsBackup.addressChanges({chatUserSites: sitesText([mistral])}, result, addressTools()),
+                [{kind: "add", id: "user-0000aaaa", name: "Pi", host: "evil.example"}])
+        // An unreadable entry whose url names a host is compared by it: the
+        // same host keeps its id, another host is renewed.
+        var hosted = renewTools([mistral])
+        hosted.unreadableHosts = {"user-0000beef": "pi.ai"}
+        compare(SettingsBackup.importPlan({chatUserSites: sitesText([pi()])}, 0, hosted).settings.chatUserSites,
+                sitesText([pi()]))
+        hosted = renewTools([mistral])
+        hosted.unreadableHosts = {"user-0000beef": "pi.ai"}
+        compare(SettingsBackup.importPlan({chatUserSites: sitesText([evil])}, 0, hosted).settings.chatUserSites,
+                sitesText([site("user-0000aaaa", "Pi", "https://evil.example/")]))
+        // Without unreadable ids it keeps its id (a new site).
+        var plain = SettingsBackup.importPlan({chatUserSites: sitesText([evil])}, 0, renewTools([mistral]))
+        compare(plain.settings.chatUserSites, sitesText([evil]))
+    }
+
     // No usable new id: the list is dropped (the page keeps its own).
     function test_planDropsAMovedSiteWithoutANewId() {
         var moved = site(mistral.id, "Le Chat", "https://other.example.org/")

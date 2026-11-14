@@ -189,7 +189,8 @@ KCM.SimpleKCM {
         var ids = OllamaChat.allSiteIds(ChatSites.siteIds(page.userSites)).filter(function (id) {
             return id === siteId ? enabled : page.enabledIds.indexOf(id) >= 0
         })
-        // Added ids this page can't read stay as they were.
+        // Added ids this page can't read stay as they were; readable ones
+        // follow their checkbox like any other site.
         var stored = []
         try {
             stored = JSON.parse(page.cfg_chatSites)
@@ -197,11 +198,14 @@ KCM.SimpleKCM {
         }
         if (Array.isArray(stored))
             ids = ids.concat(stored.filter(function (id, index) {
-                return ChatSites.isUserSiteId(id) && ids.indexOf(id) < 0 && stored.indexOf(id) === index
+                return ChatSites.isUserSiteId(id) && page.userSiteIds.indexOf(id) < 0
+                    && ids.indexOf(id) < 0 && stored.indexOf(id) === index
             }))
         page.cfg_chatSites = JSON.stringify(ids)
-        if (ids.indexOf(page.cfg_chatDefaultSite) < 0 && ids.length > 0)
-            page.cfg_chatDefaultSite = page.tableIds.filter(function (id) { return ids.indexOf(id) >= 0 })[0]
+        // Open first: the first enabled row, if any (an unreadable id has no row).
+        var shown = page.tableIds.filter(function (id) { return ids.indexOf(id) >= 0 })
+        if (ids.indexOf(page.cfg_chatDefaultSite) < 0 && shown.length > 0)
+            page.cfg_chatDefaultSite = shown[0]
     }
 
     // Saved custom address of one site, "" when it uses the built-in one.

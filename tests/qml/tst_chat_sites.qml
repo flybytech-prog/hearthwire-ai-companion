@@ -201,6 +201,33 @@ TestCase {
         compare(err("Claude 2"), "")
     }
 
+    // Round 3 (SEC I-5): no format (Cf) or private-use (Co) code point,
+    // also those outside Default_Ignorable; their neighbours are allowed.
+    function test_userSiteNameRefusesFormatAndPrivateUse() {
+        var err = ChatSites.userSiteNameError
+        ;["\u0600", "\u0605", "\u06dd", "\u070f", "\u0890", "\u0891", "\u08e2", "\ud804\udcbd", "\ud804\udccd", "\ud80d\udc30", "\ud80d\udc3f", "\ue000", "\uf8ff", "\udb80\udc00", "\udbbf\udffd", "\udbc0\udc00", "\udbff\udffd", "\udb40\udc01", "\udb40\udc7f"].forEach(function (mark, at) {
+            compare(err("A" + mark + "B"), "name-chars", "refused " + at)
+            compare(err("Claude" + mark), "name-chars", "after Claude " + at)
+        })
+        ;["\u05ff", "\u0606", "\u06dc", "\u06de", "\u070e", "\u0710", "\u088f", "\u0892", "\u08e1", "\u08e3", "\ud804\udcbc", "\ud804\udcbe", "\ud80d\udc2f", "\ud80d\udc40", "\ud7fb", "\uf900", "\udb7f\udfff"].forEach(function (mark, at) {
+            compare(err("A" + mark + "B"), "", "allowed " + at)
+        })
+        // Unassigned (Cn) stays allowed: it renders as a box.
+        compare(err("A\u0378B"), "")
+    }
+
+    // The shared Cf+Co table: Python 3.14 unicodedata 16.0.0, as the helper
+    // uses it (settingsbackup.py); a few category facts.
+    function test_formatPrivateTable() {
+        compare(ChatSites.FORMAT_PRIVATE_RANGES, "ad,600-605,61c,6dd,70f,890-891,8e2,180e,200b-200f,202a-202e,2060-2064,2066-206f,e000-f8ff,feff,fff9-fffb,110bd,110cd,13430-1343f,1bca0-1bca3,1d173-1d17a,e0001,e0020-e007f,f0000-ffffd,100000-10fffd")
+        ;[0xad, 0x600, 0x70f, 0x200b, 0xe000, 0xf8ff, 0xfeff, 0x110bd, 0xe0001, 0xf0000, 0x10fffd].forEach(function (point) {
+            verify(ChatSites.isFormatOrPrivate(point), point.toString(16))
+        })
+        ;[0x41, 0xac, 0x5ff, 0x606, 0xdfff, 0xf900, 0xe0002, 0xe0080, 0xeffff, 0x10fffe, -1, 0x110000].forEach(function (point) {
+            verify(!ChatSites.isFormatOrPrivate(point), point.toString(16))
+        })
+    }
+
     // The letter-or-digit table, against a few category facts.
     function test_isLetterOrDigit() {
         ;[0x30, 0x39, 0x41, 0x7a, 0xaa, 0xb2, 0x3a3, 0x661, 0x4e00, 0xac00, 0x2160, 0x1f100, 0x20000,
@@ -280,6 +307,19 @@ TestCase {
         // A page name that looks like an id doesn't hide a removal.
         var spoof = JSON.stringify([{id: "user-00000001", name: "user-3fa9c01b", url: "https://a.example/"}])
         compare(ChatSites.removedUserSiteIds(JSON.stringify([testCase.mistral]), spoof), ["user-3fa9c01b"])
+    }
+
+    // Round 3 (SEC L-2b): the host an unreadable entry's url still names.
+    function test_rawUserSiteHosts() {
+        var text = JSON.stringify([testCase.mistral,
+            {id: "user-0000beef", name: "Pi", url: "http://Pi.AI./x", local_kind: "private"},
+            {id: "user-00000001", name: "x", url: 7}, {id: "user-00000002", url: "ftp://a.example/"},
+            {id: "claude", url: "https://evil.example/"}, "user-00000003",
+            {id: "user-0000beef", url: "https://second.example/"}])
+        compare(ChatSites.rawUserSiteHosts(text), {"user-3fa9c01b": "chat.mistral.ai", "user-0000beef": "pi.ai"})
+        compare(ChatSites.rawUserSiteHosts("[{"), {})
+        compare(ChatSites.rawUserSiteHosts("{}"), {})
+        compare(ChatSites.rawUserSiteHosts(undefined), {})
     }
 
     function test_userSiteHosts() {

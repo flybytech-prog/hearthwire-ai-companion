@@ -357,20 +357,30 @@ function importPlan(settings, helperDropped, tools) {
 // name it follow. tools: currentUserSites (the page's), userSiteHosts,
 // newUserSiteId(excluded), excludedIds (ids still owing a delete); without
 // them nothing is renewed, and an id that can't be renewed drops the list.
+// tools.unreadableHosts: {id: host} of applied entries the page can't read
+// whose url still names a host (compared like the page's own);
+// tools.unreadableIds: those with no host at all, renewed whatever the
+// backup's host (fails closed).
 function renewMovedSites(plan, tools) {
     if (!has(plan.settings, "chatUserSites") || typeof tools.userSiteHosts !== "function"
             || typeof tools.newUserSiteId !== "function")
         return
     var list = JSON.parse(plan.settings.chatUserSites)
-    var before = tools.userSiteHosts(tools.currentUserSites)
+    // The page's hosts, and for applied entries it can't read the host their
+    // url still names (tools.unreadableHosts).
+    var before = Object.assign({}, isObject(tools.unreadableHosts) ? tools.unreadableHosts : {},
+        tools.userSiteHosts(tools.currentUserSites))
     var after = tools.userSiteHosts(list)
+    var unreadable = Array.isArray(tools.unreadableIds) ? tools.unreadableIds : []
     var excluded = Object.keys(before).concat(Object.keys(after),
-        Array.isArray(tools.excludedIds) ? tools.excludedIds : [])
+        Array.isArray(tools.excludedIds) ? tools.excludedIds : [], unreadable)
     var renamed = {}
     var count = 0
     for (var index = 0; index < list.length; index++) {
         var id = list[index].id
-        if (!has(before, id) || before[id] === after[id])
+        // An id the applied settings hold but the page can't read: its old
+        // host is unknown, so it is renewed too (fails closed, L-2b).
+        if ((!has(before, id) || before[id] === after[id]) && unreadable.indexOf(id) < 0)
             continue
         var fresh = tools.newUserSiteId(excluded)
         if (typeof fresh !== "string" || !/^user-[0-9a-f]{8}$/.test(fresh) || excluded.indexOf(fresh) >= 0) {

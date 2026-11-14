@@ -9986,15 +9986,29 @@ CHAT_REMOVE_USER_SITES_BODY = (
 # Round 2c: a read that isn't ok keeps the last known host of every id it
 # can't read (merge, not replace), so an entry that comes back on another
 # host after a damaged value still counts as moved; an ok read replaces it.
+# Round 3 (SEC L-2b): an unreadable entry with no known host takes the host its
+# url still names (rawUserSiteHosts; a known host wins, so a move made while
+# it was unreadable is still seen), and is then compared as usual. Only an id
+# with no host at all (chatUserSiteUnreadableSeen) counts as moved once it is
+# readable. "moved" is still only ever an id readable now, so an absent or
+# unreadable id is never removed.
 CHAT_SYNC_USER_SITES_BODY = (
     "{ var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites) "
     "var hostsBefore = root.chatUserSiteHostsSeen var hostsNow = ChatSites.userSiteHosts(read.sites) "
     "var hostsKept = Object.assign({}, hostsNow) if (!read.ok) { "
     "Object.keys(hostsBefore).forEach(function (id) { "
-    "if (!Object.prototype.hasOwnProperty.call(hostsKept, id)) hostsKept[id] = hostsBefore[id] }) } "
+    "if (!Object.prototype.hasOwnProperty.call(hostsKept, id)) hostsKept[id] = hostsBefore[id] }) "
+    "var rawHosts = ChatSites.rawUserSiteHosts(Plasmoid.configuration.chatUserSites) "
+    "Object.keys(rawHosts).forEach(function (id) { "
+    "if (!Object.prototype.hasOwnProperty.call(hostsKept, id)) hostsKept[id] = rawHosts[id] }) } "
     "root.chatUserSiteHostsSeen = hostsKept "
+    "var unreadableBefore = root.chatUserSiteUnreadableSeen "
     "var moved = Object.keys(hostsNow).filter(function (id) { "
-    "return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id] }) "
+    "return Object.prototype.hasOwnProperty.call(hostsBefore, id) ? hostsBefore[id] !== hostsNow[id] "
+    ": unreadableBefore.indexOf(id) >= 0 }) "
+    "root.chatUserSiteUnreadableSeen = unreadableBefore.concat( "
+    "ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites)).filter(function (id, index, all) { "
+    "return all.indexOf(id) === index && !Object.prototype.hasOwnProperty.call(hostsKept, id) }) "
     "var removed = [] if (read.ok) { var now = read.sites.map(function (site) { return site.id }) "
     "var seen = root.chatUserSiteIdsSeen root.chatUserSiteIdsSeen = now "
     "if (seen !== null) removed = seen.filter(function (id) { return now.indexOf(id) < 0 }) } "
@@ -10004,6 +10018,17 @@ CHAT_SYNC_USER_SITES_BODY = (
 USER_SITE_HOSTS_BODY = (
     "{ var hosts = {} validUserSites(userSites).forEach(function (entry) { "
     "hosts[entry.id] = normalizeHost(parseUrl(entry.url).host) }) return hosts }"
+)
+# Round 3 (L-2b): the host an unreadable entry's url still names, by the same
+# exact-host rule (parseUrl, normalizeHost); only added-site ids, first wins.
+RAW_USER_SITE_HOSTS_BODY = (
+    "{ var hosts = {} if (typeof text !== \"string\" || text.length > 4 * MAX_USER_SITES_CHARS) return hosts "
+    "var parsed = null try { parsed = JSON.parse(text) } catch (error) { return hosts } "
+    "if (!Array.isArray(parsed)) return hosts parsed.forEach(function (entry) { "
+    "if (entry === null || typeof entry !== \"object\" || !isUserSiteId(entry.id) "
+    "|| typeof entry.url !== \"string\" || Object.prototype.hasOwnProperty.call(hosts, entry.id)) return "
+    "var url = parseUrl(entry.url) if (url !== null && url.host !== \"\") hosts[entry.id] = normalizeHost(url.host) }) "
+    "return hosts }"
 )
 DROP_SITES_BODY = (
     '{ var list = ids !== null && typeof ids === "object" && typeof ids.length === "number" '
@@ -10019,7 +10044,10 @@ MAIN_USER_SITE_PINS = (
     "readonly property bool chatUserSitesOk: root.chatUserSitesRead.ok",
     "property var chatUserSiteIdsSeen: null",
     "property var chatUserSiteHostsSeen: ({})",
-    "root.chatUserSiteHostsSeen = ChatSites.userSiteHosts(root.chatUserSites)",
+    "root.chatUserSiteHostsSeen = Object.assign(ChatSites.rawUserSiteHosts(Plasmoid.configuration.chatUserSites), "
+    "ChatSites.userSiteHosts(root.chatUserSites))",
+    "root.chatUserSiteUnreadableSeen = ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites) "
+    ".filter(function (id) { return !Object.prototype.hasOwnProperty.call(root.chatUserSiteHostsSeen, id) })",
     "signal chatUserSitesRemoved(var ids)",
     "property bool chatWebLoaded: false",
     "readonly property var chatKnownSites: root.chatUserSitesOk "
@@ -10091,8 +10119,12 @@ def _user_site_removal_problems(main, full_representation, view, chat_sites):
             problems.append(f"main.qml: {word} must appear {count} times (declared and its reviewed uses), found {found}")
     if len(_hits(r"\bchatUserSiteIdsSeen\s*=(?!=)", main)) != 2:
         problems.append("chatUserSiteIdsSeen is set only by the ok seed at start and in chatSyncUserSites")
-    if len(_hits(r"\bchatUserSiteHostsSeen\s*=(?!=)", main)) != 2 or len(_hits(r"\bchatUserSiteHostsSeen\b", main)) != 4:
+    if len(_hits(r"\bchatUserSiteHostsSeen\s*=(?!=)", main)) != 2 or len(_hits(r"\bchatUserSiteHostsSeen\b", main)) != 5:
         problems.append("chatUserSiteHostsSeen is set only at start and in chatSyncUserSites, read only there")
+    if len(_hits(r"\bchatUserSiteUnreadableSeen\s*=(?!=)", main)) != 2 \
+            or len(_hits(r"\bchatUserSiteUnreadableSeen\b", main)) != 4 \
+            or len(_hits(r"(?m)^\s*property\s+var\s+chatUserSiteUnreadableSeen\s*:\s*\[\s*\]\s*$", main)) != 1:
+        problems.append("chatUserSiteUnreadableSeen: `[]`, set only at start and in chatSyncUserSites, read only there")
     # (a) A removal on a damaged read: only ids valid in both reads with another host.
     sync = _squashed(_function_body(main, "chatSyncUserSites") or "")
     if "if (read.ok) {" not in sync or not 0 <= sync.find("if (read.ok) {") < sync.find("seen.filter(") \
@@ -10101,6 +10133,9 @@ def _user_site_removal_problems(main, full_representation, view, chat_sites):
     hosts = _function_body(chat_sites, "userSiteHosts")
     if hosts is None or _squashed(hosts) != USER_SITE_HOSTS_BODY:
         problems.append(f"ChatSites.userSiteHosts must be exactly `{USER_SITE_HOSTS_BODY}`")
+    raw_hosts = _function_body(chat_sites, "rawUserSiteHosts")
+    if raw_hosts is None or _squashed(raw_hosts) != RAW_USER_SITE_HOSTS_BODY:
+        problems.append(f"ChatSites.rawUserSiteHosts must be exactly `{RAW_USER_SITE_HOSTS_BODY}`")
     if _hits(r"\bchatWebLoaded\s*=(?!=)", main):
         problems.append("main.qml never sets chatWebLoaded; only FullRepresentation reports it")
     problems += _pin_problems(full_representation, FULL_USER_SITE_PINS, "FullRepresentation.qml")
@@ -10150,12 +10185,12 @@ USER_SITE_REMOVAL_MUTATIONS = {
                            "            removed = (seen || []).filter("),
     # (a) What a damaged read may remove: only ids valid before and now, on another host.
     "moved from the old map": (MAIN_QML, "        var moved = Object.keys(hostsNow).filter(function (id) {\n"
-                               "            return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id]",
+                               "            return Object.prototype.hasOwnProperty.call(hostsBefore, id) ? hostsBefore[id] !== hostsNow[id]",
                                "        var moved = Object.keys(hostsBefore).filter(function (id) {\n"
                                "            return hostsBefore[id] !== hostsNow[id]"),
-    "moved without the old entry": (MAIN_QML, "            return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id]",
-                                    "            return hostsBefore[id] !== hostsNow[id]"),
-    "moved on the same host": (MAIN_QML, " && hostsBefore[id] !== hostsNow[id]\n", "\n"),
+    "moved without the old entry": (MAIN_QML, "            return Object.prototype.hasOwnProperty.call(hostsBefore, id) ? hostsBefore[id] !== hostsNow[id]",
+                                    "            return true ? hostsBefore[id] !== hostsNow[id]"),
+    "moved on the same host": (MAIN_QML, " ? hostsBefore[id] !== hostsNow[id]\n", " ? true\n"),
     "moved from raw ids": (MAIN_QML, "        var hostsNow = ChatSites.userSiteHosts(read.sites)\n",
                            "        var hostsNow = ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites)\n"),
     "old map never updated": (MAIN_QML, "        root.chatUserSiteHostsSeen = hostsKept\n", ""),
@@ -10167,14 +10202,45 @@ USER_SITE_REMOVAL_MUTATIONS = {
     "kept host overrides the readable one": (MAIN_QML,
         "                if (!Object.prototype.hasOwnProperty.call(hostsKept, id))\n                    hostsKept[id]",
         "                hostsKept[id]"),
-    "moved against the merged map": (MAIN_QML, "            return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id]",
-                                     "            return Object.prototype.hasOwnProperty.call(hostsKept, id) && hostsKept[id] !== hostsNow[id]"),
+    "moved against the merged map": (MAIN_QML, "            return Object.prototype.hasOwnProperty.call(hostsBefore, id) ? hostsBefore[id] !== hostsNow[id]",
+                                     "            return Object.prototype.hasOwnProperty.call(hostsKept, id) ? hostsKept[id] !== hostsNow[id]"),
+    # Round 3 (SEC L-2b): an id unreadable with no known host, readable again.
+    "unreadable comeback not moved": (MAIN_QML, "                : unreadableBefore.indexOf(id) >= 0\n", "                : false\n"),
+    "unreadable ids removed directly": (MAIN_QML, "        removed = removed.concat(moved)\n",
+                                        "        removed = removed.concat(moved, unreadableBefore)\n"),
+    "unreadable list never kept": (MAIN_QML, "        root.chatUserSiteUnreadableSeen = unreadableBefore.concat(\n",
+                                   "        root.chatUserSiteUnreadableSeen = [].concat(\n"),
+    "unreadable list never grows": (MAIN_QML, "            ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites)).filter(function (id, index, all) {\n",
+                                    "            []).filter(function (id, index, all) {\n"),
+    "unreadable list holds known hosts": (MAIN_QML,
+        "            return all.indexOf(id) === index && !Object.prototype.hasOwnProperty.call(hostsKept, id)\n",
+        "            return all.indexOf(id) === index\n"),
+    "unreadable list never seeded": (MAIN_QML,
+        "        root.chatUserSiteUnreadableSeen = ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites)\n"
+        "            .filter(function (id) { return !Object.prototype.hasOwnProperty.call(root.chatUserSiteHostsSeen, id) })\n", ""),
     "zoom pruned from a lenient read": (MAIN_QML, "            if (removed.indexOf(id) < 0)\n                zoom[id] = root.chatZoom[id]",
                                         "            if (ChatSites.siteIds(ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)"
                                         ".sites).indexOf(id) >= 0 || id === \"ollama\")\n                zoom[id] = root.chatZoom[id]"),
     "every zoom dropped": (MAIN_QML, "            if (removed.indexOf(id) < 0)\n                zoom[id] = root.chatZoom[id]",
                            "            if (false)\n                zoom[id] = root.chatZoom[id]"),
-    "start map from nothing": (MAIN_QML, "        root.chatUserSiteHostsSeen = ChatSites.userSiteHosts(root.chatUserSites)\n", ""),
+    "start map from nothing": (MAIN_QML, "        root.chatUserSiteHostsSeen = Object.assign(ChatSites.rawUserSiteHosts(Plasmoid.configuration.chatUserSites),\n"
+                               "            ChatSites.userSiteHosts(root.chatUserSites))\n", ""),
+    # Round 3 (L-2b, the auditor's first option): the host an unreadable url still names.
+    "start map without the raw hosts": (MAIN_QML, "Object.assign(ChatSites.rawUserSiteHosts(Plasmoid.configuration.chatUserSites),\n",
+                                        "Object.assign({},\n"),
+    "start map raw hosts win": (MAIN_QML, "        root.chatUserSiteHostsSeen = Object.assign(ChatSites.rawUserSiteHosts(Plasmoid.configuration.chatUserSites),\n"
+                                "            ChatSites.userSiteHosts(root.chatUserSites))\n",
+                                "        root.chatUserSiteHostsSeen = Object.assign(ChatSites.userSiteHosts(root.chatUserSites),\n"
+                                "            ChatSites.rawUserSiteHosts(Plasmoid.configuration.chatUserSites))\n"),
+    "damaged read without the raw hosts": (MAIN_QML, "            var rawHosts = ChatSites.rawUserSiteHosts(Plasmoid.configuration.chatUserSites)\n",
+                                           "            var rawHosts = {}\n"),
+    "raw host overrides the known one": (MAIN_QML,
+        "                if (!Object.prototype.hasOwnProperty.call(hostsKept, id))\n                    hostsKept[id] = rawHosts[id]",
+        "                hostsKept[id] = rawHosts[id]"),
+    "raw hosts of any entry": (CHAT_SITES_JS, "        if (entry === null || typeof entry !== \"object\" || !isUserSiteId(entry.id)\n",
+                               "        if (entry === null || typeof entry !== \"object\"\n"),
+    "raw hosts by another rule": (CHAT_SITES_JS, "            hosts[entry.id] = normalizeHost(url.host)\n",
+                                  "            hosts[entry.id] = url.host\n"),
     "moved never removed": (MAIN_QML, "        removed = removed.concat(moved)\n", ""),
     "host map of unchecked entries": (CHAT_SITES_JS, "    validUserSites(userSites).forEach(function (entry) {\n        hosts[entry.id]",
                                       "    (userSites || []).forEach(function (entry) {\n        hosts[entry.id]"),
@@ -10694,11 +10760,14 @@ def test_proof_golden_table_rule_catches(which, old, new):
 RENEW_MOVED_SITES_BODY = (
     '{ if (!has(plan.settings, "chatUserSites") || typeof tools.userSiteHosts !== "function" || '
     'typeof tools.newUserSiteId !== "function") return var list = '
-    'JSON.parse(plan.settings.chatUserSites) var before = tools.userSiteHosts(tools.currentUserSites) '
-    'var after = tools.userSiteHosts(list) var excluded = '
+    'JSON.parse(plan.settings.chatUserSites) var before = Object.assign({}, isObject(tools.unreadableHosts) ? '
+    'tools.unreadableHosts : {}, tools.userSiteHosts(tools.currentUserSites)) '
+    'var after = tools.userSiteHosts(list) '
+    'var unreadable = Array.isArray(tools.unreadableIds) ? tools.unreadableIds : [] var excluded = '
     'Object.keys(before).concat(Object.keys(after), Array.isArray(tools.excludedIds) ? '
-    'tools.excludedIds : []) var renamed = {} var count = 0 for (var index = 0; index < list.length; '
-    'index++) { var id = list[index].id if (!has(before, id) || before[id] === after[id]) continue '
+    'tools.excludedIds : [], unreadable) var renamed = {} var count = 0 for (var index = 0; index < list.length; '
+    'index++) { var id = list[index].id if ((!has(before, id) || before[id] === after[id]) '
+    '&& unreadable.indexOf(id) < 0) continue '
     'var fresh = tools.newUserSiteId(excluded) if (typeof fresh !== "string" || '
     '!/^user-[0-9a-f]{8}$/.test(fresh) || excluded.indexOf(fresh) >= 0) { delete '
     'plan.settings.chatUserSites plan.applied -= 1 plan.dropped += 1 return } excluded.push(fresh) '
@@ -10717,6 +10786,14 @@ GENERAL_RENEW_TOOL_PINS = (
     "newUserSiteId: function (excluded) { return ChatSites.newUserSiteId(excluded, Math.random) }",
     "excludedIds: ChatStorage.parsePendingClears(page.cfg_chatPendingSiteClears).concat("
     "ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites))",
+    # Round 3 (SEC L-2b): applied ids the page can't read are renewed whatever their host.
+    "unreadableHosts: page.unreadableHosts(),",
+    "unreadableIds: ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites).filter(function (id) { "
+    "return page.userSites.every(function (site) { return site.id !== id }) "
+    "&& !Object.prototype.hasOwnProperty.call(page.unreadableHosts(), id) })",
+    "function unreadableHosts() { var raw = ChatSites.rawUserSiteHosts(Plasmoid.configuration.chatUserSites) "
+    "var hosts = {} Object.keys(raw).forEach(function (id) { "
+    "if (page.userSites.every(function (site) { return site.id !== id })) hosts[id] = raw[id] }) return hosts }",
 )
 
 
@@ -10738,7 +10815,25 @@ def test_import_renews_a_moved_site_with_a_fresh_id():
 
 
 @pytest.mark.parametrize(("path", "old", "new"), [
-    (SETTINGS_BACKUP_JS, "        if (!has(before, id) || before[id] === after[id])\n            continue\n", "        continue\n"),
+    (SETTINGS_BACKUP_JS, "        if ((!has(before, id) || before[id] === after[id]) && unreadable.indexOf(id) < 0)\n            continue\n",
+     "        continue\n"),
+    # Round 3 (SEC L-2b): unreadable applied ids.
+    (SETTINGS_BACKUP_JS, " && unreadable.indexOf(id) < 0)\n            continue\n", ")\n            continue\n"),
+    (SETTINGS_BACKUP_JS, "        Array.isArray(tools.excludedIds) ? tools.excludedIds : [], unreadable)\n",
+     "        Array.isArray(tools.excludedIds) ? tools.excludedIds : [])\n"),
+    (CONFIG_GENERAL, "                return page.userSites.every(function (site) { return site.id !== id })\n"
+                     "                    && !Object.prototype.hasOwnProperty.call(page.unreadableHosts(), id)\n",
+     "                return false\n"),
+    # Round 3 (L-2b, first option): the import compares unreadable entries by their url's host.
+    (SETTINGS_BACKUP_JS, "isObject(tools.unreadableHosts) ? tools.unreadableHosts : {}", "{}"),
+    (SETTINGS_BACKUP_JS, "    var before = Object.assign({}, isObject(tools.unreadableHosts) ? tools.unreadableHosts : {},\n"
+                         "        tools.userSiteHosts(tools.currentUserSites))",
+     "    var before = Object.assign({}, tools.userSiteHosts(tools.currentUserSites),\n"
+     "        isObject(tools.unreadableHosts) ? tools.unreadableHosts : {})"),
+    (CONFIG_GENERAL, "            unreadableHosts: page.unreadableHosts(),\n", ""),
+    (CONFIG_GENERAL, "            if (page.userSites.every(function (site) { return site.id !== id }))\n                hosts[id] = raw[id]",
+     "            hosts[id] = raw[id]"),
+    (CONFIG_GENERAL, "                    && !Object.prototype.hasOwnProperty.call(page.unreadableHosts(), id)\n", "\n"),
     (SETTINGS_BACKUP_JS, " || excluded.indexOf(fresh) >= 0) {", ") {"),
     (SETTINGS_BACKUP_JS, "        excluded.push(fresh)\n", ""),
     (SETTINGS_BACKUP_JS, "    var excluded = Object.keys(before).concat(Object.keys(after),",

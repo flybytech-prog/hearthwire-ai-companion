@@ -212,12 +212,15 @@ starts with Plasma while it remains on a panel.
     addresses (`https://192.168.1.10/`) are refused until local sites arrive
     in a later version. Names are 1 to 40 characters with at least one
     letter or digit, unique in any case (also against the built-in names),
-    without `<`, `>`, `&`, control characters or any invisible character
+    without `<`, `>`, `&`, control characters, any invisible character
     (Unicode's default-ignorable characters such as zero-width spaces,
     variation selectors, tag characters and Hangul fillers, and the blank
-    Braille pattern). Look-alike letters from other scripts are not
-    detected: the letter badge and the address shown next to each site tell
-    them apart.
+    Braille pattern), format characters (Unicode category Cf, such as the
+    Arabic number signs) or private-use characters (Co). Both the widget and
+    the backup helper read these categories from the same Unicode 16.0
+    table. Unassigned code points are not checked (they show as a box).
+    Look-alike letters from other scripts are not detected: the letter badge
+    and the address shown next to each site tell them apart.
   - Each added site gets its own sign-in, as the built-in ones do (see
     [docs/privacy.md](docs/privacy.md#one-profile-per-chat-site)): no site
     sees another site's cookies or storage.
@@ -231,7 +234,10 @@ starts with Plasma while it remains on a panel.
     moves a site to another host is caught the same way while the widget is
     running (the site is signed out, its data deleted, and it opens again
     signed out); an edit made while Plasma isn't running can't be noticed,
-    because the old address isn't stored anywhere.
+    because the old address isn't stored anywhere. A site whose entry was
+    damaged and later reappears, for example on another host, starts fresh:
+    its old host is unknown, so it is signed out, its data deleted, and it
+    gets a new profile (an import renews its id as well).
   - **A damaged list is locked.** If the stored list of added sites can't be
     read whole (for example after a hand edit), Settings → Chat says so and
     doesn't let you add, edit, remove or reorder added sites; built-in sites

@@ -556,27 +556,50 @@ var LETTER_DIGIT_RANGES =
     "1ee74-1ee77,1ee79-1ee7c,1ee7e,1ee80-1ee89,1ee8b-1ee9b,1eea1-1eea3,1eea5-1eea9,1eeab-1eebb,1f100-1f10c," +
     "1fbf0-1fbf9,20000-2a6df,2a700-2b739,2b740-2b81d,2b820-2cea1,2ceb0-2ebe0,2ebf0-2ee5d,2f800-2fa1d,30000-3134a," +
     "31350-323af"
-var letterDigitTable = null
+// A name may hold no format (Cf) or private-use (Co) code point at all
+// (round 3, SEC I-5): many render as nothing or almost nothing. Same format
+// and source as LETTER_DIGIT_RANGES; the helper (settingsbackup.py) uses
+// this exact string, kept equal by a sync test. Unassigned code points (Cn)
+// stay allowed (they render as a box).
+var FORMAT_PRIVATE_RANGES =
+    "ad,600-605,61c,6dd,70f,890-891,8e2,180e,200b-200f,202a-202e,2060-2064,2066-206f,e000-f8ff,feff,fff9-fffb," +
+    "110bd,110cd,13430-1343f,1bca0-1bca3,1d173-1d17a,e0001,e0020-e007f,f0000-ffffd,100000-10fffd"
+var rangeTables = {}
 
-function isLetterOrDigit(point) {
-    if (letterDigitTable === null) {
-        letterDigitTable = LETTER_DIGIT_RANGES.split(",").map(function (range) {
+// Whether point lies in one of the "start-end" hex ranges of text (a sorted
+// table such as LETTER_DIGIT_RANGES), by binary search; parsed once.
+function inRanges(text, point) {
+    if (!Object.prototype.hasOwnProperty.call(rangeTables, text)) {
+        rangeTables[text] = text.split(",").map(function (range) {
             var ends = range.split("-")
             return [parseInt(ends[0], 16), parseInt(ends[ends.length - 1], 16)]
         })
     }
+    var table = rangeTables[text]
     var low = 0
-    var high = letterDigitTable.length - 1
+    var high = table.length - 1
     while (low <= high) {
         var middle = (low + high) >> 1
-        if (point < letterDigitTable[middle][0])
+        if (point < table[middle][0])
             high = middle - 1
-        else if (point > letterDigitTable[middle][1])
+        else if (point > table[middle][1])
             low = middle + 1
         else
             return true
     }
     return false
+}
+
+function isLetterOrDigit(point) {
+    return inRanges(LETTER_DIGIT_RANGES, point)
+}
+
+function isFormatOrPrivate(point) {
+    return inRanges(FORMAT_PRIVATE_RANGES, point)
+}
+
+function hasFormatOrPrivate(text) {
+    return codePointsOf(text).some(isFormatOrPrivate)
 }
 
 function hasLetterOrDigit(text) {
@@ -621,7 +644,8 @@ function nameOf(other) {
 // "" when name may be stored, else name-empty, name-too-long, name-chars or
 // name-taken (first failure wins). The name is checked as stored: leading
 // or trailing whitespace is name-chars (the editor trims), and so is a name
-// with a forbidden character or without any letter or digit. others: the
+// with a forbidden, format (Cf) or private-use (Co) character, or without
+// any letter or digit. others: the
 // other added sites (or their names).
 function userSiteNameError(name, others) {
     if (typeof name !== "string" || name.trim() === "")
@@ -629,7 +653,7 @@ function userSiteNameError(name, others) {
     if (name.length > MAX_USER_SITE_NAME)
         return "name-too-long"
     if (name.trim() !== name || NAME_CONTROLS.test(name) || LONE_SURROGATE.test(name)
-            || NAME_FORBIDDEN.test(name) || !hasLetterOrDigit(name))
+            || NAME_FORBIDDEN.test(name) || hasFormatOrPrivate(name) || !hasLetterOrDigit(name))
         return "name-chars"
     var lowered = name.toLowerCase()
     var taken = sites.map(function (site) { return site.name }).concat([OLLAMA_ENTRY.name])
@@ -842,6 +866,34 @@ function removedUserSiteIds(appliedText, pageText) {
     var page = parseUserSites(pageText)
     var kept = page.ok ? page.sites.map(function (site) { return site.id }) : rawUserSiteIds(pageText)
     return rawUserSiteIds(appliedText).filter(function (id) { return kept.indexOf(id) < 0 })
+}
+
+// {id: host} of the entries of a stored chatUserSites text that hold an
+// added-site id and a url parseUrl reads, by the same exact-host rule as
+// userSiteHosts, whether or not the entry is otherwise valid: the site an
+// unreadable entry stood for. Used only to tell a move from a return to
+// the same host, never to allow or delete anything by itself.
+function rawUserSiteHosts(text) {
+    var hosts = {}
+    if (typeof text !== "string" || text.length > 4 * MAX_USER_SITES_CHARS)
+        return hosts
+    var parsed = null
+    try {
+        parsed = JSON.parse(text)
+    } catch (error) {
+        return hosts
+    }
+    if (!Array.isArray(parsed))
+        return hosts
+    parsed.forEach(function (entry) {
+        if (entry === null || typeof entry !== "object" || !isUserSiteId(entry.id)
+                || typeof entry.url !== "string" || Object.prototype.hasOwnProperty.call(hosts, entry.id))
+            return
+        var url = parseUrl(entry.url)
+        if (url !== null && url.host !== "")
+            hosts[entry.id] = normalizeHost(url.host)
+    })
+    return hosts
 }
 
 // The exact host of each valid entry, {id: host}: what an id stands for.

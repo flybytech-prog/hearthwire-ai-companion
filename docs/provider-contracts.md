@@ -220,8 +220,12 @@ Replace; task 005):
   (U+00AD, U+034F, U+061C, U+115F–1160, U+17B4–17B5, U+180B–180F,
   U+200B–200F, U+202A–202E, U+2060–206F, U+3164, U+FE00–FE0F, U+FEFF,
   U+FFA0, U+FFF0–FFF8, U+1BCA0–1BCA3, U+1D173–1D17A, U+E0000–E0FFF),
-  U+FFF9–FFFB, U+2800 or U+2028–2029; at least one letter or digit (Unicode
-  general category L* or N*); and not a built-in name, `Ollama` or another
+  U+FFF9–FFFB, U+2800, U+2028–2029, or general category Cf or Co; at least
+  one letter or digit (general category L* or N*). Both categories come from
+  tables generated from Unicode 16.0 and shared by both ports
+  (`FORMAT_PRIVATE_RANGES`, `LETTER_DIGIT_RANGES` in `ChatSites.js` and
+  `settingsbackup.py`, kept equal by a test); unassigned (Cn) code points are
+  not checked. And not a built-in name, `Ollama` or another
   added site's name in any case (code-point lower case, no confusable
   matching).
   Codes, first failure wins: `name-empty`, `name-too-long`, `name-chars`,
@@ -256,9 +260,12 @@ Replace; task 005):
   main.qml (`chatUserSiteHostsSeen`) removes an id that is a valid entry of
   both the previous and the current read with another exact host, on any
   read (ok or not); ChatWebView's `applyCustomUrls` blanks such a view and
-  `home()` refuses the new host, so the old profile never loads it. Not
-  caught: an edit made while the widget isn't running (the old host isn't
-  stored).
+  `home()` refuses the new host, so the old profile never loads it. An id
+  that was unreadable (its host never known) and becomes readable counts as
+  moved too (`chatUserSiteUnreadableSeen`), and on import such an id (in the
+  applied raw text but unreadable on the page, `tools.unreadableIds`) is
+  renewed (L-2b, fails closed). Not caught: an edit made while the widget
+  isn't running (the old host isn't stored).
 - A damaged `chatUserSites` (not ok): Settings → Chat disables add, edit,
   remove and reorder for added sites, and its removal warning counts every
   `user-[0-9a-f]{8}` id in the raw applied text the page lacks.

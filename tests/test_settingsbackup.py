@@ -391,7 +391,7 @@ TestCase {
 """
 
 
-def chat_sites_js_results(tmp_path, qml):
+def chat_sites_js_results(tmp_path, qml, raw=False):
     """What ``qml`` (a TestCase that logs ``PARITY <json>``) prints against the widget's ChatSites.js.
 
     Skipped without qmltestrunner or QtTest.
@@ -410,8 +410,8 @@ def chat_sites_js_results(tmp_path, qml):
     match = re.search(r"PARITY (\[.*\])", output)
     if match is None and "module \"QtTest\" is not installed" in output:
         pytest.skip("QtTest is not installed")
-    assert match is not None, output
-    return json.loads(match.group(1))
+    assert match is not None, output[-4000:]
+    return output if raw else json.loads(match.group(1))
 
 
 def test_the_port_gives_the_same_codes_as_chat_sites_js(tmp_path):
@@ -465,6 +465,16 @@ NAME_CASES = [
     ("1", (), ""), ("\u0661", (), ""), ("\u2460", (), ""), ("\u216b", (), ""), ("\u00e9", (), ""), ("\u4e2d", (), ""),
     ("\U0001d400", (), ""), ("!\u05d0", (), ""), ("\U0001f916 Bot", (), ""), ("#1", (), ""),
     ("\u0301", (), "name-chars"), ("e\u0301", (), ""),
+    # Round 3 (SEC I-5): every Cf (format) and Co (private-use) character, also outside
+    # Default_Ignorable; their neighbours stay allowed.
+    *[("Le" + chr(point) + "Chat", (), "name-chars") for point in (
+        0x0600, 0x0605, 0x06DD, 0x070F, 0x0890, 0x0891, 0x08E2, 0x110BD, 0x110CD, 0x13430, 0x1343F,
+        0xE000, 0xF8FF, 0xF0000, 0xFFFFD, 0x100000, 0x10FFFD)],
+    *[("Claude" + chr(point), (), "name-chars") for point in (0x070F, 0x0600, 0xE000)],
+    ("Le\u0606Chat", (), ""), ("Le\u06deChat", (), ""), ("Le\u070eChat", (), ""), ("Le\u08e3Chat", (), ""),
+    ("Le\uf900Chat", (), ""), ("Le\U00013440Chat", (), ""), ("Le\U000ffffeChat", (), ""),
+    # Unassigned (Cn) code points are not checked: they render as a box.
+    ("Le\u0378Chat", (), ""), ("Le\U0002fffeChat", (), ""), ("Le\U000e0080Chat", (), "name-chars"),
     # Taken: a built-in name, Ollama or another added site, in any case.
     ("Claude", (), "name-taken"), ("claude", (), "name-taken"), ("CHATGPT", (), "name-taken"),
     ("grok", (), "name-taken"), ("Gemini", (), "name-taken"), ("github copilot", (), "name-taken"),
@@ -543,6 +553,46 @@ def test_the_user_site_lists_have_no_repeated_case():
     assert len({url for url, _ in USER_URL_CASES}) == len(USER_URL_CASES)
 
 
+def category_ranges(categories):
+    """Comma-separated "start-end" hex ranges of the code points in ``categories`` (prefixes)."""
+    ranges, start = [], None
+    for point in range(0x110000):
+        inside = unicodedata.category(chr(point)).startswith(categories)
+        if inside and start is None:
+            start = point
+        elif not inside and start is not None:
+            ranges.append((start, point - 1))
+            start = None
+    if start is not None:
+        ranges.append((start, 0x10FFFF))
+    return ",".join(f"{low:x}" if low == high else f"{low:x}-{high:x}" for low, high in ranges)
+
+
+def test_the_category_tables_are_unicode_16():
+    """FORMAT_PRIVATE_RANGES is Cf + Co and LETTER_DIGIT_RANGES L* + N*, as Unicode 16.0 has them."""
+    if unicodedata.unidata_version != "16.0.0":
+        pytest.skip(f"this Python has Unicode {unicodedata.unidata_version}; the tables are Unicode 16.0.0")
+    assert backup.FORMAT_PRIVATE_RANGES == category_ranges(("Cf", "Co"))
+    assert backup.LETTER_DIGIT_RANGES == category_ranges(("L", "N"))
+
+
+def js_ranges(name):
+    match = re.search(rf'^var {name} =\n((?:    "[^"]*"(?: \+)?\n)+)', js_text("ChatSites.js"), re.M)
+    assert match, f"ChatSites.js: var {name} is missing"
+    return "".join(re.findall(r'"([^"]*)"', match.group(1)))
+
+
+@pytest.mark.parametrize("name", ["FORMAT_PRIVATE_RANGES", "LETTER_DIGIT_RANGES"])
+def test_the_category_tables_match_chat_sites_js(name):
+    """One table for both ports, so the helper and the widget can't drift (SEC I-5)."""
+    assert js_ranges(name) == getattr(backup, name)
+
+
+def test_the_name_rule_uses_the_tables_not_the_runtime():
+    text = SOURCE.read_text(encoding="utf-8")
+    assert not re.search(r"^\s*(?:import|from)\s+unicodedata\b|\bunicodedata\s*\.", text, re.M)
+
+
 USER_SITE_PARITY_QML = """import QtQuick
 import QtTest
 import "ChatSites.js" as ChatSites
@@ -588,44 +638,50 @@ import "ChatSites.js" as ChatSites
 TestCase {
     name: "NameFuzz"
     function test_dump() {
-        var points = %s
+        var ranges = %s
         var letters = { "": "o", "name-empty": "e", "name-too-long": "l", "name-chars": "c", "name-taken": "t" }
         var code = function (result) {
             var text = typeof result === "string" ? result : result.error
             return Object.prototype.hasOwnProperty.call(letters, text) ? letters[text] : "?"
         }
         var out = []
-        for (var index = 0; index < points.length; index++) {
-            var character = String.fromCodePoint(points[index])
-            out.push(code(ChatSites.userSiteNameError(character, [])))
-            out.push(code(ChatSites.userSiteNameError("Le" + character + "Chat", [])))
+        for (var range = 0; range < ranges.length; range++) {
+            for (var point = ranges[range][0]; point <= ranges[range][1]; point++) {
+                var character = String.fromCodePoint(point)
+                out.push(code(ChatSites.userSiteNameError(character, [])))
+                out.push(code(ChatSites.userSiteNameError("Le" + character + "Chat", [])))
+            }
         }
-        console.log("PARITY " + JSON.stringify([out.join("")]))
+        // Qt cuts a log line at 2 MiB: the codes go out in numbered chunks.
+        var text = out.join("")
+        var chunks = 0
+        for (var at = 0; at < text.length; at += 65536)
+            console.log("FUZZ " + chunks++ + " " + text.slice(at, at + 65536))
+        console.log("PARITY " + JSON.stringify([chunks]))
     }
 }
 """
 # The BMP (surrogates included, as lone ones), the astral Default_Ignorable
 # ranges and astral letters, digits, symbols and emoji around them.
-NAME_FUZZ_POINTS = (list(range(0x10000)) + list(range(0x10000, 0x10200)) + list(range(0x1BC90, 0x1BCB0))
-                    + list(range(0x1D100, 0x1D800)) + list(range(0x1F300, 0x1F700)) + list(range(0x20000, 0x20100))
-                    + list(range(0xDFF00, 0xE1100)))
+# Round 3: every code point, U+0000 to U+10FFFF (surrogates as lone ones). Both
+# ports read categories from the same Unicode 16.0 tables, so nothing is skipped.
+NAME_FUZZ_RANGES = [[0, 0x10FFFF]]
 NAME_FUZZ_LETTERS = {"": "o", "name-empty": "e", "name-too-long": "l", "name-chars": "c", "name-taken": "t"}
 
 
 def test_the_name_rule_agrees_with_chat_sites_js_on_every_code_point(tmp_path):
-    """Each code point alone and inside "Le…Chat": the same code from both ports.
-
-    A code point unassigned in this Python's Unicode data is compared only
-    inside "Le…Chat" (alone, Qt's newer tables may know it as a letter).
-    """
-    results = chat_sites_js_results(tmp_path, NAME_FUZZ_QML % json.dumps(NAME_FUZZ_POINTS))[0]
-    assert len(results) == 2 * len(NAME_FUZZ_POINTS)
+    """Each code point alone and inside "Le…Chat": the same code from both ports."""
+    output = chat_sites_js_results(tmp_path, NAME_FUZZ_QML % json.dumps(NAME_FUZZ_RANGES), raw=True)
+    chunks = int(re.search(r"PARITY \[(\d+)\]", output).group(1))
+    found = dict(re.findall(r"FUZZ (\d+) ([a-z?]+)", output))
+    assert sorted(map(int, found)) == list(range(chunks))
+    results = "".join(found[str(index)] for index in range(chunks))
+    points = [point for start, end in NAME_FUZZ_RANGES for point in range(start, end + 1)]
+    assert len(results) == 2 * len(points)
     differences = []
-    for index, point in enumerate(NAME_FUZZ_POINTS):
+    for index, point in enumerate(points):
         character = chr(point)
         for offset, name in ((0, character), (1, "Le" + character + "Chat")):
-            if offset == 0 and unicodedata.category(character) == "Cn":
-                continue
             expected = NAME_FUZZ_LETTERS[backup.user_site_name_error(name)]
             if results[2 * index + offset] != expected:
                 differences.append((hex(point), offset, results[2 * index + offset], expected))
@@ -1321,7 +1377,7 @@ def test_the_module_imports_only_the_standard_library_and_no_network():
             # legacy: only legacy-data; appletconfig: the applied settings; jsondepth: the depth limit.
             assert node.module in ("appletconfig", "catalog", "jsondepth", "webdata", "legacy"), node.module
     assert imported <= {"__future__", "collections", "datetime", "errno", "json", "math", "os", "pathlib", "re",
-                        "stat", "time", "typing", "unicodedata"}, imported
+                        "stat", "time", "typing", "bisect"}, imported
     for banned in ("socket", "http", "urllib", "ssl", "subprocess"):
         assert banned not in imported
 

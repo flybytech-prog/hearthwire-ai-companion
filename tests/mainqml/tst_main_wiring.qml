@@ -4056,4 +4056,162 @@ TestCase {
             return Plasmoid.configuration.chatSiteZoom === JSON.stringify({claude: 1.25, "user-0000beef": 0.8})
         }, 3000)
     }
+
+    // --- task 005 round 3 ----------------------------------------------------
+
+    function checkFollowsTheSetting(page, siteId) {
+        var box = partOf(rowOf(page, siteId), "siteOn")
+        compare(box.checked, page.enabledIds.indexOf(siteId) >= 0, siteId + "'s checkbox")
+        return box
+    }
+
+    // R2-M1: a readable added site turns off and on like any other.
+    // (click(): the row lies outside the test window; it toggles and
+    // emits toggled as a user click does.)
+    function test_settingsAddedSiteTurnsOff() {
+        var page = chatPage(addedSettings())
+        var box = partOf(rowOf(page, "user-3fa9c01b"), "siteOn")
+        compare(box.checked, true)
+        box.click()
+        compare(JSON.parse(page.cfg_chatSites), ["claude", "chatgpt", "user-0000beef"])
+        compare(page.enabledIds.indexOf("user-3fa9c01b"), -1)
+        checkFollowsTheSetting(page, "user-3fa9c01b")
+        box.click()
+        compare(JSON.parse(page.cfg_chatSites), ["claude", "chatgpt", "user-3fa9c01b", "user-0000beef"])
+        checkFollowsTheSetting(page, "user-3fa9c01b")
+    }
+
+    // R2-M1 with a damaged list: the unreadable id stays, the readable one
+    // can be turned off.
+    function test_settingsDamagedListAddedSiteTurnsOff() {
+        var page = chatPage({chatUserSites: damagedList,
+                             chatSites: JSON.stringify(["claude", "user-3fa9c01b", "user-00c0ffee"])})
+        verify(!page.userSitesReadable)
+        var box = partOf(rowOf(page, "user-3fa9c01b"), "siteOn")
+        box.click()
+        compare(JSON.parse(page.cfg_chatSites), ["claude", "user-00c0ffee"])
+        checkFollowsTheSetting(page, "user-3fa9c01b")
+        // Only the unreadable id left on: Open first stays as it was.
+        page.setEnabled("claude", false)
+        compare(JSON.parse(page.cfg_chatSites), ["user-00c0ffee"])
+        compare(page.cfg_chatDefaultSite, "claude")
+        compare(page.cfg_chatUserSites, damagedList, "never rewritten")
+    }
+
+    readonly property var piEvil: ({id: "user-0000beef", name: "Pi", url: "https://evil.example/"})
+
+    // SEC L-2b at runtime. An unreadable entry whose url still parses keeps
+    // that host: back on the same host it keeps its data, on another host it
+    // is moved. An unreadable entry with no host at all is moved once it is
+    // readable. An unreadable or absent id is never removed.
+    function test_unreadableEntryKeepsTheHostItsUrlNames() {
+        var main = loadMain(addedSettings({chatUserSites: JSON.stringify([testCase.lechat,
+            Object.assign({local: true}, testCase.pi)])}))
+        compare(main.chatUserSiteHostsSeen, {"user-3fa9c01b": "chat.mistral.ai", "user-0000beef": "pi.ai"})
+        compare(main.chatUserSiteUnreadableSeen, [])
+        var removed = []
+        main.chatUserSitesRemoved.connect(function (ids) { removed.push(ids) })
+        // Readable again on its own host (a downgrade and upgrade): kept.
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechat, testCase.pi])
+        compare(removed, [])
+        // Unreadable again, then back on another host: moved.
+        Plasmoid.configuration.chatUserSites = JSON.stringify([testCase.lechat,
+            Object.assign({icon: "x"}, testCase.pi)])
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechat, testCase.piEvil])
+        compare(removed, [["user-0000beef"]])
+    }
+
+    // The host known from before wins over the one an unreadable entry
+    // names, so a move made while it was unreadable is still seen.
+    function test_moveWhileUnreadableIsStillSeen() {
+        var main = loadMain(addedSettings())
+        var removed = []
+        main.chatUserSitesRemoved.connect(function (ids) { removed.push(ids) })
+        Plasmoid.configuration.chatUserSites = JSON.stringify([testCase.lechat,
+            Object.assign({icon: "x"}, testCase.piEvil)])
+        compare(main.chatUserSiteHostsSeen["user-0000beef"], "pi.ai")
+        compare(removed, [])
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechat, testCase.piEvil])
+        compare(removed, [["user-0000beef"]])
+    }
+
+    // No host at all (its url can't be read): moved once readable.
+    function test_unreadableEntryWithoutAHostComesBackAsAnotherSite() {
+        var main = loadMain(addedSettings({chatUserSites: JSON.stringify([testCase.lechat,
+            {id: "user-0000beef", name: "Pi", url: 7}])}))
+        compare(main.chatUserSiteUnreadableSeen, ["user-0000beef"])
+        var removed = []
+        main.chatUserSitesRemoved.connect(function (ids) { removed.push(ids) })
+        Plasmoid.configuration.chatUserSites = "[{"
+        compare(removed, [])
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechat, testCase.pi])
+        compare(removed, [["user-0000beef"]])
+        compare(main.chatUserSiteUnreadableSeen, [])
+        compare(main.chatSiteIds.indexOf("user-0000beef") >= 0, true, "still a site, with a new profile")
+    }
+
+    // The review's harness proof: with saved sign-ins its old folder is
+    // owed a delete and deleted before it is prepared again.
+    function test_unreadableSinceStartWithSavedSignInsIsDeleted() {
+        var damaged = JSON.stringify([testCase.lechat, Object.assign({local: true}, testCase.pi)])
+        var main = loadMain(addedSettings({chatSignInStorage: "encrypted", chatUserSites: damaged}))
+        var generation = main.chatGeneration
+        main.chatStorageRequest("open")
+        expectStorage(main, "--vault status", testCase.unlockedReply)
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites claude"))
+        expectStorage(main, webData("remove", " --keep " + generation))
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechat, testCase.piEvil])
+        compare(Plasmoid.configuration.chatPendingSiteClears, "user-0000beef")
+        tryVerify(function () { return main.chatOp === "wait" || main.chatOp === "remove-site" }, 3000)
+        expectStorage(main, webData("remove-site", " --generation " + generation + " --site user-0000beef"))
+        compare(Plasmoid.configuration.chatPendingSiteClears, "")
+        main.chatSiteId = "user-0000beef"
+        main.chatSiteWanted("user-0000beef")
+        expectStorage(main, webData("prepare", " --generation " + generation + " --sites user-0000beef"))
+    }
+
+    // The review's import proof: an unreadable applied entry restored on
+    // another host is added with a new id; the old one is warned about.
+    function test_backupUnreadableEntryIsRenewed() {
+        var damaged = JSON.stringify([testCase.lechat, Object.assign({local: true}, testCase.pi)])
+        var page = backupPage()
+        Plasmoid.configuration.chatUserSites = damaged
+        page.cfg_chatUserSites = damaged
+        importing(page, {chatUserSites: userSites([testCase.lechat, testCase.piEvil])})
+        compare(generalPart(page, "backupAddressChanges").text,
+                ["This changes 1 chat site or address:", "Adds Pi (evil.example)"].join("\n"))
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        var sites = ChatSites.parseUserSites(page.cfg_chatUserSites).sites
+        compare(sites.length, 2)
+        compare(sites[0], testCase.lechat)
+        verify(sites[1].id !== "user-0000beef" && ChatSites.isUserSiteId(sites[1].id))
+        var removal = generalPart(page, "removalWarning")
+        compare(removal.visible, true)
+        compare(removal.text, "When you apply, 1 removed site is signed out and its site data is deleted.")
+    }
+
+    // The same host the unreadable entry names: it keeps its id and data.
+    function test_backupUnreadableEntryOnItsOwnHostKeepsItsId() {
+        var damaged = JSON.stringify([testCase.lechat, Object.assign({local: true}, testCase.pi)])
+        var page = backupPage()
+        Plasmoid.configuration.chatUserSites = damaged
+        page.cfg_chatUserSites = damaged
+        importing(page, {chatUserSites: userSites([testCase.lechat, testCase.pi])})
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        compare(page.cfg_chatUserSites, userSites([testCase.lechat, testCase.pi]))
+        compare(generalPart(page, "removalWarning").visible, false)
+    }
+
+    // No host at all: renewed whatever the backup's host.
+    function test_backupUnreadableEntryWithoutAHostIsRenewed() {
+        var damaged = JSON.stringify([testCase.lechat, {id: "user-0000beef", name: "Pi", url: 7}])
+        var page = backupPage()
+        Plasmoid.configuration.chatUserSites = damaged
+        page.cfg_chatUserSites = damaged
+        importing(page, {chatUserSites: userSites([testCase.lechat, testCase.pi])})
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        var sites = ChatSites.parseUserSites(page.cfg_chatUserSites).sites
+        verify(sites[1].id !== "user-0000beef" && ChatSites.isUserSiteId(sites[1].id))
+        compare(sites[1].url, testCase.pi.url)
+    }
 }

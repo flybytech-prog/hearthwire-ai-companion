@@ -358,6 +358,12 @@ Sites you add:
   running can't be noticed, because the old host isn't stored; the site's
   saved sign-in folder then stays with it. Don't edit added sites' addresses
   by hand.
+- **A damaged entry that comes back starts fresh.** If an added site's entry
+  can't be read (the rest of the list may be fine) and later becomes
+  readable again, for example on another host, its old host is unknown, so
+  it is treated as a new site: signed out, its data deleted, a new profile.
+  A backup import gives such an entry a new id, listed as removed and
+  added.
 
 ### Off: private in-memory profiles
 

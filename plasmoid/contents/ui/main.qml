@@ -75,6 +75,10 @@ PlasmoidItem {
     // {id: exact host} of the last read's readable entries (ok or not),
     // runtime only: an id whose host changes is another site (M1).
     property var chatUserSiteHostsSeen: ({})
+    // Ids a stored value held but couldn't read, with no known host and no
+    // host their url still names, runtime only: when one becomes readable
+    // its old site is unknown, so it counts as moved (L-2b, fails closed).
+    property var chatUserSiteUnreadableSeen: []
     // Added sites that were removed in the settings: the Chat tab drops
     // their views and profiles (FullRepresentation → ChatView.dropSites).
     signal chatUserSitesRemoved(var ids)
@@ -1041,24 +1045,40 @@ PlasmoidItem {
     // can't be read whole removes nothing. An id readable before and now
     // whose host changed (a hand edit, another writer) is another site
     // (M1): it is removed too, on any read, so its old sign-in is deleted
-    // and it opens again with a new profile.
+    // and it opens again with a new profile. An unreadable entry's host is
+    // taken from its url when that still parses (the same host keeps its
+    // data); one with no host at all that comes back readable is moved too
+    // (L-2b).
     function chatSyncUserSites() {
         var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)
         var hostsBefore = root.chatUserSiteHostsSeen
         var hostsNow = ChatSites.userSiteHosts(read.sites)
         // A read that isn't ok keeps the last known host of every id it
         // can't read, so an entry that comes back on another host after a
-        // damaged value still counts as moved.
+        // damaged value still counts as moved. An unreadable entry with no
+        // known host takes the host its url still names (L-2b); a known one
+        // wins, so a move made while it was unreadable is still seen.
         var hostsKept = Object.assign({}, hostsNow)
         if (!read.ok) {
             Object.keys(hostsBefore).forEach(function (id) {
                 if (!Object.prototype.hasOwnProperty.call(hostsKept, id))
                     hostsKept[id] = hostsBefore[id]
             })
+            var rawHosts = ChatSites.rawUserSiteHosts(Plasmoid.configuration.chatUserSites)
+            Object.keys(rawHosts).forEach(function (id) {
+                if (!Object.prototype.hasOwnProperty.call(hostsKept, id))
+                    hostsKept[id] = rawHosts[id]
+            })
         }
         root.chatUserSiteHostsSeen = hostsKept
+        var unreadableBefore = root.chatUserSiteUnreadableSeen
         var moved = Object.keys(hostsNow).filter(function (id) {
-            return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id]
+            return Object.prototype.hasOwnProperty.call(hostsBefore, id) ? hostsBefore[id] !== hostsNow[id]
+                : unreadableBefore.indexOf(id) >= 0
+        })
+        root.chatUserSiteUnreadableSeen = unreadableBefore.concat(
+            ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites)).filter(function (id, index, all) {
+            return all.indexOf(id) === index && !Object.prototype.hasOwnProperty.call(hostsKept, id)
         })
         var removed = []
         if (read.ok) {
@@ -1976,7 +1996,10 @@ PlasmoidItem {
         root.chatZoom = SettingsLogic.parseZoomMap(Plasmoid.configuration.chatSiteZoom, root.chatZoomIds)
         if (root.chatUserSitesOk)
             root.chatUserSiteIdsSeen = root.chatUserSites.map(function (site) { return site.id })
-        root.chatUserSiteHostsSeen = ChatSites.userSiteHosts(root.chatUserSites)
+        root.chatUserSiteHostsSeen = Object.assign(ChatSites.rawUserSiteHosts(Plasmoid.configuration.chatUserSites),
+            ChatSites.userSiteHosts(root.chatUserSites))
+        root.chatUserSiteUnreadableSeen = ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites)
+            .filter(function (id) { return !Object.prototype.hasOwnProperty.call(root.chatUserSiteHostsSeen, id) })
         // Plasma start, Unlock with KDE Wallet: open the folder silently when
         // the wallet is already open (the helper never prompts here). The
         // step is dropped unless status says locked with a wallet slot.

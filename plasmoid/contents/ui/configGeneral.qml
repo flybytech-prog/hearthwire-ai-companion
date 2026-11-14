@@ -472,7 +472,14 @@ KCM.SimpleKCM {
             userSiteHosts: ChatSites.userSiteHosts,
             newUserSiteId: function (excluded) { return ChatSites.newUserSiteId(excluded, Math.random) },
             excludedIds: ChatStorage.parsePendingClears(page.cfg_chatPendingSiteClears).concat(
-                ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites))
+                ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites)),
+            // Applied entries the page can't read: compared by the host their
+            // url still names, else renewed whatever their host.
+            unreadableHosts: page.unreadableHosts(),
+            unreadableIds: ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites).filter(function (id) {
+                return page.userSites.every(function (site) { return site.id !== id })
+                    && !Object.prototype.hasOwnProperty.call(page.unreadableHosts(), id)
+            })
         })
         page.backupDropped = plan.dropped
         if (plan.applied === 0) {
@@ -492,6 +499,18 @@ KCM.SimpleKCM {
             })
         page.backupExportedAt = reply.exportedAt
         page.confirmingImport = true
+    }
+
+    // {id: host} of the applied entries this page can't read whose url
+    // still names a host (ChatSites.rawUserSiteHosts).
+    function unreadableHosts() {
+        var raw = ChatSites.rawUserSiteHosts(Plasmoid.configuration.chatUserSites)
+        var hosts = {}
+        Object.keys(raw).forEach(function (id) {
+            if (page.userSites.every(function (site) { return site.id !== id }))
+                hosts[id] = raw[id]
+        })
+        return hosts
     }
 
     // The changes as plain lines: every added and removed site first, all of
