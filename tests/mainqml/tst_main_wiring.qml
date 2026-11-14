@@ -4018,4 +4018,42 @@ TestCase {
         var actions = partOf(rowOf(page, "claude"), "moveUp").mapToItem(page, 0, 0).x
         verify(right <= actions, right + " <= " + actions)
     }
+
+    // Round 2c (1): a move through a damaged value is still a move. The
+    // damaged read keeps the last known host of the entry it can't read.
+    function test_movedSiteThroughADamagedValueIsStillMoved() {
+        var main = loadMain(addedSettings())
+        var removed = []
+        main.chatUserSitesRemoved.connect(function (ids) { removed.push(ids) })
+        // Le Chat unreadable for one read: nothing removed, its host kept.
+        Plasmoid.configuration.chatUserSites = JSON.stringify([Object.assign({local: true}, testCase.lechat),
+                                                              testCase.pi])
+        compare(removed, [])
+        compare(main.chatUserSiteHostsSeen, {"user-3fa9c01b": "chat.mistral.ai", "user-0000beef": "pi.ai"})
+        // Back, on another host: moved.
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechatMoved, testCase.pi])
+        compare(removed, [["user-3fa9c01b"]])
+        compare(main.chatUserSiteHostsSeen, {"user-3fa9c01b": "other.example.org", "user-0000beef": "pi.ai"})
+        // Back on its own host after a damaged read: not moved.
+        Plasmoid.configuration.chatUserSites = "[{"
+        Plasmoid.configuration.chatUserSites = userSites([testCase.lechatMoved, testCase.pi])
+        compare(removed, [["user-3fa9c01b"]])
+        // An ok read without the id forgets its host.
+        Plasmoid.configuration.chatUserSites = userSites([testCase.pi])
+        compare(main.chatUserSiteHostsSeen, {"user-0000beef": "pi.ai"})
+    }
+
+    // Round 2c (2): a move on a damaged read prunes only the moved site's
+    // zoom, never that of the entries the read can't see.
+    function test_movedSiteOnADamagedReadPrunesOnlyItsZoom() {
+        var zoom = JSON.stringify({claude: 1.25, "user-0000beef": 0.8, "user-3fa9c01b": 1.5})
+        var main = loadMain(addedSettings({chatSiteZoom: zoom}))
+        // Le Chat moved; Pi unreadable in the same value.
+        Plasmoid.configuration.chatUserSites = JSON.stringify([testCase.lechatMoved,
+                                                              Object.assign({icon: "x"}, testCase.pi)])
+        compare(main.chatZoom, {claude: 1.25, "user-0000beef": 0.8})
+        tryVerify(function () {
+            return Plasmoid.configuration.chatSiteZoom === JSON.stringify({claude: 1.25, "user-0000beef": 0.8})
+        }, 3000)
+    }
 }

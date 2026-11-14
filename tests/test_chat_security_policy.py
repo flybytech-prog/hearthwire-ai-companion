@@ -9957,7 +9957,9 @@ CHAT_SITES_GOLDEN = PLASMOID.parent / "tests" / "qml" / "ChatSitesGolden.js"
 # Rule 5: the whole removal, in its reviewed order. Stored first (encrypted
 # mode, any vault state), then the views and profiles go, then (no web view:
 # no profile) the release, then the zoom map through zoomWriteTimer only.
-# Nothing in it deletes: remove-site runs only from chatSiteReleased.
+# Nothing in it deletes: remove-site runs only from chatSiteReleased. Round
+# 2c: the zoom prune drops exactly the removed ids' entries, never one picked
+# from a lenient re-read (which would cost unreadable entries their zoom).
 CHAT_REMOVE_USER_SITES_BODY = (
     "{ var removed = (Array.isArray(ids) ? ids : []).filter(function (id, index, all) { "
     "return ChatSites.isUserSiteId(id) && all.indexOf(id) === index }) "
@@ -9972,19 +9974,25 @@ CHAT_REMOVE_USER_SITES_BODY = (
     "root.chatRemoveRewanted = root.chatRemoveRewanted.filter(gone) } "
     "root.chatUserSitesRemoved(removed) "
     "if (!root.chatWebLoaded) removed.forEach(function (id) { root.chatSiteReleased(id) }) "
-    "var kept = ChatSites.siteIds(ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites).sites) "
-    'var zoom = SettingsLogic.parseZoomMap(SettingsLogic.zoomMapToPersist(root.chatZoom, "", 1.0), '
-    "kept.concat([OllamaChat.ENTRY.id])) "
-    "if (JSON.stringify(zoom) !== JSON.stringify(root.chatZoom)) { root.chatZoom = zoom zoomWriteTimer.restart() } }"
+    "var zoom = {} Object.keys(root.chatZoom).forEach(function (id) { "
+    "if (removed.indexOf(id) < 0) zoom[id] = root.chatZoom[id] }) "
+    "if (Object.keys(zoom).length !== Object.keys(root.chatZoom).length) { "
+    "root.chatZoom = zoom zoomWriteTimer.restart() } }"
 )
 # An absent id is removed only on an ok read after an ok seed. Round 2 (SEC
 # L-2): an id whose exact host changed is removed on any read, but only when
 # it is a valid entry of both the previous and this read (userSiteHosts keeps
 # only validUserSites entries); an unreadable or missing id is never "moved".
+# Round 2c: a read that isn't ok keeps the last known host of every id it
+# can't read (merge, not replace), so an entry that comes back on another
+# host after a damaged value still counts as moved; an ok read replaces it.
 CHAT_SYNC_USER_SITES_BODY = (
     "{ var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites) "
     "var hostsBefore = root.chatUserSiteHostsSeen var hostsNow = ChatSites.userSiteHosts(read.sites) "
-    "root.chatUserSiteHostsSeen = hostsNow "
+    "var hostsKept = Object.assign({}, hostsNow) if (!read.ok) { "
+    "Object.keys(hostsBefore).forEach(function (id) { "
+    "if (!Object.prototype.hasOwnProperty.call(hostsKept, id)) hostsKept[id] = hostsBefore[id] }) } "
+    "root.chatUserSiteHostsSeen = hostsKept "
     "var moved = Object.keys(hostsNow).filter(function (id) { "
     "return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id] }) "
     "var removed = [] if (read.ok) { var now = read.sites.map(function (site) { return site.id }) "
@@ -10150,7 +10158,22 @@ USER_SITE_REMOVAL_MUTATIONS = {
     "moved on the same host": (MAIN_QML, " && hostsBefore[id] !== hostsNow[id]\n", "\n"),
     "moved from raw ids": (MAIN_QML, "        var hostsNow = ChatSites.userSiteHosts(read.sites)\n",
                            "        var hostsNow = ChatSites.rawUserSiteIds(Plasmoid.configuration.chatUserSites)\n"),
-    "old map never updated": (MAIN_QML, "        root.chatUserSiteHostsSeen = hostsNow\n", ""),
+    "old map never updated": (MAIN_QML, "        root.chatUserSiteHostsSeen = hostsKept\n", ""),
+    # Round 2c: a move through a damaged value, and the zoom of unreadable entries.
+    "damaged read forgets hosts": (MAIN_QML, "        if (!read.ok) {\n            Object.keys(hostsBefore)",
+                                   "        if (false) {\n            Object.keys(hostsBefore)"),
+    "damaged read replaces the map": (MAIN_QML, "        root.chatUserSiteHostsSeen = hostsKept\n",
+                                      "        root.chatUserSiteHostsSeen = hostsNow\n"),
+    "kept host overrides the readable one": (MAIN_QML,
+        "                if (!Object.prototype.hasOwnProperty.call(hostsKept, id))\n                    hostsKept[id]",
+        "                hostsKept[id]"),
+    "moved against the merged map": (MAIN_QML, "            return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id]",
+                                     "            return Object.prototype.hasOwnProperty.call(hostsKept, id) && hostsKept[id] !== hostsNow[id]"),
+    "zoom pruned from a lenient read": (MAIN_QML, "            if (removed.indexOf(id) < 0)\n                zoom[id] = root.chatZoom[id]",
+                                        "            if (ChatSites.siteIds(ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)"
+                                        ".sites).indexOf(id) >= 0 || id === \"ollama\")\n                zoom[id] = root.chatZoom[id]"),
+    "every zoom dropped": (MAIN_QML, "            if (removed.indexOf(id) < 0)\n                zoom[id] = root.chatZoom[id]",
+                           "            if (false)\n                zoom[id] = root.chatZoom[id]"),
     "start map from nothing": (MAIN_QML, "        root.chatUserSiteHostsSeen = ChatSites.userSiteHosts(root.chatUserSites)\n", ""),
     "moved never removed": (MAIN_QML, "        removed = removed.concat(moved)\n", ""),
     "host map of unchecked entries": (CHAT_SITES_JS, "    validUserSites(userSites).forEach(function (entry) {\n        hosts[entry.id]",

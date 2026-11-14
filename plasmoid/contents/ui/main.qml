@@ -1046,7 +1046,17 @@ PlasmoidItem {
         var read = ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites)
         var hostsBefore = root.chatUserSiteHostsSeen
         var hostsNow = ChatSites.userSiteHosts(read.sites)
-        root.chatUserSiteHostsSeen = hostsNow
+        // A read that isn't ok keeps the last known host of every id it
+        // can't read, so an entry that comes back on another host after a
+        // damaged value still counts as moved.
+        var hostsKept = Object.assign({}, hostsNow)
+        if (!read.ok) {
+            Object.keys(hostsBefore).forEach(function (id) {
+                if (!Object.prototype.hasOwnProperty.call(hostsKept, id))
+                    hostsKept[id] = hostsBefore[id]
+            })
+        }
+        root.chatUserSiteHostsSeen = hostsKept
         var moved = Object.keys(hostsNow).filter(function (id) {
             return Object.prototype.hasOwnProperty.call(hostsBefore, id) && hostsBefore[id] !== hostsNow[id]
         })
@@ -1090,12 +1100,14 @@ PlasmoidItem {
         // No web view: no profile exists, so each one is released now.
         if (!root.chatWebLoaded)
             removed.forEach(function (id) { root.chatSiteReleased(id) })
-        // Their zoom goes too, stored only by zoomWriteTimer. The ids are
-        // read afresh: this may run before the bindings follow.
-        var kept = ChatSites.siteIds(ChatSites.parseUserSites(Plasmoid.configuration.chatUserSites).sites)
-        var zoom = SettingsLogic.parseZoomMap(SettingsLogic.zoomMapToPersist(root.chatZoom, "", 1.0),
-            kept.concat([OllamaChat.ENTRY.id]))
-        if (JSON.stringify(zoom) !== JSON.stringify(root.chatZoom)) {
+        // Their zoom goes too (and only theirs, so a damaged value never
+        // costs another site its zoom), stored only by zoomWriteTimer.
+        var zoom = {}
+        Object.keys(root.chatZoom).forEach(function (id) {
+            if (removed.indexOf(id) < 0)
+                zoom[id] = root.chatZoom[id]
+        })
+        if (Object.keys(zoom).length !== Object.keys(root.chatZoom).length) {
             root.chatZoom = zoom
             zoomWriteTimer.restart()
         }
