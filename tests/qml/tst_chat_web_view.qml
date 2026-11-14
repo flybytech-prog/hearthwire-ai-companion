@@ -937,4 +937,172 @@ TestCase {
         verify(web.profileFor("user-3fa9c01b") !== profile)
         compare(web.viewFor("user-3fa9c01b", "a").profile, web.profileFor("user-3fa9c01b"))
     }
+
+    // --- task 006: added sites on this computer and the home network ---------
+
+    // An added loopback site on port 7 (nothing listens there either) and a
+    // private one; their ids differ from Local's.
+    readonly property var loopSite: ({ id: "user-0000a003", name: "My UI", url: "http://127.0.0.1:7/" })
+    readonly property var lanSite: ({ id: "user-0000a001", name: "NAS chat", url: "http://[fd00::77]:9/" })
+
+    function waitForPortCheck(count, port) {
+        tryVerify(function () { return testCase.commands.length === count }, 3000,
+                  "expected " + count + " owner checks, got " + testCase.commands.length)
+        verify(new RegExp(" --port-owner " + port + "$").test(testCase.commands[count - 1]),
+               testCase.commands[count - 1])
+    }
+
+    // A web view with the fake helper showing the added loopback site.
+    function makeLoop(siteId) {
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        ownerCheck(web).runOwnerCheck = function (command) { testCase.commands.push(command) }
+        web.customUrls = { local: testCase.home }
+        web.userSites = [testCase.loopSite, testCase.lanSite]
+        web.siteIds = ["local", testCase.loopSite.id, testCase.lanSite.id]
+        web.siteId = siteId === undefined ? testCase.loopSite.id : siteId
+        return web
+    }
+
+    function test_loopbackAddedSiteIsCreatedOnlyAfterAGoodCheck() {
+        testCase.tried = []
+        var web = makeLoop()
+        verify(web.ownerChecked(testCase.loopSite.id))
+        waitForPortCheck(1, 7)
+        compare(web.currentView, null)
+        compare(web.ownerPending.site, testCase.loopSite.id)
+        answer(web, "other")
+        compare(web.currentView, null)
+        compare(web.localOwnerProblem, "other")
+        compare(web.localOwnerPort, 7)
+        verify(web.localViewMissing())
+        web.retryLocalOwner()
+        waitForPortCheck(2, 7)
+        answer(web, "self")
+        var view = web.currentView
+        verify(view !== null)
+        compare(view.site, testCase.loopSite.id)
+        compare(view.profile, web.profileFor(testCase.loopSite.id))
+        verify(web.profileFor("local") === null, "never Local's profile")
+        watch(view)
+        // The pass went to this view: its first load needs no second check.
+        waitForTry(testCase.loopSite.url)
+        compare(testCase.commands.length, 2)
+        compare(web.localCreatePass, "")
+        compare(web.localCreateSite, "")
+
+        // Its next main-frame navigation to its origin is checked again.
+        var next = testCase.loopSite.url + "c/1"
+        view.url = next
+        waitForPortCheck(3, 7)
+        wait(200)
+        compare(testCase.tried.indexOf(next), -1, "loaded before the check answered")
+        answer(web, "none")
+        compare(web.localOwnerProblem, "not-running")
+        tryVerify(function () { return view.url.toString() === "about:blank" }, 5000)
+        // Retry loads its own home through the gate.
+        web.retryLocalOwner()
+        waitForPortCheck(4, 7)
+        answer(web, "system")
+        waitForTry(testCase.loopSite.url)
+        compare(testCase.commands.length, 4)
+    }
+
+    // Local in pane a and the added loopback site in pane b: each its own
+    // check; a bad answer for one port blanks only the views on that port.
+    function test_localAndAddedLoopbackEachGetTheirOwnCheck() {
+        var web = makeLoop("local")
+        waitForPortCheck(1, 9)
+        answer(web, "self")
+        verify(web.currentView !== null)
+        compare(web.currentView.site, "local")
+        web.splitMinWidth = 300
+        web.siteIdB = testCase.loopSite.id
+        web.splitActive = true
+        waitForPortCheck(2, 7)
+        compare(web.currentViewB, null)
+        answer(web, "self")
+        var b = web.currentViewB
+        verify(b !== null)
+        compare(b.site, testCase.loopSite.id)
+        verify(b.profile !== web.currentView.profile)
+        compare(testCase.commands.length, 2)
+        tryVerify(function () { return b.url.toString() === testCase.loopSite.url }, 3000)
+        // Pane a goes elsewhere on port 9; the helper says another user.
+        web.currentView.url = testCase.home + "x"
+        waitForPortCheck(3, 9)
+        b.ownerPass = testCase.loopSite.url
+        answer(web, "other")
+        tryVerify(function () { return web.currentView.url.toString() === "about:blank" }, 5000)
+        compare(b.url.toString(), testCase.loopSite.url, "port 7 is still checked")
+        compare(b.ownerPass, "", "every pass ends on a problem")
+        compare(web.localOwnerPort, 9)
+        // blankLocalViews by port, directly.
+        web.blankLocalViews(7)
+        compare(b.url.toString(), "about:blank")
+    }
+
+    // A pass for an added loopback site's form post expires as Local's does.
+    function test_loopbackAddedSitePassExpires() {
+        testCase.tried = []
+        var web = makeLoop()
+        waitForPortCheck(1, 7)
+        answer(web, "self")
+        verify(web.currentView !== null)
+        watch(web.currentView)
+        waitForTry(testCase.loopSite.url)
+        web.ownerPassLifetime = 200
+        var url = testCase.loopSite.url + "form"
+        web.ownerPending = { view: web.currentView, url: url, port: 7, form: true, create: false,
+                             site: testCase.loopSite.id }
+        web.localOwnerFinished(7, "")
+        compare(web.localOwnerProblem, "resend")
+        compare(web.currentView.ownerPass, url)
+        tryVerify(function () { return web.currentView.ownerPass === "" }, 3000)
+        compare(web.localOwnerProblem, "")
+    }
+
+    // A home-network site never runs a check. Its loads are rejected here,
+    // so nothing goes to the network.
+    function test_privateAddedSiteNeverRunsACheck() {
+        var web = createTemporaryObject(webComponent, testCase, {})
+        ownerCheck(web).runOwnerCheck = function (command) { testCase.commands.push(command) }
+        web.userSites = [testCase.loopSite, testCase.lanSite]
+        web.siteIds = [testCase.lanSite.id]
+        verify(!web.ownerChecked(testCase.lanSite.id))
+        var asked = []
+        web.siteId = testCase.lanSite.id
+        var view = web.currentView
+        verify(view !== null, "created at once")
+        view.navigationRequested.connect(function (request) {
+            asked.push(request.url.toString())
+            request.reject()
+        })
+        compare(view.homeUrl, testCase.lanSite.url)
+        tryVerify(function () { return asked.indexOf(testCase.lanSite.url) >= 0 }, 3000)
+        wait(100)
+        compare(testCase.commands, [])
+        compare(web.ownerPending, null)
+        verify(!web.localViewMissing())
+    }
+
+    // M1 for IPv6 hosts: another literal blanks the view.
+    function test_addedIpv6SiteOnAnotherHostIsBlanked() {
+        var web = createTemporaryObject(webComponent, testCase, {})
+        web.userSites = [testCase.lanSite]
+        web.siteIds = [testCase.lanSite.id]
+        web.siteId = testCase.lanSite.id
+        var view = web.currentView
+        verify(view !== null)
+        view.navigationRequested.connect(function (request) { request.reject() })
+        compare(web.hostOf("http://[FD00::77]:9/"), "[fd00::77]")
+        // Same host, another port: moves home with the same profile (M-H).
+        var profile = web.profileFor(testCase.lanSite.id)
+        web.userSites = [{ id: testCase.lanSite.id, name: "NAS chat", url: "http://[fd00::77]:8/" }]
+        compare(view.homeUrl, "http://[fd00::77]:8/")
+        compare(web.profileFor(testCase.lanSite.id), profile)
+        web.userSites = [{ id: testCase.lanSite.id, name: "NAS chat", url: "http://[fd00::78]:8/" }]
+        compare(view.url.toString(), "about:blank")
+        compare(view.homeUrl, "http://[fd00::77]:8/", "not moved")
+    }
 }

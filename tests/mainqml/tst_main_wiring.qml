@@ -3516,7 +3516,8 @@ TestCase {
         name.text = "  Le Chat "
         address.text = "http://chat.mistral.ai/"
         partOf(page, "editorSave").clicked()
-        compare(partOf(page, "editorError").text, "Only https:// addresses can be added.")
+        compare(partOf(page, "editorError").text,
+                "http is allowed only for this computer (localhost, 127.0.0.1, [::1]) and home-network IP addresses such as 192.168.1.20.")
         compare(page.cfg_chatUserSites, "[]")
         address.text = " https://chat.mistral.ai/chat "
         partOf(page, "editorSave").clicked()
@@ -3539,6 +3540,99 @@ TestCase {
         // A taken name.
         compare(page.saveUserSite("new", "pi", "https://other.example/"), "name-taken")
         compare(page.saveUserSite("new", "Claude", "https://other.example/"), "name-taken")
+    }
+
+    // Task 006: the note under Address follows the typed text; http and
+    // loopback addresses save; the table shows http:// and a port.
+    function test_settingsHomeNetworkSites() {
+        var page = chatPage({chatSites: JSON.stringify(["claude", "ollama"])})
+        partOf(page, "addSite").clicked()
+        var name = partOf(page, "editorName")
+        var address = partOf(page, "editorAddress")
+        var note = partOf(page, "editorNote")
+        var help = partOf(page, "editorNoteHelp")
+        compare(note.textFormat, Text.PlainText)
+        verify(!note.visible)
+        address.text = "http://192.168.1.20:3000"
+        tryVerify(function () { return note.visible }, 3000)
+        compare(note.text, "Not encrypted on your network. https is recommended.")
+        verify(help.visible)
+        verify(help.toolTipText.indexOf("Anyone on your network can read and change this traffic.") === 0)
+        address.text = "https://192.168.1.20:3000"
+        tryVerify(function () { return !note.visible }, 3000)
+        address.text = "http://localhost:3000"
+        tryVerify(function () { return note.visible }, 3000)
+        compare(note.text, "Checked before loading: the program on this port must be yours or the system's.")
+        verify(!help.visible)
+        address.text = "https://127.0.0.1:8443"
+        verify(note.visible)
+        address.text = "https://chat.mistral.ai/"
+        tryVerify(function () { return !note.visible }, 3000)
+        address.text = "http://192.168.1.020/"
+        verify(!note.visible, "no note for an invalid address")
+        // The new error texts.
+        name.text = "NAS chat"
+        partOf(page, "editorSave").clicked()
+        compare(partOf(page, "editorError").text,
+                "Write the IP address as four numbers, like 192.168.1.20, or IPv6 in its short form, like [fd00::1].")
+        address.text = "http://169.254.169.254/"
+        partOf(page, "editorSave").clicked()
+        compare(partOf(page, "editorError").text, "Link-local addresses (169.254.x.x, fe80::) can't be added.")
+        address.text = "https://8.8.8.8/"
+        partOf(page, "editorSave").clicked()
+        compare(partOf(page, "editorError").text,
+                "Use the site's name. IP addresses are allowed only on your home network (10.x, 172.16–31.x, 192.168.x, fc00::/7).")
+        address.text = "http://127.0.0.2/"
+        partOf(page, "editorSave").clicked()
+        compare(partOf(page, "editorError").text, "On this computer, use localhost, 127.0.0.1 or [::1].")
+        address.text = "ftp://192.168.1.20/"
+        partOf(page, "editorSave").clicked()
+        compare(partOf(page, "editorError").text, "Use an address that starts with https:// or http://.")
+        compare(page.cfg_chatUserSites, "[]")
+        // Saves.
+        address.text = "http://192.168.1.20:3000"
+        partOf(page, "editorSave").clicked()
+        compare(page.editingId, "", "closed")
+        compare(page.saveUserSite("new", "My UI", "http://localhost:3000"), "")
+        compare(page.saveUserSite("new", "Secure NAS", "https://10.0.0.5:8443/"), "")
+        compare(page.saveUserSite("new", "Secure default", "https://10.0.0.6:443/"), "")
+        compare(page.saveUserSite("new", "V6", "http://[fd00::20]:80/"), "")
+        var sites = ChatSites.parseUserSites(page.cfg_chatUserSites)
+        verify(sites.ok)
+        compare(sites.sites.map(function (site) { return site.url }),
+                ["http://192.168.1.20:3000", "http://localhost:3000", "https://10.0.0.5:8443/",
+                 "https://10.0.0.6:443/", "http://[fd00::20]:80/"])
+        var shown = sites.sites.map(function (site) {
+            var text = partOf(rowOf(page, site.id), "siteAddress")
+            compare(text.textFormat, Text.PlainText)
+            return text.text
+        })
+        compare(shown, ["http://192.168.1.20:3000", "http://localhost:3000", "10.0.0.5:8443", "10.0.0.6",
+                        "http://[fd00::20]"])
+        compare(partOf(rowOf(page, "claude"), "siteAddress").text, "claude.ai")
+        // A port change on the same IPv6 host is the same site (M-H); another
+        // literal is another site (M1).
+        var v6 = sites.sites[4].id
+        verify(!page.hostChanges(v6, "https://[fd00::20]:8443/"))
+        verify(page.hostChanges(v6, "http://[fd00::21]/"))
+        // Local's help points to Add site….
+        var local = rowOf(page, "local")
+        var helps = allNamed(local, "").filter(function (item) {
+            return typeof item.toolTipText === "string" && item.toolTipText.indexOf("Add site…") >= 0
+        })
+        compare(helps.length, 1)
+    }
+
+    // Every code userSiteUrlError can return has its own text.
+    function test_settingsEveryAddressCodeHasAText() {
+        var page = chatPage({})
+        var fallback = page.userSiteError("no-such-code")
+        ;["url-empty", "too-long", "whitespace", "url-chars", "userinfo", "scheme", "http-not-allowed",
+          "loopback-not-allowed", "ip-literal", "ip-form", "link-local"].forEach(function (code) {
+            verify(page.userSiteError(code) !== fallback, code)
+            verify(page.userSiteError(code) !== "", code)
+        })
+        compare(page.userSiteError("malformed"), "This isn't a valid web address.")
     }
 
     function test_settingsAddCap() {
@@ -3788,13 +3882,14 @@ TestCase {
         var name = partOf(page, "editorName")
         var address = partOf(page, "editorAddress")
         name.text = "Bad"
-        address.text = "http://10.0.0.1/"
+        address.text = "http://10.0.0.1./"
         address.forceActiveFocus()
         tryVerify(function () { return address.activeFocus }, 3000)
         keyClick(Qt.Key_Return)
         compare(catcher.returns, 0, "OK never fires")
         compare(partOf(page, "editorError").visible, true)
-        compare(partOf(page, "editorError").text, "Only https:// addresses can be added.")
+        compare(partOf(page, "editorError").text,
+                "Write the IP address as four numbers, like 192.168.1.20, or IPv6 in its short form, like [fd00::1].")
         compare(page.cfg_chatUserSites, "[]")
         keyClick(Qt.Key_Enter)
         compare(catcher.enters, 0, "keypad Enter too")
@@ -3965,6 +4060,18 @@ TestCase {
         compare(sites[0].url, testCase.lechatMoved.url)
         compare(JSON.parse(page.cfg_chatSites), ["claude", sites[0].id])
         compare(generalPart(page, "removalWarning").visible, true)
+    }
+
+    // Task 006: an http add says "not encrypted".
+    function test_importSaysNotEncryptedForHttpAdds() {
+        var page = backupPage()
+        var lines = page.addressChangeText([
+            {kind: "add", id: "user-0000a001", name: "NAS", host: "192.168.77.10", http: true},
+            {kind: "add", id: "user-0000a002", name: "Safe", host: "10.0.0.5", http: false},
+            {kind: "add", id: "user-0000a003", name: "Old", host: "a.example"}
+        ]).split("\n")
+        compare(lines.slice(1), ["Adds NAS (192.168.77.10, not encrypted)", "Adds Safe (10.0.0.5)",
+                                 "Adds Old (a.example)"])
     }
 
     // SEC I-4: every added and removed site is listed, first; only the

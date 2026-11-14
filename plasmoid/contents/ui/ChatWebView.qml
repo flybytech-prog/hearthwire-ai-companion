@@ -24,9 +24,10 @@ import "SettingsLogic.js" as SettingsLogic
 // live switch crashes Qt WebEngine).
 // Pages are never read or scripted, and their console output is dropped.
 //
-// Local web UI pages on this computer load only after the helper said the
+// Local web UI pages on this computer, and those of added sites on this
+// computer (ChatSites.ownerChecked), load only after the helper said the
 // port belongs to this user or the system (LocalOwnerCheck): before the
-// Local view is created and before each of its main-frame navigations to
+// site's view is created and before each of its main-frame navigations to
 // this computer. Anything else loads nothing and shows a message instead.
 //
 // Split view: a second pane (b) shows siteIdB next to the first, with its
@@ -147,11 +148,13 @@ Item {
     property string localOwnerProblem: ""
     property int localOwnerPort: 0
     readonly property bool localOwnerChecking: localOwner.busy
-    // What waits for the check: {view, url, form, create}, or null.
+    // What waits for the check: {view, url, port, form, create, pane, site},
+    // or null.
     property var ownerPending: null
-    // The address a good check before creating the Local view was made
-    // for; handed to that view as its first pass.
+    // The address a good check before creating an owner-checked view was
+    // made for, and that view's site; handed to it as its first pass.
     property string localCreatePass: ""
+    property string localCreateSite: ""
     // How long a pass is good for (ms); overridable by tests only.
     property int ownerPassLifetime: 10000
 
@@ -250,16 +253,24 @@ Item {
             chatWeb.activeView.forceActiveFocus()
     }
 
-    // A Local main-frame navigation (or creating the Local view, view null)
-    // waits for the owner check; the request itself was already rejected.
-    // pane: where a view created after the check goes ("a" or "b").
-    function checkLocalOwner(view, url, form, create, pane) {
-        var port = ChatSites.localOwnerPort({ siteId: "local", customUrls: chatWeb.customUrls,
+    // Local and added sites on this computer: whether siteId's pages there
+    // wait for the owner check.
+    function ownerChecked(siteId) {
+        return ChatSites.ownerChecked(siteId, chatWeb.customUrls, chatWeb.userSites)
+    }
+
+    // An owner-checked site's main-frame navigation (or creating its view,
+    // view null) waits for the owner check; the request itself was already
+    // rejected. pane: where a view created after the check goes ("a" or
+    // "b"); siteId: the site checked.
+    function checkLocalOwner(view, url, form, create, pane, siteId) {
+        var site = typeof siteId === "string" ? siteId : ""
+        var port = ChatSites.localOwnerPort({ siteId: site, customUrls: chatWeb.customUrls,
                                               userSites: chatWeb.userSites, url: url })
         // A late answer of an earlier check must not count for this one.
         localOwner.cancel()
         chatWeb.ownerPending = { view: view, url: url, port: port, form: form, create: create,
-                                 pane: pane === "b" ? "b" : "a" }
+                                 pane: pane === "b" ? "b" : "a", site: site }
         chatWeb.localOwnerPort = port
         // Never from inside the navigation request itself.
         Qt.callLater(function () {
@@ -277,20 +288,23 @@ Item {
             // Fail closed: nothing from this computer stays on screen, so a
             // page loaded earlier can't keep talking to the new listener.
             chatWeb.localOwnerProblem = problem
-            chatWeb.blankLocalViews()
+            chatWeb.blankLocalViews(port)
             return
         }
         chatWeb.localOwnerProblem = ""
-        // A pane's Local view still to create (its check waited for this one).
+        // A pane's owner-checked view still to create (its check waited for
+        // this one).
         if (!pending.create && chatWeb.localViewMissing())
             Qt.callLater(chatWeb.syncViews)
         if (pending.create) {
-            if (chatWeb.siteIds.indexOf("local") < 0 || chatWeb.viewFor("local", pending.pane) !== null
-                    || (pending.pane === "b" && !chatWeb.splitActive) || !chatWeb.ensureProfile("local"))
+            var site = pending.site
+            if (chatWeb.siteIds.indexOf(site) < 0 || chatWeb.viewFor(site, pending.pane) !== null
+                    || (pending.pane === "b" && !chatWeb.splitActive) || !chatWeb.ensureProfile(site))
                 return
             chatWeb.localCreatePass = pending.url
-            visitedSites.append({ site: "local", pane: pending.pane })
-            // The other pane may wait for its own Local check.
+            chatWeb.localCreateSite = site
+            visitedSites.append({ site: site, pane: pending.pane })
+            // The other pane may wait for its own check.
             Qt.callLater(chatWeb.syncViews)
             return
         }
@@ -312,6 +326,7 @@ Item {
     function clearOwnerPasses() {
         ownerPassTimer.stop()
         chatWeb.localCreatePass = ""
+        chatWeb.localCreateSite = ""
         var views = chatWeb.viewList()
         for (var index = 0; index < views.length; index++)
             views[index].ownerPass = ""
@@ -323,14 +338,18 @@ Item {
         chatWeb.localOwnerProblem = ""
     }
 
-    function blankLocalViews() {
+    // A check of port failed: every pass ends, and every view (any site)
+    // whose page is on that port of this computer goes blank (M-D). Views
+    // on other ports stay: only this listener changed hands.
+    function blankLocalViews(port) {
         chatWeb.clearOwnerPasses()
         var views = chatWeb.viewList()
         for (var index = 0; index < views.length; index++) {
             var view = views[index]
-            if (ChatSites.localOwnerPort({ siteId: view.site, customUrls: chatWeb.customUrls,
-                                           userSites: chatWeb.userSites,
-                                           url: view.url.toString() }) > 0)
+            var viewPort = ChatSites.localOwnerPort({ siteId: view.site, customUrls: chatWeb.customUrls,
+                                                      userSites: chatWeb.userSites,
+                                                      url: view.url.toString() })
+            if (viewPort > 0 && viewPort === port)
                 view.url = "about:blank"
         }
     }
@@ -343,27 +362,33 @@ Item {
             && !chatWeb.siteProfileSpec(siteId)
     }
 
-    // A pane that shows Local has no Local view yet.
+    // A shown pane has an owner-checked site without its view yet.
     function localViewMissing() {
-        return chatWeb.siteIds.indexOf("local") >= 0
-            && ((chatWeb.siteId === "local" && chatWeb.viewFor("local", "a") === null)
-                || (chatWeb.splitActive && chatWeb.siteIdB === "local" && chatWeb.viewFor("local", "b") === null))
+        var panes = [["a", chatWeb.siteId], ["b", chatWeb.splitActive ? chatWeb.siteIdB : ""]]
+        for (var index = 0; index < panes.length; index++) {
+            var site = panes[index][1]
+            if (site !== "" && chatWeb.siteIds.indexOf(site) >= 0 && chatWeb.ownerChecked(site)
+                    && chatWeb.viewFor(site, panes[index][0]) === null)
+                return true
+        }
+        return false
     }
 
-    // Retry after a problem: create a missing Local view again, else load
-    // each shown Local view's home again (through the owner check).
+    // Retry after a problem: create a missing owner-checked view again, else
+    // load each shown owner-checked view's own home again (through the
+    // owner check).
     function retryLocalOwner() {
         chatWeb.localOwnerProblem = ""
         if (chatWeb.localViewMissing()) {
             chatWeb.syncViews()
             return
         }
-        var url = ChatSites.homeUrl("local", chatWeb.customUrls, chatWeb.userSites)
         var panes = [["a", chatWeb.siteId], ["b", chatWeb.splitActive ? chatWeb.siteIdB : ""]]
         for (var index = 0; index < panes.length; index++) {
-            var view = panes[index][1] === "local" ? chatWeb.viewFor("local", panes[index][0]) : null
-            if (view && url !== "")
-                view.url = url
+            var site = panes[index][1]
+            var view = site !== "" && chatWeb.ownerChecked(site) ? chatWeb.viewFor(site, panes[index][0]) : null
+            if (view && view.homeUrl !== "")
+                view.url = view.homeUrl
         }
     }
 
@@ -506,7 +531,7 @@ Item {
             uploadDialog.close()
             chatWeb.finishUpload(false)
         }
-        if (siteId === "local" && chatWeb.ownerPending) {
+        if (chatWeb.ownerPending && chatWeb.ownerPending.site === siteId) {
             localOwner.cancel()
             chatWeb.ownerPending = null
         }
@@ -688,7 +713,7 @@ Item {
                 || (chatWeb.overlayPane === "b" && !chatWeb.splitActive)))
             chatWeb.closeOverlay()
         if (chatWeb.ownerPending && chatWeb.ownerPending.create
-                && (chatWeb.siteIds.indexOf("local") < 0
+                && (chatWeb.siteIds.indexOf(chatWeb.ownerPending.site) < 0
                     || (chatWeb.ownerPending.pane === "b" && !chatWeb.splitActive))) {
             localOwner.cancel()
             chatWeb.ownerPending = null
@@ -696,7 +721,8 @@ Item {
         if (!chatWeb.splitActive)
             chatWeb.focusedPane = "a"
         // Append only: existing views keep their page and are never reloaded.
-        // A Local view on this computer is created only after the owner check.
+        // An owner-checked view on this computer (Local, an added loopback
+        // site) is created only after the owner check.
         // A site that may not have a profile yet (with saved sign-ins: no
         // prepare of its folder since the last status check) waits and asks
         // main.qml for one; this runs again when the prepared sites change.
@@ -724,7 +750,7 @@ Item {
             // One check at a time: a check running for the other pane (a
             // navigation or a create) re-runs this when it ends.
             else if (!chatWeb.ownerPending)
-                chatWeb.checkLocalOwner(null, home, false, true, pane)
+                chatWeb.checkLocalOwner(null, home, false, true, pane, wanted)
         }
         chatWeb.syncCurrentViews()
     }
@@ -754,9 +780,10 @@ Item {
         }
     }
 
-    // The exact host of an http(s) address, "" when it has none.
+    // The exact host of an added site's http(s) address (IPv6 literals
+    // too), "" when it has none.
     function hostOf(url) {
-        var parsed = ChatSites.parseUrl(url)
+        var parsed = ChatSites.parseUserUrl(url)
         return parsed && parsed.host !== "" ? ChatSites.normalizeHost(parsed.host) : ""
     }
 
@@ -893,8 +920,8 @@ Item {
             property bool crashed: false
             // Address re-requested once after a user agent switch.
             property string userAgentRetry: ""
-            // Address a good owner check was just made for (Local only);
-            // used up by the next main-frame navigation.
+            // Address a good owner check was just made for (owner-checked
+            // sites only); used up by the next main-frame navigation.
             property string ownerPass: ""
             // Date.now() after which ownerPass no longer counts.
             property double ownerPassExpires: 0
@@ -993,7 +1020,7 @@ Item {
                     if (gate === "check") {
                         request.reject()
                         chatWeb.checkLocalOwner(page, url, request.navigationType
-                            === WebEngineNavigationRequest.FormSubmittedNavigation, false, page.pane)
+                            === WebEngineNavigationRequest.FormSubmittedNavigation, false, page.pane, page.site)
                         return
                     }
                     page.checkUserAgent(request)
@@ -1015,8 +1042,8 @@ Item {
                     customUrls: chatWeb.customUrls,
                     userSites: chatWeb.userSites
                 })
-                // A Local window starting on this computer would skip the
-                // owner check: dropped.
+                // A window of an owner-checked site starting on this
+                // computer would skip the owner check: dropped.
                 if (verdict === "overlay" && ChatSites.localOwnerPort({
                         siteId: page.site, customUrls: chatWeb.customUrls,
                         userSites: chatWeb.userSites, url: url }) > 0)
@@ -1106,10 +1133,13 @@ Item {
                 // Never without its site's profile (the default one is not ours).
                 if (page.isOverlay || !page.profile || page.profile !== chatWeb.profileFor(page.site))
                     return
-                if (page.site === "local") {
-                    page.ownerPass = chatWeb.localCreatePass
+                if (chatWeb.ownerChecked(page.site)) {
+                    // Only the view the good check was made for gets its pass.
+                    if (page.site === chatWeb.localCreateSite)
+                        page.ownerPass = chatWeb.localCreatePass
                     page.ownerPassExpires = Date.now() + chatWeb.ownerPassLifetime
                     chatWeb.localCreatePass = ""
+                    chatWeb.localCreateSite = ""
                 }
                 page.homeUrl = ChatSites.homeUrl(page.site, chatWeb.customUrls, chatWeb.userSites)
                 if (page.homeUrl !== "")

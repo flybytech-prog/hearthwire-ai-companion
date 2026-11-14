@@ -528,7 +528,10 @@ KCM.SimpleKCM {
                              change.name))
         })
         list.filter(function (change) { return change.kind === "add" }).forEach(function (change) {
-            lines.push(i18nc("an added chat site: name, host", "Adds %1 (%2)", change.name, change.host))
+            lines.push(change.http === true
+                ? i18nc("an added chat site over plain http: name, host", "Adds %1 (%2, not encrypted)",
+                        change.name, change.host)
+                : i18nc("an added chat site: name, host", "Adds %1 (%2)", change.name, change.host))
         })
         var addresses = list.filter(function (change) { return change.kind !== "add" && change.kind !== "remove" })
         addresses.slice(0, SettingsBackup.MAX_SHOWN_CHANGES).forEach(function (change) {

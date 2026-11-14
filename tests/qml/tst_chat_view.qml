@@ -505,6 +505,59 @@ TestCase {
         compare(view.web.dismissals, 1)
     }
 
+    // Task 006: an added site on this computer is owner-checked like Local;
+    // its problems show in either pane. A home-network one has no check.
+    readonly property var homeSites: [
+        {id: "user-0000a003", name: "My UI", url: "http://localhost:3000/"},
+        {id: "user-0000a001", name: "NAS chat", url: "http://192.168.1.20:3000/"},
+        {id: "user-3fa9c01b", name: "Le Chat", url: "https://chat.mistral.ai/chat"}
+    ]
+
+    function test_localOwnerMessageForAnAddedLoopbackSite() {
+        var view = make({current: true, siteId: "user-0000a003", userSites: testCase.homeSites,
+                         siteIds: ["claude", "user-0000a003", "user-0000a001"]})
+        tryVerify(function () { return view.web !== null })
+        var message = findChild(view, "localOwnerMessage")
+        verify(view.ownerCheckedSite)
+        verify(!view.localSite)
+        view.web.localOwnerPort = 3000
+        view.web.localOwnerProblem = "not-running"
+        verify(message.visible)
+        compare(message.text, "Nothing is using port 3000. Is your local chat server running?")
+        // Not for a home-network or public added site.
+        view.siteId = "user-0000a001"
+        verify(!message.visible)
+        view.siteId = "user-3fa9c01b"
+        verify(!message.visible)
+        // In the other pane too.
+        view.siteIdB = "user-0000a003"
+        view.splitActive = true
+        view.web.splitShown = true
+        verify(message.visible)
+    }
+
+    function test_pageFailedTextsPerClass() {
+        var view = make({current: true, siteId: "user-0000a001", userSites: testCase.homeSites,
+                         siteIds: ["local", "claude", "user-0000a003", "user-0000a001", "user-3fa9c01b"]})
+        tryVerify(function () { return view.web !== null })
+        var failed = findChild(view, "pageFailedMessage")
+        view.web.pageFailed = true
+        verify(failed.visible)
+        var home = "Couldn't load. Is the server running? You can change its address in Settings → Chat."
+        compare(failed.text, home)
+        view.web.activeSiteId = "user-0000a003"
+        compare(failed.text, home)
+        view.web.activeSiteId = "user-3fa9c01b"
+        compare(failed.text, "Couldn't load this page.")
+        view.web.activeSiteId = "claude"
+        compare(failed.text, "Couldn't load this page.")
+        view.siteId = "local"
+        view.web.activeSiteId = "local"
+        verify(failed.text.indexOf("Edit on the Local web UI row") >= 0)
+        // The address itself is never shown.
+        verify(failed.text.indexOf("192.168") < 0)
+    }
+
     // --- open in browser prompt (N1) -----------------------------------------
 
     function test_externalPromptAsksBeforeOpening() {

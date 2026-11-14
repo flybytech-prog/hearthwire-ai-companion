@@ -425,6 +425,15 @@ function httpAllowed(site, parsed) {
 function isPageUrl(site, url) {
     if (!site)
         return false
+    // A home site: its own origin (http too) or public https only.
+    if (isHomeSite(site)) {
+        var wide = parseUserUrl(url)
+        if (wide === null || wide.host === "")
+            return false
+        if (isOwnOrigin(site, wide))
+            return true
+        return wide.scheme === "https" && !isHomeTarget(wide.host)
+    }
     var parsed = parseUrl(url)
     if (parsed === null || parsed.host === "")
         return false
@@ -449,6 +458,8 @@ function classifyNavigation(request) {
         return "block"
     if (isAboutBlank(info.url))
         return "allow"
+    if (isHomeSite(site))
+        return classifyHomeNavigation(site, info)
     var parsed = parseUrl(info.url)
     if (parsed === null)
         return "block"
@@ -666,47 +677,190 @@ function userSiteNameError(name, others) {
     return ""
 }
 
-// "" for an address an added site may have (https to a public DNS name in
-// 005), else its code; checked in this order, first failure wins.
-function userSiteUrlError(url) {
-    if (typeof url !== "string" || url === "")
-        return "url-empty"
-    if (url.length > MAX_CUSTOM_URL_LENGTH)
-        return "too-long"
-    if (/[\s\u0000-\u001f\u007f]/.test(url))
-        return "whitespace"
-    if (URL_CHARS.test(url))
-        return "url-chars"
-    var authorityMatch = /^[A-Za-z][A-Za-z0-9+.\-]*:\/\/([^\/?#]*)/.exec(url)
-    if (authorityMatch && authorityMatch[1].indexOf("@") >= 0)
-        return "userinfo"
-    var schemeMatch = /^([A-Za-z][A-Za-z0-9+.\-]*):/.exec(url)
-    if (!schemeMatch)
-        return "malformed"
+// The added-site parser: parseUrl, plus one more authority form, a
+// bracketed IPv6 literal of 2-39 hex digits and colons (no dots, no zone
+// id) with an optional port; the host is lower-cased, brackets kept.
+// parseUrl itself, and so every built-in, still reads [::1] alone. Called
+// only for added sites' own addresses and in their navigation branches.
+function parseUserUrl(value) {
+    var parsed = parseUrl(value)
+    if (parsed !== null)
+        return parsed
+    var text = String(value === undefined || value === null ? "" : value)
+    var schemeMatch = /^([A-Za-z][A-Za-z0-9+.\-]*):(.*)$/.exec(text)
+    if (!schemeMatch || schemeMatch[2].indexOf("//") !== 0)
+        return null
     var scheme = schemeMatch[1].toLowerCase()
-    if (scheme === "http")
-        return "http-not-allowed"
-    if (scheme !== "https")
-        return "scheme"
-    var parsed = parseUrl(url)
-    if (parsed === null || parsed.host === "")
-        return "malformed"
-    if (isLocalAddress(parsed.host))
-        return "loopback-not-allowed"
-    var labels = normalizeHost(parsed.host).split(".")
-    if (/^(0x[0-9a-f]*|[0-9]+)$/.test(labels[labels.length - 1]))
-        return "ip-literal"
-    return ""
+    if (scheme !== "https" && scheme !== "http")
+        return null
+    var authority = schemeMatch[2].slice(2).split(/[\/?#]/)[0]
+    var match = /^(\[[0-9A-Fa-f:]{2,39}\])(?::([0-9]{1,5}))?$/.exec(authority)
+    if (!match)
+        return null
+    var port = ""
+    if (match[2] !== undefined) {
+        var number = parseInt(match[2], 10)
+        if (number < 1 || number > 65535)
+            return null
+        port = String(number)
+    }
+    return { scheme: scheme, host: match[1].toLowerCase(), port: port }
 }
 
-// The only place that classifies an added site's address: "public" or ""
-// in 005 (006 adds loopback and private).
+// Whether host is an IPv4 literal written the one way the engine shows it:
+// four parts of 0-255, no leading zeros, no trailing dot.
+function canonicalIpv4(host) {
+    var text = typeof host === "string" ? host : ""
+    if (!/^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$/.test(text))
+        return false
+    return text.split(".").every(function (part) { return parseInt(part, 10) <= 255 })
+}
+
+// The 8 groups of an IPv6 literal (brackets optional, hex digits and
+// colons only), or null when it is none.
+function ipv6Groups(text) {
+    var inner = typeof text === "string" ? text : ""
+    if (inner.charAt(0) === "[" && inner.charAt(inner.length - 1) === "]")
+        inner = inner.slice(1, -1)
+    if (!/^[0-9A-Fa-f:]+$/.test(inner))
+        return null
+    var halves = inner.split("::")
+    if (halves.length > 2)
+        return null
+    var read = function (part) {
+        if (part === "")
+            return []
+        var groups = part.split(":")
+        for (var index = 0; index < groups.length; index++) {
+            if (!/^[0-9A-Fa-f]{1,4}$/.test(groups[index]))
+                return null
+            groups[index] = parseInt(groups[index], 16)
+        }
+        return groups
+    }
+    var head = read(halves[0])
+    var tail = halves.length === 2 ? read(halves[1]) : []
+    if (head === null || tail === null)
+        return null
+    if (halves.length === 1)
+        return head.length === 8 ? head : null
+    if (head.length + tail.length > 7)
+        return null
+    while (head.length + tail.length < 8)
+        head.push(0)
+    return head.concat(tail)
+}
+
+// The IPv6 literal text (brackets optional, kept as given) serialized the
+// way the engine shows it (RFC 5952, WHATWG URL): lower case, no leading
+// zeros, the first longest run of two or more zero groups as "::". ""
+// when it is no IPv6 literal. Canonical when it equals its lower case.
+function canonicalIpv6(text) {
+    var groups = ipv6Groups(text)
+    if (groups === null)
+        return ""
+    var best = -1
+    var bestLength = 1
+    for (var start = 0; start < 8; start++) {
+        var end = start
+        while (end < 8 && groups[end] === 0)
+            end++
+        if (end - start > bestLength) {
+            best = start
+            bestLength = end - start
+        }
+        start = Math.max(start, end)
+    }
+    var hex = function (group) { return group.toString(16) }
+    var serialized = best < 0 ? groups.map(hex).join(":")
+        : groups.slice(0, best).map(hex).join(":") + "::" + groups.slice(best + bestLength).map(hex).join(":")
+    return text.charAt(0) === "[" ? "[" + serialized + "]" : serialized
+}
+
+// {error, kind} of an added site's address: error "" or its code (checked
+// in this order, first failure wins); kind the address class, "public",
+// "loopback" or "private", "" with an error. See userSiteUrlError.
+function userAddress(url) {
+    var fail = function (code) { return { error: code, kind: "" } }
+    if (typeof url !== "string" || url === "")
+        return fail("url-empty")
+    if (url.length > MAX_CUSTOM_URL_LENGTH)
+        return fail("too-long")
+    if (/[\s\u0000-\u001f\u007f]/.test(url))
+        return fail("whitespace")
+    if (URL_CHARS.test(url))
+        return fail("url-chars")
+    var authorityMatch = /^[A-Za-z][A-Za-z0-9+.\-]*:\/\/([^\/?#]*)/.exec(url)
+    if (authorityMatch && authorityMatch[1].indexOf("@") >= 0)
+        return fail("userinfo")
+    var schemeMatch = /^([A-Za-z][A-Za-z0-9+.\-]*):/.exec(url)
+    if (!schemeMatch)
+        return fail("malformed")
+    var scheme = schemeMatch[1].toLowerCase()
+    if (scheme !== "https" && scheme !== "http")
+        return fail("scheme")
+    var parsed = parseUserUrl(url)
+    if (parsed === null || parsed.host === "")
+        return fail("malformed")
+    var host = parsed.host
+    // This computer: these three spellings only, http or https.
+    if (host === "localhost" || host === "127.0.0.1" || host === "[::1]")
+        return { error: "", kind: "loopback" }
+    // A bracketed literal is never a name; isLocalAddress would count it
+    // as one (it has no dot).
+    if (host.charAt(0) === "[") {
+        if (canonicalIpv6(host) !== host)
+            return fail("ip-form")
+        var group = ipv6Groups(host)[0]
+        if ((group & 0xffc0) === 0xfe80)
+            return fail("link-local")
+        if ((group & 0xfe00) === 0xfc00)
+            return { error: "", kind: "private" }
+        return fail("ip-literal")
+    }
+    if (isLocalAddress(host))
+        return fail("loopback-not-allowed")
+    var labels = normalizeHost(host).split(".")
+    if (/^(0x[0-9a-f]*|[0-9]+)$/.test(labels[labels.length - 1])) {
+        // The host as given: a trailing dot isn't the engine's form either.
+        if (!canonicalIpv4(host))
+            return fail("ip-form")
+        var octets = host.split(".").map(function (part) { return parseInt(part, 10) })
+        if (octets[0] === 169 && octets[1] === 254)
+            return fail("link-local")
+        if (octets[0] === 10 || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+                || (octets[0] === 192 && octets[1] === 168))
+            return { error: "", kind: "private" }
+        return fail("ip-literal")
+    }
+    // A name over http could be any device on the network (mDNS, DNS).
+    if (parsed.scheme === "http")
+        return fail("http-not-allowed")
+    return { error: "", kind: "public" }
+}
+
+// "" for an address an added site may have, else its code. In order, first
+// failure wins: url-empty, too-long, whitespace, url-chars, userinfo,
+// malformed (no scheme), scheme (not http or https), malformed (unreadable),
+// then by host: localhost, 127.0.0.1 or [::1] is loopback; a bracketed IPv6
+// literal is ip-form (not canonical), link-local (fe80::/10), private
+// (fc00::/7) or ip-literal; another address of this computer is
+// loopback-not-allowed; an IPv4 literal is ip-form (not a canonical dotted
+// quad), link-local (169.254/16), private (10/8, 172.16/12, 192.168/16) or
+// ip-literal; a DNS name is http-not-allowed over http, else public.
+function userSiteUrlError(url) {
+    return userAddress(url).error
+}
+
+// The only place that classifies an added site's address: "public",
+// "loopback", "private", or "" when it isn't valid. Derived on every use,
+// never stored.
 function addressClass(url) {
-    return userSiteUrlError(url) === "" ? "public" : ""
+    return userAddress(url).kind
 }
 
 // An IPv4 literal (any form) in 10/8, 172.16/12, 192.168/16, 169.254/16 or
-// 0/8. Added sites never reach one; isLocalAddress covers loopback.
+// 0/8. Public added sites never reach one; isLocalAddress covers loopback.
 function isPrivateLiteral(host) {
     var normalized = normalizeHost(host)
     var labels = normalized.split(".")
@@ -817,8 +971,26 @@ function validUserSites(userSites) {
     return valid
 }
 
+// "<scheme>://<host>:<port>" of a parsed http(s) address, the port by
+// scheme when absent.
+function originOf(parsed) {
+    return parsed.scheme + "://" + parsed.host + ":"
+        + (parsed.port !== "" ? parsed.port : parsed.scheme === "https" ? "443" : "80")
+}
+
+// The exact origin of an added site (or its entry, or an address): what its
+// http and its own loopback or private pages must match in full. "" when
+// unreadable.
+function userOriginOf(site) {
+    var url = site !== null && typeof site === "object" ? site.url : site
+    var parsed = parseUserUrl(url)
+    if (parsed === null || parsed.host === "" || (parsed.scheme !== "http" && parsed.scheme !== "https"))
+        return ""
+    return originOf(parsed)
+}
+
 // The site object of a valid entry. Only name and url come from it; the
-// hosts and class are built here, never read from the stored entry.
+// hosts, origin and class are built here, never read from the stored entry.
 function userSiteFrom(entry) {
     return {
         id: entry.id,
@@ -828,12 +1000,62 @@ function userSiteFrom(entry) {
         user: true,
         site_hosts: [],
         auth_hosts: [],
-        exact_hosts: [normalizeHost(parseUrl(entry.url).host)],
+        exact_hosts: [normalizeHost(parseUserUrl(entry.url).host)],
         local: false,
         local_kind: addressClass(entry.url),
+        origin: userOriginOf(entry),
         default_on: true,
         http_origin: ""
     }
+}
+
+// An added site on this computer or the home network: its own branches in
+// classifyNavigation, classifySubframe and isPageUrl.
+function isHomeSite(site) {
+    return site !== null && typeof site === "object" && site.user === true
+        && (site.local_kind === "loopback" || site.local_kind === "private")
+}
+
+// A parsed target that is exactly the added site's own origin.
+function isOwnOrigin(site, parsed) {
+    return parsed !== null && parsed.host !== "" && typeof site.origin === "string"
+        && site.origin !== "" && originOf(parsed) === site.origin
+}
+
+// A target host on this computer or the home network (wide parse): any
+// bracketed literal, any address isLocalAddress counts, any private or
+// link-local IPv4 literal in any form. Only ever used to block.
+function isHomeTarget(host) {
+    return host.charAt(0) === "[" || isLocalAddress(host) || isPrivateLiteral(host)
+}
+
+// classifyNavigation's main frame for a home site: its own origin, and
+// public https as for any site; nothing else on this computer or the
+// network, and no other http.
+function classifyHomeNavigation(site, info) {
+    var parsed = parseUserUrl(info.url)
+    if (parsed === null || (parsed.scheme !== "http" && parsed.scheme !== "https") || parsed.host === "")
+        return "block"
+    if (isOwnOrigin(site, parsed))
+        return "allow"
+    if (isHomeTarget(parsed.host) || parsed.scheme !== "https")
+        return "block"
+    if (info.linkClicked && !knownHost(site, parsed.host))
+        return "external"
+    return "allow"
+}
+
+// classifySubframe for a home site: about:, blob:, data: and srcdoc as for
+// any site; its own origin; public https.
+function classifyHomeSubframe(site, url) {
+    var parsed = parseUserUrl(url)
+    if (parsed === null)
+        return /^https?:/i.test(url) ? "block" : "allow"
+    if (parsed.scheme !== "http" && parsed.scheme !== "https")
+        return "allow"
+    if (isOwnOrigin(site, parsed))
+        return "allow"
+    return isHomeTarget(parsed.host) || parsed.scheme !== "https" ? "block" : "allow"
 }
 
 // The site object of an added id, or null.
@@ -869,7 +1091,7 @@ function removedUserSiteIds(appliedText, pageText) {
 }
 
 // {id: host} of the entries of a stored chatUserSites text that hold an
-// added-site id and a url parseUrl reads, by the same exact-host rule as
+// added-site id and a url parseUserUrl reads, by the same exact-host rule as
 // userSiteHosts, whether or not the entry is otherwise valid: the site an
 // unreadable entry stood for. Used only to tell a move from a return to
 // the same host, never to allow or delete anything by itself.
@@ -889,7 +1111,7 @@ function rawUserSiteHosts(text) {
         if (entry === null || typeof entry !== "object" || !isUserSiteId(entry.id)
                 || typeof entry.url !== "string" || Object.prototype.hasOwnProperty.call(hosts, entry.id))
             return
-        var url = parseUrl(entry.url)
+        var url = parseUserUrl(entry.url)
         if (url !== null && url.host !== "")
             hosts[entry.id] = normalizeHost(url.host)
     })
@@ -900,7 +1122,7 @@ function rawUserSiteHosts(text) {
 function userSiteHosts(userSites) {
     var hosts = {}
     validUserSites(userSites).forEach(function (entry) {
-        hosts[entry.id] = normalizeHost(parseUrl(entry.url).host)
+        hosts[entry.id] = normalizeHost(parseUserUrl(entry.url).host)
     })
     return hosts
 }
@@ -998,16 +1220,28 @@ function badgeLetter(name) {
 
 // --- Local web UI owner check -------------------------------------------------
 
+// Local, and added sites on this computer (class loopback): their pages on
+// this computer load only after the owner check. The one predicate the
+// views use.
+function ownerChecked(siteId, customUrls, userSites) {
+    var site = effectiveSite(siteId, customUrls, userSites)
+    return site !== null && (site.local === true || (site.user === true && site.local_kind === "loopback"))
+}
+
 // The port whose owner the helper must vouch for (self or system) before
-// the main frame of a Local page goes to url: any address on this computer,
-// default port by scheme. 0 when no check applies (other sites, other hosts,
-// about:blank, unreadable addresses; those are blocked by classifyNavigation).
+// the main frame of a Local page, or of an added loopback site's page, goes
+// to url: any address on this computer, default port by scheme. 0 when no
+// check applies (other sites, other hosts, about:blank, unreadable
+// addresses; those are blocked by classifyNavigation).
 function localOwnerPort(request) {
     var info = request || {}
     var site = effectiveSite(info.siteId, info.customUrls, info.userSites)
-    if (!site || site.local !== true)
+    if (!site)
         return 0
-    var parsed = parseUrl(info.url)
+    var loopbackUser = site.user === true && site.local_kind === "loopback"
+    if (site.local !== true && !loopbackUser)
+        return 0
+    var parsed = loopbackUser ? parseUserUrl(info.url) : parseUrl(info.url)
     if (parsed === null || parsed.host === ""
             || (parsed.scheme !== "http" && parsed.scheme !== "https")
             || !isLocalAddress(parsed.host))
@@ -1195,18 +1429,21 @@ function overlayHost(request) {
 // unless the site is Local, and Local frames get plain http only for the
 // exact origin of its address. Unreadable http(s) addresses are blocked.
 // Added sites' frames never reach a private or link-local IPv4 literal
-// either; an added id without its entry gets no frame at all.
+// either; an added id without its entry gets no frame at all. A home site
+// (loopback or private) frames its own exact origin and public https only.
 function classifySubframe(request) {
     var info = request || {}
     if (isUserSiteId(info.siteId) && effectiveSite(info.siteId, info.customUrls, info.userSites) === null)
         return "block"
     var url = info.url === undefined || info.url === null ? "" : String(info.url)
+    var site = effectiveSite(info.siteId, info.customUrls, info.userSites)
+    if (isHomeSite(site))
+        return classifyHomeSubframe(site, url)
     var parsed = parseUrl(url)
     if (parsed === null)
         return /^https?:/i.test(url) ? "block" : "allow"
     if (parsed.scheme !== "http" && parsed.scheme !== "https")
         return "allow"
-    var site = effectiveSite(info.siteId, info.customUrls, info.userSites)
     if (site !== null && site.user === true)
         return isLocalAddress(parsed.host) || isPrivateLiteral(parsed.host) ? "block" : "allow"
     if (site === null || site.local !== true)

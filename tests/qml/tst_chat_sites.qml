@@ -46,7 +46,18 @@ TestCase {
             { id: "user-00000001", name: "Claude look-alike", url: "https://claude.ai/new" },
             { id: "user-00000002", name: "Example", url: "https://example.com/page" }
         ]
-        var variants = [undefined, [], added]
+        // Task 006: added sites on this computer and the home network change
+        // no built-in answer.
+        var home = added.concat([
+            { id: "user-00000003", name: "Loopback http", url: "http://localhost:3000/" },
+            { id: "user-00000004", name: "Loopback https", url: "https://127.0.0.1:8443/" },
+            { id: "user-00000005", name: "Loopback v6", url: "http://[::1]:8080/" },
+            { id: "user-00000006", name: "NAS chat", url: "http://192.168.1.20:3000/" },
+            { id: "user-00000007", name: "Private https", url: "https://10.0.0.5/" },
+            { id: "user-00000008", name: "Private v6", url: "http://[fd00::20]:3000/" }
+        ])
+        compare(ChatSites.validUserSites(home).length, 9)
+        var variants = [undefined, [], added, home]
         var keys = Object.keys(Golden.EXPECTED)
         compare(keys.length, Golden.SITE_IDS.length * Golden.ADDRESSES.length * 2)
         for (var v = 0; v < variants.length; v++) {
@@ -78,6 +89,286 @@ TestCase {
             url: url, siteId: "user-3fa9c01b", isDialog: !!isDialog, userInitiated: clicked !== false,
             userSites: arguments.length > 3 ? userSites : testCase.added
         })
+    }
+
+    // --- task 006: added sites on this computer and the home network ---------
+
+    function test_parseUserUrl() {
+        var parse = ChatSites.parseUserUrl
+        compare(parse("http://[FD00::1]:3000/x"), {scheme: "http", host: "[fd00::1]", port: "3000"})
+        compare(parse("HTTPS://[fd00::1]"), {scheme: "https", host: "[fd00::1]", port: ""})
+        compare(parse("https://[::1]:08080/"), {scheme: "https", host: "[::1]", port: "8080"})
+        compare(parse("https://chat.example.org/"), ChatSites.parseUrl("https://chat.example.org/"))
+        compare(parse("ftp://a.example/"), {scheme: "ftp", host: "", port: ""})
+        compare(parse("ftp://[fd00::1]/"), {scheme: "ftp", host: "", port: ""})
+        ;["http://[fe80::1%25eth0]/", "http://[::ffff:192.168.1.1]/", "http://[f]/", "http://[]/",
+          "http://[fd00::1]:0/", "http://[fd00::1]:65536/", "http://[fd00::1]:/", "http://[fd00::1]x/",
+          "http://[" + new Array(41).join("a") + "]/", "http:[fd00::1]",
+          "http://u@[fd00::1]/", "http://[fd00::g]/"].forEach(function (url) {
+            compare(parse(url), null, url)
+        })
+        // The narrow parser is untouched: built-ins still read [::1] alone.
+        compare(ChatSites.parseUrl("http://[fd00::1]/"), null)
+        compare(ChatSites.parseUrl("http://[::1]/").host, "[::1]")
+    }
+
+    function test_canonicalIpv4() {
+        ;["0.0.0.0", "10.0.0.1", "192.168.1.20", "255.255.255.255", "172.31.255.255"].forEach(function (host) {
+            verify(ChatSites.canonicalIpv4(host), host)
+        })
+        ;["127.1", "0x7f.0.0.1", "010.0.0.1", "3232235777", "192.168.1.020", "192.168.1", "192.168.1.20.",
+          "256.1.1.1", "1.2.3.4.5", "1.2.3.1000", "", undefined, "a.b.c.d"].forEach(function (host) {
+            verify(!ChatSites.canonicalIpv4(host), String(host))
+        })
+    }
+
+    function test_canonicalIpv6() {
+        var c = ChatSites.canonicalIpv6
+        compare(c("fd00::1"), "fd00::1")
+        compare(c("FD00::1"), "fd00::1")
+        compare(c("[FD00::1]"), "[fd00::1]")
+        compare(c("fd00:0:0:0:0:0:0:1"), "fd00::1")
+        compare(c("fd00::0:1"), "fd00::1")
+        compare(c("fd00:0:1:1:1:1:1:1"), "fd00:0:1:1:1:1:1:1", "one zero group stays")
+        compare(c("fd00:1:0:0:1:0:0:1"), "fd00:1::1:0:0:1", "the first longest run")
+        compare(c("fd00:0:0:1:0:0:0:1"), "fd00:0:0:1::1", "the longest run")
+        compare(c("0:0:0:0:0:0:0:0"), "::")
+        compare(c("0:0:0:0:0:0:0:1"), "::1")
+        compare(c("fc00:0:0:0:0:0:0:0"), "fc00::")
+        compare(c("00fd::0001"), "fd::1")
+        compare(c("1:2:3:4:5:6:7::"), "1:2:3:4:5:6:7:0")
+        compare(c("::2:3:4:5:6:7:8"), "0:2:3:4:5:6:7:8")
+        ;["", ":", ":::", "1:::2", "1::2::3", ":1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7:8:", "1:2:3:4:5:6:7",
+          "1:2:3:4:5:6:7:8:9", "1::2:3:4:5:6:7:8", "12345::", "g::", "1.2.3.4", undefined].forEach(function (text) {
+            compare(c(text), "", String(text))
+        })
+    }
+
+    // Plan §3.3 and §7: every code and class, first failure wins.
+    function test_userSiteUrlErrorHomeTable() {
+        var table = [
+            // Loopback: these three spellings, http or https, any port.
+            ["http://localhost:3000/", "", "loopback"], ["https://localhost/", "", "loopback"],
+            ["HTTP://LOCALHOST:3000/", "", "loopback"], ["http://127.0.0.1/", "", "loopback"],
+            ["https://127.0.0.1:8443/", "", "loopback"], ["http://[::1]:8080/", "", "loopback"],
+            ["http://localhost:1/", "", "loopback"], ["http://localhost:65535/", "", "loopback"],
+            ["http://localhost:0/", "malformed", ""], ["http://localhost:65536/", "malformed", ""],
+            ["http://localhost./", "loopback-not-allowed", ""], ["http://127.0.0.2/", "loopback-not-allowed", ""],
+            ["https://127.1/", "loopback-not-allowed", ""], ["http://0.0.0.0/", "loopback-not-allowed", ""],
+            ["http://foo.localhost/", "loopback-not-allowed", ""],
+            ["http://localhost.localdomain/", "loopback-not-allowed", ""],
+            ["http://nas/", "loopback-not-allowed", ""], ["http://3232235777/", "loopback-not-allowed", ""],
+            // Private IPv4: the edges of each range.
+            ["http://10.0.0.0/", "", "private"], ["http://10.255.255.255/", "", "private"],
+            ["http://172.15.255.255/", "ip-literal", ""], ["http://172.16.0.0/", "", "private"],
+            ["http://172.31.255.255/", "", "private"], ["http://172.32.0.0/", "ip-literal", ""],
+            ["http://192.167.255.255/", "ip-literal", ""], ["http://192.168.0.0/", "", "private"],
+            ["http://192.168.255.255/", "", "private"], ["http://192.168.1.20:3000/", "", "private"],
+            ["https://10.0.0.5/", "", "private"], ["http://192.168.1.20:80/", "", "private"],
+            ["http://169.254.169.254/", "link-local", ""], ["http://100.64.0.1/", "ip-literal", ""],
+            ["https://8.8.8.8/", "ip-literal", ""], ["http://255.255.255.255/", "ip-literal", ""],
+            ["http://0.1.2.3/", "ip-literal", ""], ["http://224.0.0.1/", "ip-literal", ""],
+            // Not canonical IPv4.
+            ["http://192.168.1.020/", "ip-form", ""], ["http://0xc0.168.1.1/", "ip-form", ""],
+            ["http://192.168.1/", "ip-form", ""], ["http://192.168.1.20./", "ip-form", ""],
+            ["http://010.0.0.1/", "ip-form", ""], ["http://256.1.1.1/", "loopback-not-allowed", ""],
+            // IPv6.
+            ["http://[fd00::1]/", "", "private"], ["http://[FD00::1]/", "", "private"],
+            ["http://[fd00:0:0:0:0:0:0:1]/", "ip-form", ""], ["http://[fd00::0:1]/", "ip-form", ""],
+            ["http://[fd00:0:1:1:1:1:1:1]/", "", "private"], ["http://[fd00:1:0:0:1:0:0:1]/", "ip-form", ""],
+            ["http://[fd00:1::1:0:0:1]/", "", "private"], ["http://[fc00::]/", "", "private"],
+            ["https://[fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535/", "", "private"],
+            ["http://[fe80::1]/", "link-local", ""], ["http://[febf::1]/", "link-local", ""],
+            ["http://[fec0::1]/", "ip-literal", ""], ["http://[fe80::1%25eth0]/", "malformed", ""],
+            ["http://[2001:db8::1]/", "ip-literal", ""], ["http://[::ffff:192.168.1.1]/", "malformed", ""],
+            ["http://[::ffff:c0a8:101]/", "ip-literal", ""], ["http://[::]/", "ip-literal", ""],
+            ["http://[ff02::1]/", "ip-literal", ""], ["http://[0:0:0:0:0:0:0:1]/", "ip-form", ""],
+            ["http://[1::2::3]/", "ip-form", ""], ["http://[fd00::1]:0/", "malformed", ""],
+            // DNS names: https only.
+            ["http://nas.local/", "http-not-allowed", ""], ["http://nas.lan:3000/", "http-not-allowed", ""],
+            ["https://nas.local/", "", "public"], ["http://chat.example.org/", "http-not-allowed", ""],
+            // The order: scheme before anything about the host.
+            ["ftp://192.168.1.20/", "scheme", ""], ["ws://localhost/", "scheme", ""]
+        ]
+        table.forEach(function (row) {
+            compare(ChatSites.userSiteUrlError(row[0]), row[1], row[0])
+            compare(ChatSites.addressClass(row[0]), row[2], row[0])
+            var entry = {id: "user-00000009", name: "Home", url: row[0]}
+            compare(ChatSites.validateUserSite(entry, []).error, row[1], row[0])
+            compare(ChatSites.parseUserSites(JSON.stringify([entry])).ok, row[1] === "", row[0])
+        })
+        // The longest IPv6 entry still fits the address cap.
+        var longest = "https://[fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535/"
+        compare(ChatSites.userSiteUrlError(longest + new Array(ChatSites.MAX_CUSTOM_URL_LENGTH - longest.length + 1)
+                                           .join("x")), "")
+    }
+
+    readonly property var nas: ({id: "user-0000a001", name: "NAS chat", url: "http://192.168.1.20:3000/"})
+    readonly property var nasV6: ({id: "user-0000a002", name: "NAS v6", url: "http://[fd00::20]:3000/"})
+    readonly property var webui: ({id: "user-0000a003", name: "My UI", url: "http://localhost:3000/"})
+    readonly property var secureUi: ({id: "user-0000a004", name: "Secure UI", url: "https://127.0.0.1:8443/app"})
+    readonly property var homeSites: [mistral, nas, nasV6, webui, secureUi]
+
+    function homeNav(site, url, linkClicked, isMainFrame) {
+        return ChatSites.classifyNavigation({
+            url: url, siteId: site.id, linkClicked: !!linkClicked,
+            isMainFrame: isMainFrame === undefined ? true : isMainFrame, userSites: testCase.homeSites
+        })
+    }
+
+    function test_userSiteFromHomeSites() {
+        var site = ChatSites.effectiveSite(testCase.nas.id, {}, testCase.homeSites)
+        compare(site.local, false)
+        compare(site.local_kind, "private")
+        compare(site.origin, "http://192.168.1.20:3000")
+        compare(site.exact_hosts, ["192.168.1.20"])
+        compare(site.http_origin, "")
+        site = ChatSites.effectiveSite(testCase.nasV6.id, {}, testCase.homeSites)
+        compare(site.local_kind, "private")
+        compare(site.origin, "http://[fd00::20]:3000")
+        compare(site.exact_hosts, ["[fd00::20]"])
+        site = ChatSites.effectiveSite(testCase.webui.id, {}, testCase.homeSites)
+        compare(site.local, false, "never Local's branches")
+        compare(site.local_kind, "loopback")
+        compare(site.origin, "http://localhost:3000")
+        compare(ChatSites.effectiveSite(testCase.secureUi.id, {}, testCase.homeSites).origin, "https://127.0.0.1:8443")
+        compare(ChatSites.userOriginOf("https://a.example/"), "https://a.example:443")
+        compare(ChatSites.userOriginOf("http://a.example/"), "http://a.example:80")
+        compare(ChatSites.userOriginOf({url: "http://[FD00::1]:81/x"}), "http://[fd00::1]:81")
+        compare(ChatSites.userOriginOf("ftp://a.example/"), "")
+        compare(ChatSites.userOriginOf(undefined), "")
+        // Hosts for M1, IPv6 too.
+        compare(ChatSites.userSiteHosts([testCase.nasV6, testCase.webui]),
+                {"user-0000a002": "[fd00::20]", "user-0000a003": "localhost"})
+        compare(ChatSites.rawUserSiteHosts(JSON.stringify([testCase.nasV6, {id: "user-0000a005",
+                                                                            url: "http://[FE80::1]/"}])),
+                {"user-0000a002": "[fd00::20]", "user-0000a005": "[fe80::1]"})
+    }
+
+    function test_privateSiteNavigation() {
+        ;[[testCase.nas, "http://192.168.1.20:3000/", "192.168.1.20"],
+          [testCase.nasV6, "http://[fd00::20]:3000/", "[fd00::20]"]].forEach(function (row) {
+            var site = row[0]
+            var own = row[1]
+            var host = row[2]
+            compare(homeNav(site, own), "allow", own)
+            compare(homeNav(site, own + "chat?x=1#y", true), "allow", "clicked, own origin")
+            compare(homeNav(site, own.replace(":3000/", "/")), "block", "same host, port 80")
+            compare(homeNav(site, own.replace(":3000/", ":3001/")), "block", "another port")
+            compare(homeNav(site, own.replace("http:", "https:")), "block", "the other scheme")
+            ;["http://192.168.1.21:3000/", "https://192.168.1.21/", "http://10.0.0.1/", "https://172.16.0.1/",
+              "https://169.254.169.254/", "https://192.168.1.020:3000/", "https://0xc0.0xa8.1.20/",
+              "https://3232235796/", "http://[fd00::21]:3000/", "https://[fe80::1]/", "https://[2001:db8::1]/",
+              "https://[fd00:0:0:0:0:0:0:20]:3000/", "http://localhost:3000/", "https://localhost/",
+              "https://127.0.0.1/", "https://127.0.0.2/", "https://[::1]/", "https://nas/",
+              "https://foo.localhost/", "http://chat.example.org/", "ftp://a.example/",
+              "javascript:alert(1)", "http://[fd00::1%25eth0]/", "file:///etc/passwd"].forEach(function (url) {
+                compare(homeNav(site, url), "block", site.name + " main: " + url)
+                compare(homeNav(site, url, false, false), url.indexOf("http") === 0 ? "block" : "allow",
+                        site.name + " frame: " + url)
+            })
+            compare(homeNav(site, "about:blank"), "allow")
+            // Public https, as for any site; a clicked link off the site goes out.
+            compare(homeNav(site, "https://cdn.example.org/a.js"), "allow")
+            compare(homeNav(site, "https://cdn.example.org/", true), "external")
+            compare(homeNav(site, "https://cdn.example.org/", false, false), "allow")
+            compare(homeNav(site, own, false, false), "allow", "frames of its own origin")
+            ;["about:srcdoc", "blob:http://192.168.1.20:3000/x", "data:text/html,x"].forEach(function (url) {
+                compare(homeNav(site, url, false, false), "allow", url)
+            })
+            // New windows: never its own origin or anything local (M-G).
+            var popup = function (url, isDialog) {
+                return ChatSites.classifyNewWindow({url: url, siteId: site.id, isDialog: !!isDialog,
+                                                    userInitiated: true, userSites: testCase.homeSites})
+            }
+            compare(popup(own), "block")
+            compare(popup(own, true), "block")
+            compare(popup(own.replace("http:", "https:"), true), "block")
+            compare(popup("https://127.0.0.1/"), "block")
+            compare(popup("https://cdn.example.org/"), "external")
+            // isPageUrl: its own origin and public https only.
+            var effective = ChatSites.effectiveSite(site.id, {}, testCase.homeSites)
+            verify(ChatSites.isPageUrl(effective, own + "x"))
+            verify(ChatSites.isPageUrl(effective, "https://cdn.example.org/"))
+            ;[own.replace(":3000/", ":3001/"), own.replace("http:", "https:"), "http://cdn.example.org/",
+              "https://192.168.1.21/", "https://[fd00::21]/", "https://localhost/",
+              "https://169.254.169.254/"].forEach(function (url) {
+                verify(!ChatSites.isPageUrl(effective, url), url)
+            })
+            // No owner check for private sites.
+            compare(ChatSites.localOwnerPort({siteId: site.id, userSites: testCase.homeSites, url: own}), 0)
+            verify(!ChatSites.ownerChecked(site.id, {}, testCase.homeSites))
+            // The off-site notice knows its own host.
+            compare(ChatSites.offSiteHost({siteId: site.id, userSites: testCase.homeSites, url: own}).off, false)
+            compare(ChatSites.offSiteHost({siteId: site.id, userSites: testCase.homeSites,
+                                           url: "https://cdn.example.org/"}),
+                    {off: true, host: "cdn.example.org"})
+            verify(host !== "")
+        })
+    }
+
+    function test_loopbackSiteNavigation() {
+        var site = testCase.webui
+        compare(homeNav(site, "http://localhost:3000/c/1"), "allow")
+        ;["http://localhost:3001/", "https://localhost:3000/", "http://127.0.0.1:3000/", "http://[::1]:3000/",
+          "http://localhost./", "http://localhost.:3000/", "http://127.0.0.2:3000/", "http://127.1:3000/",
+          "http://192.168.1.20:3000/", "http://[fd00::1]/", "https://[fe80::1]/",
+          "http://chat.example.org/"].forEach(function (url) {
+            compare(homeNav(site, url), "block", url)
+            compare(homeNav(site, url, false, false), "block", "frame " + url)
+        })
+        compare(homeNav(site, "https://cdn.example.org/"), "allow")
+        compare(homeNav(site, "https://cdn.example.org/", true), "external")
+        // The owner check: its own port, explicit or by scheme.
+        var port = function (s, url) {
+            return ChatSites.localOwnerPort({siteId: s.id, userSites: testCase.homeSites, url: url})
+        }
+        compare(port(site, "http://localhost:3000/"), 3000)
+        compare(port(testCase.secureUi, "https://127.0.0.1:8443/"), 8443)
+        var defaults = [{id: "user-0000b001", name: "D80", url: "http://localhost/"},
+                        {id: "user-0000b002", name: "D443", url: "https://[::1]/"}]
+        compare(ChatSites.localOwnerPort({siteId: "user-0000b001", userSites: defaults, url: "http://localhost/"}), 80)
+        compare(ChatSites.localOwnerPort({siteId: "user-0000b002", userSites: defaults, url: "https://[::1]/"}), 443)
+        // Every this-computer target is gated, even ones blocked later.
+        compare(port(site, "http://127.0.0.2:4000/"), 4000)
+        compare(port(site, "https://cdn.example.org/"), 0)
+        compare(port(site, "about:blank"), 0)
+        compare(port(testCase.mistral, "https://localhost/"), 0, "public added sites: none")
+        compare(port(testCase.nas, "http://localhost:3000/"), 0)
+        verify(ChatSites.ownerChecked(site.id, {}, testCase.homeSites))
+        verify(ChatSites.ownerChecked(testCase.secureUi.id, {}, testCase.homeSites))
+        verify(ChatSites.ownerChecked("local"))
+        verify(!ChatSites.ownerChecked(testCase.mistral.id, {}, testCase.homeSites))
+        verify(!ChatSites.ownerChecked("claude"))
+        verify(!ChatSites.ownerChecked(site.id, {}, []), "unknown without its entry")
+        // The gate follows: check, then go with the pass.
+        var gate = function (pass) {
+            return ChatSites.localOwnerGate({siteId: site.id, userSites: testCase.homeSites,
+                                             url: "http://localhost:3000/", isMainFrame: true, pass: pass})
+        }
+        compare(gate(""), "check")
+        compare(gate("http://localhost:3000/"), "go")
+        compare(ChatSites.localOwnerGate({siteId: site.id, userSites: testCase.homeSites,
+                                          url: "http://localhost:3000/", isMainFrame: false}), "skip")
+        // New windows, even to its own origin.
+        compare(ChatSites.classifyNewWindow({url: "http://localhost:3000/", siteId: site.id, isDialog: true,
+                                             userInitiated: true, userSites: testCase.homeSites}), "block")
+        compare(ChatSites.classifyNewWindow({url: "https://127.0.0.1:8443/", siteId: testCase.secureUi.id,
+                                             isDialog: true, userInitiated: true,
+                                             userSites: testCase.homeSites}), "block")
+        var effective = ChatSites.effectiveSite(site.id, {}, testCase.homeSites)
+        verify(ChatSites.isPageUrl(effective, "http://localhost:3000/x"))
+        verify(!ChatSites.isPageUrl(effective, "http://127.0.0.1:3000/x"))
+    }
+
+    // A public added site is unchanged: every home target stays blocked.
+    function test_publicAddedSiteStillBlocksHomeTargets() {
+        ;["http://localhost:3000/", "https://localhost/", "https://192.168.1.20/", "http://192.168.1.20:3000/",
+          "https://[fd00::20]/", "http://[fd00::20]:3000/", "https://[::1]/"].forEach(function (url) {
+            compare(homeNav(testCase.mistral, url), "block", url)
+            compare(homeNav(testCase.mistral, url, false, false), "block", "frame " + url)
+        })
+        compare(homeNav(testCase.mistral, "https://chat.mistral.ai/x"), "allow")
     }
 
     // ChatSites.js has no imports: its copy of Ollama's entry stays equal.
@@ -270,21 +561,21 @@ TestCase {
         compare(err("https://"), "malformed")
         compare(err("https://a..example/"), "malformed")
         compare(err("https://a.example%2f/"), "malformed")
-        compare(err("https://[fd00::1]/"), "malformed")
-        compare(err("https://localhost/"), "loopback-not-allowed")
-        compare(err("https://[::1]/"), "loopback-not-allowed")
+        compare(err("https://[fd00::1]/"), "", "006: private IPv6")
+        compare(err("https://localhost/"), "", "006: loopback")
+        compare(err("https://[::1]/"), "")
         compare(err("https://intranet/"), "loopback-not-allowed")
         compare(err("https://foo.localhost/"), "loopback-not-allowed")
-        compare(err("https://127.0.0.1/"), "loopback-not-allowed")
+        compare(err("https://127.0.0.1/"), "")
         compare(err("https://127.1/"), "loopback-not-allowed")
         compare(err("https://0x7f000001/"), "loopback-not-allowed")
         compare(err("https://0.0.0.0/"), "loopback-not-allowed")
         compare(err("https://8.8.8.8/"), "ip-literal", "M2: public literals too")
-        compare(err("https://10.0.0.1/"), "ip-literal")
-        compare(err("https://192.168.1.1/"), "ip-literal")
-        compare(err("https://169.254.169.254/"), "ip-literal")
-        compare(err("https://0300.0250.1.1/"), "ip-literal")
-        compare(err("https://0xa.1/"), "ip-literal")
+        compare(err("https://10.0.0.1/"), "", "006: private")
+        compare(err("https://192.168.1.1/"), "")
+        compare(err("https://169.254.169.254/"), "link-local")
+        compare(err("https://0300.0250.1.1/"), "ip-form")
+        compare(err("https://0xa.1/"), "ip-form")
         // A numeric last label that can't be IPv4 counts as this computer.
         compare(err("https://example.0x1/"), "loopback-not-allowed")
         compare(err("https://example.1/"), "loopback-not-allowed")
@@ -333,8 +624,9 @@ TestCase {
         compare(ChatSites.addressClass("https://chat.mistral.ai/"), "public")
         compare(ChatSites.addressClass("https://nas.local/"), "public")
         compare(ChatSites.addressClass("http://chat.mistral.ai/"), "")
-        compare(ChatSites.addressClass("https://localhost/"), "")
-        compare(ChatSites.addressClass("https://10.0.0.1/"), "")
+        compare(ChatSites.addressClass("https://localhost/"), "loopback")
+        compare(ChatSites.addressClass("https://10.0.0.1/"), "private")
+        compare(ChatSites.addressClass("https://10.0.0.1./"), "")
         compare(ChatSites.addressClass(""), "")
     }
 
@@ -423,7 +715,7 @@ TestCase {
         compare(site, {
             id: "user-3fa9c01b", name: "Le Chat", url: "https://chat.mistral.ai/chat", icon: "", user: true,
             site_hosts: [], auth_hosts: [], exact_hosts: ["chat.mistral.ai"], local: false,
-            local_kind: "public", default_on: true, http_origin: ""
+            local_kind: "public", origin: "https://chat.mistral.ai:443", default_on: true, http_origin: ""
         })
         // Nothing from extra keys, even if a caller passed them.
         compare(ChatSites.effectiveSite("user-3fa9c01b", {}, [Object.assign({local: true, auth_hosts: ["evil.example"]},

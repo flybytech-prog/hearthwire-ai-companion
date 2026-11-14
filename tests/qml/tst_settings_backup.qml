@@ -254,7 +254,11 @@ TestCase {
             {tag: "bidi name", value: sitesText([site("user-00000002", "A\u202eB", "https://o.example/")])},
             {tag: "markup name", value: sitesText([site("user-00000002", "<b>A</b>", "https://o.example/")])},
             {tag: "http", value: sitesText([site("user-00000002", "A", "http://a.example/")])},
-            {tag: "loopback", value: sitesText([site("user-00000002", "A", "https://localhost/")])},
+            {tag: "loopback", value: sitesText([site("user-00000002", "A", "https://localhost./")])},
+            {tag: "other loopback", value: sitesText([site("user-00000002", "A", "http://127.0.0.2/")])},
+            {tag: "odd ip form", value: sitesText([site("user-00000002", "A", "http://192.168.1.020/")])},
+            {tag: "link-local", value: sitesText([site("user-00000002", "A", "http://169.254.169.254/")])},
+            {tag: "http name", value: sitesText([site("user-00000002", "A", "http://nas.local/")])},
             {tag: "ip literal", value: sitesText([site("user-00000002", "A", "https://8.8.8.8/")])},
             {tag: "not a list", value: JSON.stringify(mistral)},
             {tag: "not JSON", value: "[{"},
@@ -387,7 +391,7 @@ TestCase {
         // The page sees the old site removed and the new one added.
         var listed = SettingsBackup.addressChanges({chatUserSites: sitesText([mistral, deepseek])}, result,
                                                    addressTools())
-        compare(listed, [{kind: "add", id: "user-0000aaaa", name: "Le Chat", host: "other.example.org"},
+        compare(listed, [{kind: "add", id: "user-0000aaaa", name: "Le Chat", host: "other.example.org", http: false},
                          {kind: "remove", id: mistral.id, name: "Le Chat"}])
     }
 
@@ -419,7 +423,7 @@ TestCase {
         // Listed as an add with a new id; the old one goes through the
         // removal warning (it is in the applied text).
         compare(SettingsBackup.addressChanges({chatUserSites: sitesText([mistral])}, result, addressTools()),
-                [{kind: "add", id: "user-0000aaaa", name: "Pi", host: "evil.example"}])
+                [{kind: "add", id: "user-0000aaaa", name: "Pi", host: "evil.example", http: false}])
         // An unreadable entry whose url names a host is compared by it: the
         // same host keeps its id, another host is renewed.
         var hosted = renewTools([mistral])
@@ -658,7 +662,7 @@ TestCase {
                              {chatUserSites: sitesText([moved, fresh]), chatOllamaUrl: "http://[::1]:11434"})
         compare(result, [
             {id: deepseek.id, name: "DeepSeek", from: "https://chat.deepseek.com/", to: "https://www.deepseek.com/chat"},
-            {kind: "add", id: fresh.id, name: "Pi", host: "pi.ai"},
+            {kind: "add", id: fresh.id, name: "Pi", host: "pi.ai", http: false},
             {kind: "remove", id: mistral.id, name: "Le Chat"},
             {id: "ollama", from: "http://127.0.0.1:11434", to: "http://[::1]:11434"}
         ])
@@ -670,6 +674,31 @@ TestCase {
                         {chatUserSites: sitesText([Object.assign({icon: "x"}, deepseek)])}), [])
         // No list in the backup: the added sites stay.
         compare(changes({chatUserSites: sitesText([mistral])}, {popupSize: "large"}), [])
+    }
+
+    // Task 006: an added http site is flagged from its scheme (the text says
+    // "not encrypted"); https ones, also on the home network, are not.
+    function test_addressChangesFlagHttpAdds() {
+        var nas = site("user-0000a001", "NAS", "http://192.168.1.20:3000/")
+        var lan = site("user-0000a002", "LAN", "https://10.0.0.5/")
+        var loop = site("user-0000a003", "Loop", "HTTP://localhost:3000/")
+        var result = changes({chatUserSites: "[]"}, {chatUserSites: sitesText([nas, lan, loop])})
+        compare(result, [
+            {kind: "add", id: nas.id, name: "NAS", host: "192.168.1.20", http: true},
+            {kind: "add", id: lan.id, name: "LAN", host: "10.0.0.5", http: false},
+            {kind: "add", id: loop.id, name: "Loop", host: "localhost", http: true}
+        ])
+        // The helper's strict rule and this one agree: the list is kept.
+        var plan = SettingsBackup.importPlan({chatUserSites: sitesText([nas, lan, loop])}, 0, renewTools([]))
+        compare(plan.settings.chatUserSites, sitesText([nas, lan, loop]))
+        // M1 for IPv6 hosts: another literal is another site, a port change isn't.
+        var v6 = site("user-0000a004", "V6", "http://[fd00::20]:3000/")
+        plan = SettingsBackup.importPlan({chatUserSites: sitesText([site(v6.id, "V6", "http://[fd00::21]:3000/")])},
+                                         0, renewTools([v6]))
+        compare(plan.settings.chatUserSites, sitesText([site("user-0000aaaa", "V6", "http://[fd00::21]:3000/")]))
+        plan = SettingsBackup.importPlan({chatUserSites: sitesText([site(v6.id, "V6", "https://[fd00::20]:8443/")])},
+                                         0, renewTools([v6]))
+        compare(plan.settings.chatUserSites, sitesText([site(v6.id, "V6", "https://[fd00::20]:8443/")]))
     }
 
     function test_maxShownChanges() {

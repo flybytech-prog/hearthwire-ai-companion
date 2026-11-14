@@ -424,7 +424,8 @@ function dropPair(plan, first, second, allowed) {
 // replaces the whole map, so a site the backup has no address for goes back
 // to its built-in one; both sides are the address the site would really
 // open. An added-site list replaces the whole list: {kind: "add", id, name,
-// host} for a new site, {id, name, from, to} for a new address of the same
+// host, http} for a new site (http: its address is plain http, derived from
+// the scheme), {id, name, from, to} for a new address of the same
 // id and {kind: "remove", id, name} for a site it no longer has (applying
 // deletes its data). current holds the page's chatCustomUrls, chatOllamaUrl
 // and chatUserSites. tools: {webSiteIds, parseCustomUrls, effectiveUrl,
@@ -466,7 +467,8 @@ function userSiteChanges(before, after, tools) {
     after.forEach(function (site) {
         var old = find(before, site.id)
         if (old === null)
-            result.push({kind: "add", id: site.id, name: tools.shownText(site.name), host: host(site.url)})
+            result.push({kind: "add", id: site.id, name: tools.shownText(site.name), host: host(site.url),
+                         http: /^http:/i.test(String(site.url))})
         else if (old.url !== site.url)
             result.push({id: site.id, name: tools.shownText(site.name), from: tools.shownText(old.url),
                          to: tools.shownText(site.url)})

@@ -221,9 +221,23 @@ KCM.SimpleKCM {
         return ChatSites.homeUrl(site.id, ChatSites.parseCustomUrls(page.cfg_chatCustomUrls), page.userSites)
     }
 
+    // An added http site shows http:// (and a port that isn't 80), so "not
+    // encrypted" stays visible with the editor closed; an added https site on
+    // this computer or the network shows a port that isn't 443.
     function rowHost(site) {
         var address = page.rowAddress(site)
-        return site.native === true ? address : ChatSites.shortHost(ChatSites.displayHost(address))
+        if (site.native === true)
+            return address
+        var shown = ChatSites.shortHost(ChatSites.displayHost(address))
+        var parsed = site.user === true ? ChatSites.parseUserUrl(address) : null
+        if (!parsed || shown === "")
+            return shown
+        if (parsed.scheme === "http")
+            return "http://" + shown + (parsed.port !== "" && parsed.port !== "80" ? ":" + parsed.port : "")
+        if ((site.local_kind === "loopback" || site.local_kind === "private")
+                && parsed.port !== "" && parsed.port !== "443")
+            return shown + ":" + parsed.port
+        return shown
     }
 
     // --- Save: only valid values are ever written -------------------------
@@ -258,7 +272,7 @@ KCM.SimpleKCM {
     // makes a new site (M1), so no sign-in moves to the other host.
     function hostChanges(siteId, url) {
         var site = ChatSites.byId(siteId, page.userSites)
-        var next = ChatSites.parseUrl(String(url || "").trim())
+        var next = ChatSites.parseUserUrl(String(url || "").trim())
         if (!site || site.user !== true || !next || next.host === "")
             return false
         return ChatSites.normalizeHost(next.host) !== site.exact_hosts[0]
@@ -408,14 +422,20 @@ KCM.SimpleKCM {
             return i18n("Use plain letters, digits and URL punctuation only (international names in their xn-- form).")
         case "userinfo":
             return i18n("Addresses with a user name or password aren't allowed.")
+        case "malformed":
+            return i18n("This isn't a valid web address.")
         case "http-not-allowed":
-            return i18n("Only https:// addresses can be added.")
+            return i18n("http is allowed only for this computer (localhost, 127.0.0.1, [::1]) and home-network IP addresses such as 192.168.1.20.")
         case "scheme":
-            return i18n("Use an address that starts with https://.")
+            return i18n("Use an address that starts with https:// or http://.")
         case "loopback-not-allowed":
-            return i18n("Addresses on this computer or your home network can't be added.")
+            return i18n("On this computer, use localhost, 127.0.0.1 or [::1].")
         case "ip-literal":
-            return i18n("Use the site's name, not an IP address.")
+            return i18n("Use the site's name. IP addresses are allowed only on your home network (10.x, 172.16–31.x, 192.168.x, fc00::/7).")
+        case "ip-form":
+            return i18n("Write the IP address as four numbers, like 192.168.1.20, or IPv6 in its short form, like [fd00::1].")
+        case "link-local":
+            return i18n("Link-local addresses (169.254.x.x, fe80::) can't be added.")
         default:
             return i18n("This isn't a valid web address.")
         }
@@ -479,6 +499,12 @@ KCM.SimpleKCM {
         property string error: ""
         readonly property bool hostChange: editor.kind === "user" && editor.siteId !== "new"
             && page.hostChanges(editor.siteId, addressField.text)
+        // The class of the address being typed (an added site only), for
+        // the note under it.
+        readonly property string addressKind: editor.kind === "user"
+            ? ChatSites.addressClass(addressField.text.trim()) : ""
+        readonly property bool addressHttp: /^http:/i.test(addressField.text.trim())
+        readonly property bool notEncrypted: editor.addressKind === "private" && editor.addressHttp
 
         Layout.fillWidth: true
         Layout.leftMargin: page.onColumnWidth + page.iconColumnWidth + Kirigami.Units.smallSpacing * 2
@@ -585,6 +611,32 @@ KCM.SimpleKCM {
                 Kirigami.ContextualHelpButton {
                     visible: editor.kind === "ollama"
                     toolTipText: i18n("Only this computer: http:// with 127.0.0.1, localhost or [::1] and a port. Leave empty for the default, http://127.0.0.1:11434.")
+                }
+            }
+
+            // Under Address, live while typing: a home-network http address
+            // isn't encrypted; one on this computer is owner-checked.
+            Item {
+                visible: editorNoteRow.visible
+            }
+            RowLayout {
+                id: editorNoteRow
+                Layout.fillWidth: true
+                visible: editor.notEncrypted || editor.addressKind === "loopback"
+                spacing: Kirigami.Units.smallSpacing
+                QQC2.Label {
+                    objectName: "editorNote"
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    text: editor.notEncrypted
+                        ? i18n("Not encrypted on your network. https is recommended.")
+                        : i18n("Checked before loading: the program on this port must be yours or the system's.")
+                }
+                Kirigami.ContextualHelpButton {
+                    objectName: "editorNoteHelp"
+                    visible: editor.notEncrypted
+                    toolTipText: i18n("Anyone on your network can read and change this traffic. On another network (a café, a hotel) a different device can have the same address and would get this site's sign-in and saved data. Use https with a certificate your system trusts to rule this out.")
                 }
             }
         }
@@ -746,7 +798,7 @@ KCM.SimpleKCM {
                         }
                         Kirigami.ContextualHelpButton {
                             visible: siteRow.modelData.local === true
-                            toolTipText: i18n("http is allowed only for this computer (localhost, 127.0.0.1, [::1]). For a server on another machine use https or an SSH tunnel.")
+                            toolTipText: i18n("http is allowed only for this computer (localhost, 127.0.0.1, [::1]). For a server elsewhere on your home network, add it with Add site…, or use https or an SSH tunnel.")
                         }
                     }
                     QQC2.Label {

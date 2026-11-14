@@ -24,6 +24,11 @@ may be up to 512 KiB. A second, cross-key pass lets ``chatSites``,
 ``chatSiteOrder``, ``chatDefaultSite`` and ``middleClickOpens`` name an added
 id only when the same settings keep a valid ``chatUserSites`` holding it; any
 other added id drops that whole setting.
+
+Task 006: an added site may also be a server on this computer (localhost,
+127.0.0.1, [::1]) or a home-network IP literal, over http or https. The keys
+and the format are unchanged; only the set of valid addresses grew
+(user_site_url_error, the same codes and order as ChatSites.js).
 """
 
 from __future__ import annotations
@@ -194,6 +199,8 @@ _AUTHORITY_PREFIX = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://([^/?#]*)")
 _SCHEME_REST = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*):(.*)")
 _BRACKET_AUTHORITY = re.compile(r"(\[::1\])(?::([0-9]{1,5}))?")
 _HOST_AUTHORITY = re.compile(r"([A-Za-z0-9.\-]+)(?::([0-9]{1,5}))?")
+_USER_BRACKET_AUTHORITY = re.compile(r"\[([0-9A-Fa-f:]{2,39})\](?::([0-9]{1,5}))?")  # parse_user_url only
+_CANONICAL_IPV4 = re.compile(r"(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}")
 _LOCAL_NAMES = ("localhost.localdomain", "ip6-localhost", "ip6-loopback")
 
 
@@ -286,6 +293,101 @@ def parse_url(text: str) -> Optional[tuple[str, str, str]]:
             return None
         port = str(number)
     return (scheme, host, port)
+
+
+def parse_user_url(text: str) -> Optional[tuple[str, str, str]]:
+    """ChatSites.js parseUserUrl (task 006): parse_url plus any bracketed IPv6 literal.
+
+    For added-site addresses only; built-ins keep the narrow parse_url. The
+    bracket holds 2-39 characters of ``[0-9A-Fa-f:]`` (no dots, no zone id),
+    returned lower-cased with its brackets. Whether it is a valid, canonical
+    address is decided later (canonical_ipv6).
+    """
+    match = _SCHEME_REST.fullmatch(text)
+    if match is None:
+        return None
+    scheme, rest = match.group(1).lower(), match.group(2)
+    if scheme not in ("https", "http"):
+        return (scheme, "", "")
+    if not rest.startswith("//"):
+        return None
+    authority = re.split(r"[/?#]", rest[2:])[0]
+    if authority == "" or _AUTHORITY_FORBIDDEN.search(authority):
+        return None
+    if authority.startswith("["):
+        bracket = _USER_BRACKET_AUTHORITY.fullmatch(authority)
+        if bracket is None:
+            return None
+        host, port = "[" + bracket.group(1).lower() + "]", bracket.group(2)
+    else:
+        plain = _HOST_AUTHORITY.fullmatch(authority)
+        if plain is None:
+            return None
+        host, port = plain.group(1).lower(), plain.group(2)
+        if host.startswith(".") or ".." in host:
+            return None
+    if port is None:
+        port = ""
+    else:
+        number = int(port, 10)
+        if number < 1 or number > 65535:
+            return None
+        port = str(number)
+    return (scheme, host, port)
+
+
+def canonical_ipv4(host: str) -> bool:
+    """ChatSites.js canonicalIpv4: four parts of ``0|[1-9][0-9]{0,2}``, each at most 255.
+
+    127.1, 0x7f.1, 010.0.0.1, 3232235777, 192.168.1.020 and a trailing dot are not canonical.
+    """
+    return _CANONICAL_IPV4.fullmatch(host) is not None and all(int(part) <= 255 for part in host.split("."))
+
+
+def _ipv6_groups(text: str) -> Optional[list[int]]:
+    """The 8 groups of an IPv6 address written in hex and colons only, None when it is not one."""
+    if not re.fullmatch(r"[0-9a-f:]+", text) or text.count("::") > 1:
+        return None
+    if "::" in text:
+        head, tail = text.split("::")
+        left = head.split(":") if head else []
+        right = tail.split(":") if tail else []
+        if len(left) + len(right) > 7:
+            return None
+        parts = left + ["0"] * (8 - len(left) - len(right)) + right
+    else:
+        parts = text.split(":")
+        if len(parts) != 8:
+            return None
+    if any(part == "" or len(part) > 4 for part in parts):
+        return None
+    return [int(part, 16) for part in parts]
+
+
+def canonical_ipv6(text: str) -> str:
+    """ChatSites.js canonicalIpv6: the WHATWG / Chromium serialization of ``text``, "" when invalid.
+
+    ``text`` is the literal without brackets. Lower case, no leading zeros, and
+    the first longest run of two or more zero groups written as ``::``. Not
+    ipaddress: from Python 3.13 it writes ::ffff:0:0/96 with a dotted IPv4 tail,
+    which no browser does. A literal is canonical when this equals its lower case.
+    """
+    groups = _ipv6_groups(text.lower())
+    if groups is None:
+        return ""
+    start, length = -1, 1
+    index = 0
+    while index < 8:
+        end = index
+        while end < 8 and groups[end] == 0:
+            end += 1
+        if end - index > length:
+            start, length = index, end - index
+        index = max(end, index + 1)
+    words = [format(group, "x") for group in groups]
+    if start < 0:
+        return ":".join(words)
+    return ":".join(words[:start]) + "::" + ":".join(words[start + length:])
 
 
 def custom_url_error(site_id: str, value: str) -> str:
@@ -489,45 +591,85 @@ def user_site_name_error(name: object, others: tuple[str, ...] = ()) -> str:
     return ""
 
 
-def user_site_url_error(url: object) -> str:
-    """ChatSites.js userSiteUrlError: "" for an https address of a public DNS name, else its code.
+def _user_site_check(url: object) -> tuple[str, str]:
+    """(code, class) of an added site's address: ("", class) when valid, (code, "") when not.
 
-    In order, first failure wins: url-empty, too-long, whitespace, url-chars,
-    userinfo, malformed, http-not-allowed, scheme, malformed, loopback-not-allowed,
-    ip-literal (any IPv4 literal, public ones too, in 005; M2).
+    Task 006 plan section 3.3, first failure wins:
+    1-6 url-empty, too-long, whitespace, url-chars, userinfo, malformed (no scheme);
+    7 scheme (neither http nor https); 8 malformed (parse_user_url);
+    9 localhost, 127.0.0.1 or [::1] exactly: loopback, http or https;
+    10 anything else is_local_address counts as this computer (not a bracketed
+       literal): loopback-not-allowed;
+    11 an IPv4 literal (last label numeric or hex): ip-form when not canonical,
+       link-local in 169.254/16, private in 10/8, 172.16/12 and 192.168/16, else ip-literal;
+    12 a bracketed IPv6 literal: ip-form when not canonical (or not an address),
+       link-local in fe80::/10, private in fc00::/7, else ip-literal;
+    13 a DNS name: http-not-allowed over http, public over https.
     """
     if not isinstance(url, str) or url == "":
-        return "url-empty"
+        return ("url-empty", "")
     if _utf16_length(url) > MAX_CUSTOM_URL_LENGTH:
-        return "too-long"
+        return ("too-long", "")
     if _URL_FORBIDDEN.search(url):
-        return "whitespace"
+        return ("whitespace", "")
     if _USER_URL_CHARS.search(url):
-        return "url-chars"
+        return ("url-chars", "")
     authority = _AUTHORITY_PREFIX.match(url)
     if authority is not None and "@" in authority.group(1):
-        return "userinfo"
+        return ("userinfo", "")
     scheme_match = _SCHEME_PREFIX.match(url)
     if scheme_match is None:
-        return "malformed"
-    scheme = scheme_match.group(1).lower()
-    if scheme == "http":
-        return "http-not-allowed"
-    if scheme != "https":
-        return "scheme"
-    parsed = parse_url(url)
+        return ("malformed", "")
+    if scheme_match.group(1).lower() not in ("http", "https"):
+        return ("scheme", "")
+    parsed = parse_user_url(url)
     if parsed is None or parsed[1] == "":
-        return "malformed"
-    if is_local_address(parsed[1]):
-        return "loopback-not-allowed"
-    if _NUMERIC_LABEL.fullmatch(normalize_host(parsed[1]).split(".")[-1]):
-        return "ip-literal"
-    return ""
+        return ("malformed", "")
+    scheme, host = parsed[0], parsed[1]
+    if host in ("localhost", "127.0.0.1", "[::1]"):
+        return ("", "loopback")
+    if host.startswith("["):
+        literal = host[1:-1]
+        if canonical_ipv6(literal) != literal:
+            return ("ip-form", "")
+        first = _ipv6_groups(literal)[0]  # type: ignore[index]  # canonical, so it parses.
+        if first & 0xFFC0 == 0xFE80:
+            return ("link-local", "")
+        if first & 0xFE00 == 0xFC00:
+            return ("", "private")
+        return ("ip-literal", "")
+    if is_local_address(host):
+        return ("loopback-not-allowed", "")
+    if _NUMERIC_LABEL.fullmatch(normalize_host(host).split(".")[-1]):
+        if not canonical_ipv4(host):
+            return ("ip-form", "")
+        first, second = (int(part) for part in host.split(".")[:2])
+        if first == 169 and second == 254:
+            return ("link-local", "")
+        if first == 10 or (first == 172 and 16 <= second <= 31) or (first == 192 and second == 168):
+            return ("", "private")
+        return ("ip-literal", "")
+    if scheme == "http":
+        return ("http-not-allowed", "")
+    return ("", "public")
+
+
+def user_site_url_error(url: object) -> str:
+    """ChatSites.js userSiteUrlError: "" for an address an added site may have, else its code.
+
+    Valid (task 006): https to a public DNS name; http or https to localhost,
+    127.0.0.1 or [::1]; http or https to a canonical private IP literal
+    (10/8, 172.16/12, 192.168/16, fc00::/7). Codes and their order: _user_site_check.
+    """
+    return _user_site_check(url)[0]
 
 
 def address_class(url: object) -> str:
-    """ChatSites.js addressClass: "public" for an address an added site may have, else "" (005)."""
-    return "public" if user_site_url_error(url) == "" else ""
+    """ChatSites.js addressClass: "public", "loopback", "private", or "" when the address is invalid.
+
+    Derived from the address on every use and never stored (005 rule 3).
+    """
+    return _user_site_check(url)[1]
 
 
 def user_site_ids(value: str) -> tuple[str, ...]:

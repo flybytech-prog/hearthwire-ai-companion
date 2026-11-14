@@ -134,10 +134,22 @@ ColumnLayout {
         var site = ChatSites.byId(chatView.confirmingClearSite, chatView.userSites)
         return site ? site.name : ""
     }
-    // Local web UI is shown in either pane: its owner problems and load
-    // failures are said whichever pane has the focus.
+    // Local web UI is shown in either pane: its load failures are said
+    // whichever pane has the focus.
     readonly property bool localSite: chatView.siteId === "local"
         || (!!chatView.web && chatView.web.splitShown === true && chatView.siteIdB === "local")
+    // Local or an added site on this computer is shown in either pane: owner
+    // problems are said whichever pane has the focus.
+    readonly property bool ownerCheckedSite: ChatSites.ownerChecked(chatView.siteId, chatView.customUrls,
+                                                                    chatView.userSites)
+        || (!!chatView.web && chatView.web.splitShown === true
+            && ChatSites.ownerChecked(chatView.siteIdB, chatView.customUrls, chatView.userSites))
+    // The page in use is an added site on this computer or the home network.
+    readonly property bool homeSite: {
+        var id = chatView.web && typeof chatView.web.activeSiteId === "string" ? chatView.web.activeSiteId : ""
+        var site = ChatSites.isUserSiteId(id) ? ChatSites.effectiveSite(id, chatView.customUrls, chatView.userSites) : null
+        return !!site && (site.local_kind === "loopback" || site.local_kind === "private")
+    }
     // Split is on but the popup is too narrow for two pages side by side.
     readonly property bool splitHint: chatView.splitActive && !!chatView.web && chatView.web.splitShown === false
     // Idle = the saved web chat is open but not shown (popup closed, Usage or
@@ -699,7 +711,7 @@ ColumnLayout {
         objectName: "localOwnerMessage"
         Layout.fillWidth: true
         readonly property string code: chatView.web ? chatView.web.localOwnerProblem : ""
-        visible: chatView.localSite && code !== ""
+        visible: chatView.ownerCheckedSite && code !== ""
         type: code === "resend" ? Kirigami.MessageType.Information
             : code === "not-running" ? Kirigami.MessageType.Warning
             : Kirigami.MessageType.Error
@@ -881,13 +893,16 @@ ColumnLayout {
     }
 
     Kirigami.InlineMessage {
+        objectName: "pageFailedMessage"
         Layout.fillWidth: true
         visible: !!chatView.web && chatView.web.pageFailed && !chatView.web.pageCrashed
         type: Kirigami.MessageType.Warning
         // The local address itself is never shown here.
         text: chatView.localSite
             ? i18n("Couldn't load. Is your local chat server running? You can change its address in Settings → Chat: Edit on the Local web UI row.")
-            : i18n("Couldn't load this page.")
+            : chatView.homeSite
+                ? i18n("Couldn't load. Is the server running? You can change its address in Settings → Chat.")
+                : i18n("Couldn't load this page.")
         actions: [
             Kirigami.Action {
                 text: i18n("Retry")

@@ -1,8 +1,10 @@
 """Settings backup (core/settingsbackup.py) and --settings-backup."""
 
 import ast
+import ipaddress
 import json
 import os
+import random
 import re
 import shutil
 import stat
@@ -487,53 +489,130 @@ NAME_CASES = [
     ("Claude ", (), "name-chars"),
 ]
 
-# (address, code), checked in the order of plan section 2.1.
+# (address, code, class), checked in the order of the 006 plan section 3.3. Valid
+# addresses have code "" and their class; refused ones code and class "".
+P, L, V = "public", "loopback", "private"
 USER_URL_CASES = [
-    ("https://chat.example.org/chat", ""), ("https://a.example.com", ""), ("HTTPS://A.Example.COM:8443/x?q=1#f", ""),
-    ("https://nas.local/", ""), ("https://nas.lan", ""), ("https://example.com1/", ""), ("https://a.example.com./", ""),
-    ("https://a.example.com/@x", ""), ("https://a.example.com/%41'~!$()*,;=", ""), ("https://xn--mnchen-3ya.example/", ""),
-    ("", "url-empty"),
-    ("https://a.example.com/" + "a" * 2026, ""), ("https://a.example.com/" + "a" * 2027, "too-long"),
-    ("https://a.example.com/" + "\U0001f600" * 1014, "too-long"),
-    ("https://a.example.com/ x", "whitespace"), ("https://a.example.com/\t", "whitespace"),
-    ("https://a.example.com/\u00a0", "whitespace"), ("https://a.example.com/\u2028", "whitespace"),
-    ("https://a.example.com/\u3000", "whitespace"), ("https://a.example.com/\ufeff", "whitespace"),
-    ("https://a.example.com/\x00", "whitespace"), ("https://a.example.com/\x7f", "whitespace"),
-    (" https://a.example.com/", "whitespace"), ("https://user@a.example.com/ ", "whitespace"),
-    ("https://a.example.com/\x85", "url-chars"), ("https://a.example.com/\u00fc", "url-chars"),
-    ("https://ex\u00e4mple.com/", "url-chars"), ("https://a.example.com/\U0001f600", "url-chars"),
-    ("https://a.example.com/\u200b", "url-chars"), ("https://a.example.com/\u202e", "url-chars"),
-    ("https://a.example.com/\ud800", "url-chars"), ("https://user@a.example.com/\u00fc", "url-chars"),
-    *[("https://a.example.com/" + char, "url-chars") for char in '"\\<>`{}|^'],
-    ("https://user@a.example.com/", "userinfo"), ("https://a:b@a.example.com/", "userinfo"),
-    ("http://user@a.example.com/", "userinfo"), ("ftp://user@a.example.com/", "userinfo"),
-    ("https://@a.example.com/", "userinfo"),
-    ("a.example.com", "malformed"), ("//a.example.com/", "malformed"), ("1https://a.example.com/", "malformed"),
-    ("http://a.example.com/", "http-not-allowed"), ("HTTP://a.example.com/", "http-not-allowed"),
-    ("http://localhost/", "http-not-allowed"), ("http:x", "http-not-allowed"),
-    ("ftp://a.example.com/", "scheme"), ("javascript:alert(1)", "scheme"), ("data:text/html,x", "scheme"),
-    ("about:blank", "scheme"), ("file:///etc/passwd", "scheme"), ("httpss://a.example.com/", "scheme"),
-    ("https:a.example.com", "malformed"), ("https:///x", "malformed"), ("https://", "malformed"),
-    ("https://[fd00::1]/", "malformed"), ("https://[::2]/", "malformed"), ("https://a_b.example.com/", "malformed"),
-    ("https://a.example.com%2f/", "malformed"), ("https://.a.example.com/", "malformed"),
-    ("https://a..example.com/", "malformed"), ("https://a.example.com:0/", "malformed"),
-    ("https://a.example.com:65536/", "malformed"), ("https://a.example.com:/", "malformed"),
-    ("https://[::1]/", "loopback-not-allowed"), ("https://localhost/", "loopback-not-allowed"),
-    ("https://LOCALHOST./", "loopback-not-allowed"), ("https://intranet/", "loopback-not-allowed"),
-    ("https://a.localhost/", "loopback-not-allowed"), ("https://a.localhost.localdomain/", "loopback-not-allowed"),
-    ("https://ip6-loopback/", "loopback-not-allowed"), ("https://127.0.0.1/", "loopback-not-allowed"),
-    ("https://127.1/", "loopback-not-allowed"), ("https://0x7f000001/", "loopback-not-allowed"),
-    ("https://017700000001/", "loopback-not-allowed"), ("https://0x7f.1/", "loopback-not-allowed"),
-    ("https://0/", "loopback-not-allowed"), ("https://0.0.0.0/", "loopback-not-allowed"),
-    ("https://1.2.3.256/", "loopback-not-allowed"), ("https://1.2.3.08/", "loopback-not-allowed"),
-    ("https://1.2.3.4.5/", "loopback-not-allowed"), ("https://example.0x/", "loopback-not-allowed"),
-    ("https://example.123/", "loopback-not-allowed"), ("https://0x08080808/", "loopback-not-allowed"),
-    ("https://134744072/", "loopback-not-allowed"),
-    # M2: every IPv4 literal is refused in 005, private, link-local and public alike.
-    ("https://10.0.0.1/", "ip-literal"), ("https://172.16.0.1/", "ip-literal"), ("https://192.168.1.1/", "ip-literal"),
-    ("https://169.254.169.254/", "ip-literal"), ("https://1.2.3.4/", "ip-literal"), ("https://8.8.8.8./", "ip-literal"),
-    ("https://0x8.0x8.0x8.0x8/", "ip-literal"), ("https://8.8.2056/", "ip-literal"), ("https://10.1/", "ip-literal"),
-    ("https://0xa.0.0.1:8443/", "ip-literal"),
+    ("https://chat.example.org/chat", "", P), ("https://a.example.com", "", P), ("HTTPS://A.Example.COM:8443/x?q=1#f", "", P),
+    ("https://nas.local/", "", P), ("https://nas.lan", "", P), ("https://example.com1/", "", P), ("https://a.example.com./", "", P),
+    ("https://a.example.com/@x", "", P), ("https://a.example.com/%41'~!$()*,;=", "", P), ("https://xn--mnchen-3ya.example/", "", P),
+    ("", "url-empty", ""),
+    ("https://a.example.com/" + "a" * 2026, "", P), ("https://a.example.com/" + "a" * 2027, "too-long", ""),
+    ("https://a.example.com/" + "\U0001f600" * 1014, "too-long", ""),
+    ("https://a.example.com/ x", "whitespace", ""), ("https://a.example.com/\t", "whitespace", ""),
+    ("https://a.example.com/ ", "whitespace", ""), ("https://a.example.com/ ", "whitespace", ""),
+    ("https://a.example.com/　", "whitespace", ""), ("https://a.example.com/﻿", "whitespace", ""),
+    ("https://a.example.com/\x00", "whitespace", ""), ("https://a.example.com/\x7f", "whitespace", ""),
+    (" https://a.example.com/", "whitespace", ""), ("https://user@a.example.com/ ", "whitespace", ""),
+    ("https://a.example.com/\x85", "url-chars", ""), ("https://a.example.com/ü", "url-chars", ""),
+    ("https://exämple.com/", "url-chars", ""), ("https://a.example.com/\U0001f600", "url-chars", ""),
+    ("https://a.example.com/​", "url-chars", ""), ("https://a.example.com/‮", "url-chars", ""),
+    ("https://a.example.com/\ud800", "url-chars", ""), ("https://user@a.example.com/ü", "url-chars", ""),
+    *[("https://a.example.com/" + char, "url-chars", "") for char in '"\\<>`{}|^'],
+    ("https://user@a.example.com/", "userinfo", ""), ("https://a:b@a.example.com/", "userinfo", ""),
+    ("http://user@a.example.com/", "userinfo", ""), ("ftp://user@a.example.com/", "userinfo", ""),
+    ("https://@a.example.com/", "userinfo", ""), ("http://user@localhost:3000/", "userinfo", ""),
+    ("http://x@[fd00::1]/", "userinfo", ""),
+    ("a.example.com", "malformed", ""), ("//a.example.com/", "malformed", ""), ("1https://a.example.com/", "malformed", ""),
+    ("localhost:3000", "scheme", ""), ("192.168.1.20:3000", "malformed", ""),
+    # 006: http is no longer refused at the scheme step; only DNS names are refused over http.
+    ("http://a.example.com/", "http-not-allowed", ""), ("HTTP://a.example.com/", "http-not-allowed", ""),
+    ("http://localhost/", "", L), ("http:x", "malformed", ""), ("http:/x", "malformed", ""), ("http://", "malformed", ""),
+    ("ftp://a.example.com/", "scheme", ""), ("javascript:alert(1)", "scheme", ""), ("data:text/html,x", "scheme", ""),
+    ("about:blank", "scheme", ""), ("file:///etc/passwd", "scheme", ""), ("httpss://a.example.com/", "scheme", ""),
+    ("ws://localhost:3000/", "scheme", ""), ("ftp://192.168.1.20/", "scheme", ""),
+    ("https:a.example.com", "malformed", ""), ("https:///x", "malformed", ""), ("https://", "malformed", ""),
+    ("https://[fd00::1]/", "", V), ("https://[::2]/", "ip-literal", ""), ("https://a_b.example.com/", "malformed", ""),
+    ("https://a.example.com%2f/", "malformed", ""), ("https://.a.example.com/", "malformed", ""),
+    ("https://a..example.com/", "malformed", ""), ("https://a.example.com:0/", "malformed", ""),
+    ("https://a.example.com:65536/", "malformed", ""), ("https://a.example.com:/", "malformed", ""),
+    # Step 9: this computer, only as localhost, 127.0.0.1 or [::1], http or https, any port.
+    ("https://[::1]/", "", L), ("https://localhost/", "", L), ("https://127.0.0.1/", "", L),
+    ("http://localhost:3000/", "", L), ("https://localhost:8443/", "", L), ("http://127.0.0.1:8080/", "", L),
+    ("http://[::1]:8080/", "", L), ("https://[::1]:1/", "", L), ("HTTP://LOCALHOST:3000/", "", L),
+    ("http://Localhost/", "", L), ("http://localhost:080/", "", L), ("https://localhost:443/", "", L),
+    ("http://localhost:65535/x?y#z", "", L), ("http://localhost:0/", "malformed", ""),
+    ("http://localhost:65536/", "malformed", ""), ("http://localhost:/", "malformed", ""),
+    # Step 10: every other spelling of this computer. Dotless names are this computer too.
+    ("https://LOCALHOST./", "loopback-not-allowed", ""), ("http://localhost./", "loopback-not-allowed", ""),
+    ("https://intranet/", "loopback-not-allowed", ""), ("http://nas/", "loopback-not-allowed", ""),
+    ("https://a.localhost/", "loopback-not-allowed", ""), ("http://a.localhost/", "loopback-not-allowed", ""),
+    ("https://a.localhost.localdomain/", "loopback-not-allowed", ""), ("http://localhost.localdomain/", "loopback-not-allowed", ""),
+    ("https://ip6-loopback/", "loopback-not-allowed", ""), ("http://ip6-localhost/", "loopback-not-allowed", ""),
+    ("https://127.1/", "loopback-not-allowed", ""), ("http://127.1/", "loopback-not-allowed", ""),
+    ("http://127.0.0.2/", "loopback-not-allowed", ""), ("https://127.255.255.255/", "loopback-not-allowed", ""),
+    ("http://127.0.0.1./", "loopback-not-allowed", ""), ("https://0x7f000001/", "loopback-not-allowed", ""),
+    ("https://017700000001/", "loopback-not-allowed", ""), ("https://0x7f.1/", "loopback-not-allowed", ""),
+    ("https://0/", "loopback-not-allowed", ""), ("https://0.0.0.0/", "loopback-not-allowed", ""),
+    ("http://0.0.0.0:3000/", "loopback-not-allowed", ""),
+    ("https://1.2.3.256/", "loopback-not-allowed", ""), ("https://1.2.3.08/", "loopback-not-allowed", ""),
+    ("https://1.2.3.4.5/", "loopback-not-allowed", ""), ("https://example.0x/", "loopback-not-allowed", ""),
+    ("https://example.123/", "loopback-not-allowed", ""), ("https://0x08080808/", "loopback-not-allowed", ""),
+    ("https://134744072/", "loopback-not-allowed", ""), ("http://3232235777/", "loopback-not-allowed", ""),
+    ("http://192.168.1.256/", "loopback-not-allowed", ""),
+    # Step 11: IPv4 literals. The edges of each private range, link-local, and the rest.
+    ("http://10.0.0.0/", "", V), ("http://10.255.255.255/", "", V), ("https://10.0.0.1/", "", V),
+    ("http://9.255.255.255/", "ip-literal", ""), ("http://11.0.0.0/", "ip-literal", ""),
+    ("http://172.15.255.255/", "ip-literal", ""), ("http://172.16.0.0/", "", V), ("https://172.16.0.1/", "", V),
+    ("http://172.31.255.255/", "", V), ("http://172.32.0.0/", "ip-literal", ""),
+    ("http://192.167.255.255/", "ip-literal", ""), ("http://192.168.0.0/", "", V),
+    ("https://192.168.1.1/", "", V), ("http://192.168.255.255/", "", V), ("http://192.169.0.0/", "ip-literal", ""),
+    ("http://192.168.1.20:3000/", "", V), ("https://10.0.0.5/", "", V),
+    ("https://169.254.169.254/", "link-local", ""), ("http://169.254.169.254/", "link-local", ""),
+    ("http://169.254.0.0/", "link-local", ""), ("http://169.253.255.255/", "ip-literal", ""),
+    ("http://169.255.0.0/", "ip-literal", ""),
+    ("http://100.64.0.1/", "ip-literal", ""), ("https://100.127.255.255/", "ip-literal", ""),
+    ("https://1.2.3.4/", "ip-literal", ""), ("http://8.8.8.8/", "ip-literal", ""), ("https://8.8.8.8/", "ip-literal", ""),
+    ("http://255.255.255.255/", "ip-literal", ""), ("http://224.0.0.1/", "ip-literal", ""),
+    ("http://0.1.2.3/", "ip-literal", ""),
+    # Non-canonical IPv4: refused with ip-form, whatever the range.
+    ("http://192.168.1.020/", "ip-form", ""), ("http://0xc0.168.1.1/", "ip-form", ""),
+    ("http://192.168.1/", "ip-form", ""), ("http://192.168.1.1./", "ip-form", ""),
+    ("http://192.168.01.1/", "ip-form", ""), ("http://192.168.1.0x1/", "ip-form", ""),
+    ("http://10.1/", "ip-form", ""), ("https://10.1/", "ip-form", ""), ("https://8.8.8.8./", "ip-form", ""),
+    ("https://0x8.0x8.0x8.0x8/", "ip-form", ""), ("https://8.8.2056/", "ip-form", ""),
+    ("https://0xa.0.0.1:8443/", "ip-form", ""), ("http://010.0.0.1/", "ip-form", ""),
+    ("http://169.254.169.0254/", "ip-form", ""),
+    # Step 12: bracketed IPv6 literals other than [::1].
+    ("http://[fd00::1]/", "", V), ("http://[FD00::1]/", "", V), ("http://[fd00::20]:3000/", "", V),
+    ("http://[fd00:0:0:0:0:0:0:1]/", "ip-form", ""), ("http://[fd00::0:1]/", "ip-form", ""),
+    ("http://[fd00:0:1:1:1:1:1:1]/", "", V), ("http://[fd00::1:1:1:1:1:1]/", "ip-form", ""),
+    ("http://[fd00:1:0:0:1:0:0:1]/", "ip-form", ""), ("http://[fd00:1::1:0:0:1]/", "", V),
+    ("http://[fd00:1:0:0:1::1]/", "ip-form", ""),
+    ("http://[fd00:0:0:1:0:0:0:1]/", "ip-form", ""), ("http://[fd00:0:0:1::1]/", "", V),
+    ("http://[fd00::1:0:0:0:1]/", "ip-form", ""),
+    ("http://[fd00::1:0:0:1:1]/", "", V), ("http://[fd00:0:0:1::1:1]/", "ip-form", ""),
+    ("http://[fd00:0000::1]/", "ip-form", ""), ("http://[fd00::01]/", "ip-form", ""),
+    ("http://[fc00::]/", "", V), ("http://[fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]/", "", V),
+    ("http://[FDFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF]:65535/", "", V), ("http://[fbff::1]/", "ip-literal", ""),
+    ("http://[fe00::1]/", "ip-literal", ""),
+    ("http://[fe80::1]/", "link-local", ""), ("https://[febf::1]/", "link-local", ""), ("http://[fec0::1]/", "ip-literal", ""),
+    ("http://[fe80::1%25eth0]/", "malformed", ""), ("http://[fe80::1%eth0]/", "malformed", ""),
+    ("http://[2001:db8::1]/", "ip-literal", ""), ("https://[2606:4700::1111]/", "ip-literal", ""),
+    ("http://[::ffff:192.168.1.1]/", "malformed", ""), ("http://[::ffff:c0a8:101]/", "ip-literal", ""),
+    ("http://[::192.168.1.1]/", "malformed", ""), ("http://[::]/", "ip-literal", ""), ("http://[ff02::1]/", "ip-literal", ""),
+    ("http://[0:0:0:0:0:0:0:1]/", "ip-form", ""), ("http://[::01]/", "ip-form", ""), ("http://[0::1]/", "ip-form", ""),
+    ("http://[::1]./", "malformed", ""), ("http://[::1]x/", "malformed", ""),
+    # Not an IPv6 address at all, but only hex and colons: ip-form, like any other odd literal.
+    ("http://[fd00::1::2]/", "ip-form", ""), ("http://[fd000::1]/", "ip-form", ""), ("http://[1:2:3:4:5:6:7:8:9]/", "ip-form", ""),
+    ("http://[fd00:1:2:3:4:5:6:7::]/", "ip-form", ""), ("http://[:fd00::1]/", "ip-form", ""), ("http://[fd00::1:]/", "ip-form", ""),
+    ("http://[:::]/", "ip-form", ""), ("http://[fd00]/", "ip-form", ""), ("http://[fd00:1:2:3:4:5:6]/", "ip-form", ""),
+    ("http://[fd00:0000:0000:0000:0000:0000:0000:0001]/", "ip-form", ""),
+    ("http://[fd00:00000:0000:0000:0000:0000:0000:0001]/", "malformed", ""),
+    ("http://[]/", "malformed", ""), ("http://[:]/", "malformed", ""), ("http://[fd00::g]/", "malformed", ""),
+    ("http://[fd00::1/", "malformed", ""), ("http://fd00::1/", "malformed", ""), ("http://[[fd00::1]]/", "malformed", ""),
+    ("http://[fd00::1]:/", "malformed", ""),
+    # Ports, explicit or by default, on each class.
+    ("http://192.168.1.20:0/", "malformed", ""), ("http://192.168.1.20:65536/", "malformed", ""),
+    ("http://192.168.1.20:1/", "", V), ("http://192.168.1.20:65535/", "", V), ("http://192.168.1.20:80/", "", V),
+    ("https://192.168.1.20:443/", "", V), ("http://192.168.1.20:00080/", "", V), ("http://192.168.1.20:123456/", "malformed", ""),
+    ("http://[fd00::1]:0/", "malformed", ""), ("http://[fd00::1]:65536/", "malformed", ""),
+    ("http://[fd00::1]:1/", "", V), ("http://[fd00::1]:65535/", "", V), ("http://[::1]:65536/", "malformed", ""),
+    # Step 13: names. http only for this computer and home-network IP literals.
+    ("http://nas.local/", "http-not-allowed", ""), ("http://nas.local", "http-not-allowed", ""),
+    ("http://nas.lan/", "http-not-allowed", ""), ("https://nas.local", "", P), ("http://example.com:8080/", "http-not-allowed", ""),
+    ("http://a.example.com./", "http-not-allowed", ""), ("http://192.168.1.20.nip.io/", "http-not-allowed", ""),
+    ("https://192.168.1.20.nip.io/", "", P),
 ]
 
 
@@ -542,15 +621,16 @@ def test_user_site_name_codes(name, others, code):
     assert backup.user_site_name_error(name, others) == code
 
 
-@pytest.mark.parametrize(("url", "code"), USER_URL_CASES)
-def test_user_site_url_codes(url, code):
+@pytest.mark.parametrize(("url", "code", "kind"), USER_URL_CASES)
+def test_user_site_url_codes(url, code, kind):
     assert backup.user_site_url_error(url) == code
-    assert backup.address_class(url) == ("public" if code == "" else "")
+    assert backup.address_class(url) == kind
+    assert (code == "") == (kind != "")
 
 
 def test_the_user_site_lists_have_no_repeated_case():
     assert len({(name, others) for name, others, _ in NAME_CASES}) == len(NAME_CASES)
-    assert len({url for url, _ in USER_URL_CASES}) == len(USER_URL_CASES)
+    assert len({url for url, _, _ in USER_URL_CASES}) == len(USER_URL_CASES)
 
 
 def category_ranges(categories):
@@ -624,11 +704,237 @@ TestCase {
 def test_the_user_site_port_gives_the_same_codes_as_chat_sites_js(tmp_path):
     """userSiteNameError (others as added-site entries), userSiteUrlError and addressClass, case by case."""
     names = [[name, list(others)] for name, others, _ in NAME_CASES]
-    urls = [url for url, _ in USER_URL_CASES]
+    urls = [url for url, _, _ in USER_URL_CASES]
     results = chat_sites_js_results(tmp_path, USER_SITE_PARITY_QML % (json.dumps(names), json.dumps(urls)))
     expected = ([backup.user_site_name_error(name, others) for name, others, _ in NAME_CASES]
                 + [backup.user_site_url_error(url) for url in urls] + [backup.address_class(url) for url in urls])
     assert results == expected
+
+
+# --- task 006: canonical literals, the wide parser and the address fuzz ---------------------------
+
+@pytest.mark.parametrize(("host", "canonical"), [
+    ("192.168.1.20", True), ("0.0.0.0", True), ("255.255.255.255", True), ("10.0.0.1", True),
+    ("192.168.1.020", False), ("192.168.01.1", False), ("0xc0.168.1.1", False), ("3232235777", False),
+    ("192.168.1", False), ("127.1", False), ("192.168.1.1.", False), ("192.168.1.256", False),
+    ("1.2.3.4.5", False), ("1000.1.1.1", False), ("00.1.1.1", False), ("", False), ("a.b.c.d", False),
+])
+def test_canonical_ipv4(host, canonical):
+    assert backup.canonical_ipv4(host) is canonical
+
+
+@pytest.mark.parametrize(("text", "serialized"), [
+    ("fd00::1", "fd00::1"), ("FD00::1", "fd00::1"), ("fd00:0:0:0:0:0:0:1", "fd00::1"), ("fd00::0:1", "fd00::1"),
+    ("fd00:0:1:1:1:1:1:1", "fd00:0:1:1:1:1:1:1"), ("fd00::1:1:1:1:1:1", "fd00:0:1:1:1:1:1:1"),
+    ("fd00:1:0:0:1:0:0:1", "fd00:1::1:0:0:1"), ("fd00:0:0:1:0:0:0:1", "fd00:0:0:1::1"),
+    ("::", "::"), ("::1", "::1"), ("0:0:0:0:0:0:0:0", "::"), ("1::", "1::"), ("1:0:0:0:0:0:0:0", "1::"),
+    ("0001:00:0:0:0:0:0:000a", "1::a"), ("fc00::", "fc00::"), ("1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7:8"),
+    ("::ffff:c0a8:101", "::ffff:c0a8:101"),  # WHATWG keeps hex; Python 3.13+ ipaddress would write dots.
+    ("", ""), (":", ""), (":::", ""), ("1::2::3", ""), ("12345::", ""), ("1:2:3:4:5:6:7", ""),
+    ("1:2:3:4:5:6:7:8:9", ""), ("1:2:3:4:5:6:7:8::", ""), (":1::", ""), ("::1:", ""), ("g::", ""),
+    ("::1.2.3.4", ""), ("fe80::1%eth0", ""),
+])
+def test_canonical_ipv6(text, serialized):
+    assert backup.canonical_ipv6(text) == serialized
+
+
+def random_groups(rng, first=None):
+    """8 IPv6 groups, mostly 0 or small, so every compression case comes up."""
+    groups = [rng.choice((0, 0, 0, 1, 2, 0xA, 0xFF, 0x100, rng.randrange(0x10000))) for _ in range(8)]
+    if first is not None:
+        groups[0] = first
+    return groups
+
+
+def test_canonical_ipv6_matches_ipaddress():
+    """Few hundred 8-group values: the module's serialization is ipaddress's (outside ::ffff:0:0/96)."""
+    rng = random.Random(60061)
+    checked = 0
+    for _ in range(600):
+        groups = random_groups(rng)
+        address = ipaddress.IPv6Address(":".join(format(group, "x") for group in groups))
+        if address.ipv4_mapped is not None:
+            continue
+        assert backup.canonical_ipv6(address.exploded) == address.compressed, address.exploded
+        assert backup.canonical_ipv6(address.compressed) == address.compressed
+        checked += 1
+    assert checked > 500
+
+
+IPV6_FIRST_GROUPS = (0xFD00, 0xFC00, 0xFDFF, 0xFBFF, 0xFE00, 0xFE80, 0xFEBF, 0xFEC0, 0xFF02, 0x2001, 0x0)
+
+
+def ipv6_spellings(rng, groups):
+    """Ways to write ``groups``: canonical, upper case, full, zero-padded, wrong compressions."""
+    words = [format(group, "x") for group in groups]
+    canonical = backup.canonical_ipv6(":".join(words))
+    spellings = {canonical, canonical.upper(), ":".join(words), ":".join(format(group, "04x") for group in groups)}
+    zeros = [index for index, group in enumerate(groups) if group == 0]
+    for index in zeros:  # Compress a single zero group, or a run that isn't the first longest.
+        end = index
+        while end < 8 and groups[end] == 0:
+            end += 1
+        for stop in range(index + 1, end + 1):
+            spellings.add(":".join(words[:index]) + "::" + ":".join(words[stop:]))
+    spellings.add(canonical.replace("::", ":0::", 1) if "::" in canonical and canonical != "::" else canonical + ":")
+    return sorted(spellings, key=lambda text: (len(text), text))[:rng.randint(4, 8)]
+
+
+def ipv6_expected(literal):
+    """(code, class) for ``[literal]`` from ipaddress, independent of the module."""
+    try:
+        address = ipaddress.IPv6Address(literal)
+    except ValueError:
+        return ("ip-form", "")
+    if address.ipv4_mapped is not None:
+        return None  # Python 3.13+ writes these with dots; test_canonical_ipv6 pins them.
+    if literal.lower() != address.compressed:
+        return ("ip-form", "")
+    if address == ipaddress.IPv6Address("::1"):
+        return ("", "loopback")
+    if address in ipaddress.IPv6Network("fe80::/10"):
+        return ("link-local", "")
+    if address in ipaddress.IPv6Network("fc00::/7"):
+        return ("", "private")
+    return ("ip-literal", "")
+
+
+def test_ipv6_addresses_get_the_code_ipaddress_gives():
+    rng = random.Random(60062)
+    for _ in range(400):
+        groups = random_groups(rng, rng.choice(IPV6_FIRST_GROUPS))
+        for literal in ipv6_spellings(rng, groups):
+            url = f"{rng.choice(('http', 'https'))}://[{literal}]/"
+            if len(literal) > 39:
+                assert backup.user_site_url_error(url) == "malformed", url
+                continue
+            expected = ipv6_expected(literal)
+            if expected is None:
+                continue
+            assert (backup.user_site_url_error(url), backup.address_class(url)) == expected, url
+
+
+def ipv4_expected(host):
+    """(code, class) for a canonical dotted quad from ipaddress, independent of the module."""
+    address = ipaddress.IPv4Address(host)
+    if host in ("127.0.0.1",):
+        return ("", "loopback")
+    if address in ipaddress.IPv4Network("127.0.0.0/8") or address in ipaddress.IPv4Network("0.0.0.0/32"):
+        return ("loopback-not-allowed", "")
+    if address in ipaddress.IPv4Network("169.254.0.0/16"):
+        return ("link-local", "")
+    if any(address in ipaddress.IPv4Network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")):
+        return ("", "private")
+    return ("ip-literal", "")
+
+
+IPV4_EDGES = (0, 1, 9, 10, 11, 99, 100, 126, 127, 128, 168, 169, 171, 172, 173, 191, 192, 193, 223, 224, 254, 255)
+IPV4_SECOND = (0, 1, 15, 16, 17, 30, 31, 32, 63, 64, 127, 128, 167, 168, 169, 253, 254, 255)
+
+
+def random_quad(rng):
+    return [rng.choice(IPV4_EDGES), rng.choice(IPV4_SECOND), rng.choice((0, 1, 20, 255, rng.randrange(256))),
+            rng.choice((0, 1, 20, 254, 255, rng.randrange(256)))]
+
+
+def test_dotted_quads_get_the_code_ipaddress_gives():
+    rng = random.Random(60063)
+    for _ in range(2000):
+        host = ".".join(map(str, random_quad(rng)))
+        url = f"{rng.choice(('http', 'https'))}://{host}:{rng.randint(1, 65535)}/"
+        assert (backup.user_site_url_error(url), backup.address_class(url)) == ipv4_expected(host), url
+
+
+def ipv4_spellings(rng, quad):
+    """A dotted quad and the other forms a browser reads as the same address."""
+    value = (quad[0] << 24) | (quad[1] << 16) | (quad[2] << 8) | quad[3]
+    return [
+        ".".join(map(str, quad)), ".".join(map(str, quad)) + ".",
+        ".".join(f"0{part:o}" if part and rng.random() < 0.5 else str(part) for part in quad),
+        ".".join(hex(part) if rng.random() < 0.5 else str(part) for part in quad),
+        f"{quad[0]}.{quad[1]}.{(quad[2] << 8) | quad[3]}", f"{quad[0]}.{value & 0xFFFFFF}", str(value), hex(value),
+        ".".join(map(str, quad[:3])) + ".0" + str(quad[3]),
+    ]
+
+
+URL_FUZZ_NAMES = ("a.example.com", "nas.local", "nas.lan", "nas", "intranet", "localhost", "LocalHost", "localhost.",
+                  "a.localhost", "localhost.localdomain", "ip6-localhost", "192.168.1.20.nip.io", "example.123",
+                  "example.0x", "xn--mnchen-3ya.example", "a_b.example.com", "a..b.example.com", ".example.com")
+URL_FUZZ_PORTS = ("", "", "", ":0", ":1", ":80", ":443", ":3000", ":8080", ":65535", ":65536", ":00080", ":", ":999999")
+URL_FUZZ_SCHEMES = ("http", "https", "http", "https", "HTTP", "Https", "ftp", "ws")
+URL_FUZZ_TAILS = ("/", "", "/chat?x=1#y", "?q", "#f", "/a/b")
+
+
+def url_fuzz_cases():
+    """Seeded added-site addresses: every class, IPv4 and IPv6 spellings, ports and schemes."""
+    rng = random.Random(6006)
+    hosts = list(URL_FUZZ_NAMES) + ["127.0.0.1", "[::1]", "[::1]", "127.0.0.2", "0.0.0.0", "[::]"]
+    for _ in range(250):
+        hosts.extend(ipv4_spellings(rng, random_quad(rng)))
+    for _ in range(250):
+        hosts.extend(f"[{literal}]" for literal in ipv6_spellings(rng, random_groups(rng, rng.choice(IPV6_FIRST_GROUPS))))
+    hosts.extend(("[fe80::1%25eth0]", "[::ffff:192.168.1.1]", "[fd00::1", "fd00::1]", "[]", "[fd00::g]", "[:]"))
+    cases = []
+    for host in hosts:
+        for _ in range(8 if host in URL_FUZZ_NAMES else 2):
+            cases.append(rng.choice(URL_FUZZ_SCHEMES) + "://" + host + rng.choice(URL_FUZZ_PORTS)
+                         + rng.choice(URL_FUZZ_TAILS))
+    return list(dict.fromkeys(cases))
+
+
+def test_the_url_fuzz_covers_every_code_and_class():
+    cases = url_fuzz_cases()
+    assert len(cases) > 4000
+    seen = {backup.user_site_url_error(url) for url in cases} | {backup.address_class(url) for url in cases}
+    assert seen >= {"", "public", "loopback", "private", "scheme", "malformed", "loopback-not-allowed",
+                    "ip-form", "link-local", "ip-literal", "http-not-allowed"}, seen
+
+
+URL_FUZZ_QML = """import QtQuick
+import QtTest
+import "ChatSites.js" as ChatSites
+
+TestCase {
+    name: "UrlFuzz"
+    function code(result) {
+        return typeof result === "string" ? result : result.error
+    }
+    function test_dump() {
+        var urls = %s
+        console.log("PARITY " + JSON.stringify(urls.map(function (url) {
+            return [code(ChatSites.userSiteUrlError(url)), ChatSites.addressClass(url)]
+        })))
+    }
+}
+"""
+
+
+def test_the_url_fuzz_gives_the_same_codes_and_classes_as_chat_sites_js(tmp_path):
+    """Thousands of seeded addresses (006 classes, IPv6 spellings, ports) through both ports."""
+    cases = url_fuzz_cases()
+    results = chat_sites_js_results(tmp_path, URL_FUZZ_QML % json.dumps(cases))
+    differences = [(url, found, [backup.user_site_url_error(url), backup.address_class(url)])
+                   for url, found in zip(cases, results)
+                   if found != [backup.user_site_url_error(url), backup.address_class(url)]]
+    assert len(results) == len(cases)
+    assert differences == [], differences[:40]
+
+
+def test_parse_url_still_reads_only_the_loopback_bracket():
+    """Built-ins keep the narrow parser (006 M-A); only added sites read other IPv6 literals."""
+    assert backup.parse_url("http://[fd00::1]:3000/") is None
+    assert backup.parse_url("https://[FD00::1]/") is None
+    assert backup.parse_url("http://[::1]:8080/") == ("http", "[::1]", "8080")
+    assert backup.parse_user_url("http://[FD00::1]:03000/x") == ("http", "[fd00::1]", "3000")
+    assert backup.parse_user_url("https://[::1]") == ("https", "[::1]", "")
+    assert backup.parse_user_url("HTTP://NAS.Example:80/") == ("http", "nas.example", "80")
+    assert backup.parse_user_url("ftp://x/") == ("ftp", "", "")
+    for url in ("http://[fd00::1%25e]/", "http://[::ffff:1.2.3.4]/", "http://[" + "0" * 40 + "]/", "http://[a]/",
+                "http://[fd00::1]:0/", "http://x@[fd00::1]/", "http:[fd00::1]"):
+        assert backup.parse_user_url(url) is None, url
+    assert backup.custom_url_error("local", "http://[fd00::1]:3000/") == "malformed"
+    assert backup.custom_url_error("claude", "https://[fd00::1]/") == "malformed"
+    assert backup.custom_url_error("local", "http://192.168.1.20:3000/") == "http-not-loopback"
 
 
 NAME_FUZZ_QML = """import QtQuick
@@ -728,7 +1034,7 @@ BAD_USER_SITES = [
     user_sites(SITE_A, dict(SITE_B, name="le chat")),                               # the same name, other case
     user_sites(SITE_A, dict(SITE_B, name="LE CHAT")),
     *[user_sites(entry_with(name=name)) for name, others, code in NAME_CASES if code and not others],
-    *[user_sites(entry_with(url=url)) for url, code in USER_URL_CASES if code],
+    *[user_sites(entry_with(url=url)) for url, code, _ in USER_URL_CASES if code],
     user_sites(entry_with(name=1)), user_sites(entry_with(name=None)), user_sites(entry_with(url=["https://a.example.com/"])),
     '[{"id":"user-3fa9c01b","name":"Le Chat","url":"https://chat.example.org/chat","id":"user-3fa9c01c"}]',
     '[{"id":"user-3fa9c01b","name":"Le Chat","url":"https://chat.example.org/chat"}' + "\x00]",
@@ -911,6 +1217,56 @@ def test_added_sites_round_trip_through_the_rc_file(config):
     imported = run("import")["settings"]
     assert {key: imported[key] for key in settings} == settings
     assert "\U0001f600" in (config / "settings-backup.json").read_text(encoding="utf-8")
+
+
+# Task 006: a server on this computer and two home-network devices (IPv4 and IPv6).
+LOCAL_SITES = (
+    {"id": "user-0000aa01", "name": "My server", "url": "http://localhost:3000/"},
+    {"id": "user-0000aa02", "name": "NAS chat", "url": "http://192.168.1.20:3000/"},
+    {"id": "user-0000aa03", "name": "Box v6", "url": "http://[fd00::20]:3000/"},
+)
+
+
+def test_user_sites_keep_loopback_and_private_entries_over_http_and_https():
+    https = ({"id": "user-0000aa04", "name": "TLS box", "url": "https://10.0.0.5/"},
+             {"id": "user-0000aa05", "name": "Dev", "url": "https://127.0.0.1:8443/"},
+             {"id": "user-0000aa06", "name": "Dev6", "url": "http://[::1]:8080/"})
+    value = user_sites(SITE_A, *LOCAL_SITES, *https)
+    assert backup.validate_settings({"chatUserSites": value}) == ({"chatUserSites": value}, 0)
+    assert [backup.address_class(site["url"]) for site in (SITE_A, *LOCAL_SITES, *https)] == \
+        ["public", "loopback", "private", "private", "private", "loopback", "loopback"]
+
+
+@pytest.mark.parametrize("url", ["http://nas.local/", "http://192.168.1.020/", "http://[fd00:0::20]/",
+                                 "http://169.254.169.254/", "http://[fe80::1]/", "http://100.64.0.1/",
+                                 "http://127.0.0.2/", "http://[2001:db8::1]/", "http://[fe80::1%25eth0]/"])
+def test_one_refused_local_entry_drops_the_whole_user_sites(url):
+    value = user_sites(*LOCAL_SITES, entry_with(url=url))
+    assert backup.validate_settings({"chatUserSites": value}) == ({}, 1)
+
+
+def test_the_longest_ipv6_entries_stay_under_the_char_cap():
+    """A 39-character IPv6 literal with a port still fits the 2048 URL cap; 200 of them fit the setting."""
+    head = "http://[fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535/"
+    sites = [{"id": f"user-{index:08x}", "name": chr(0x4E00 + index) + '"' * 39,
+              "url": head + "a" * (2048 - len(head))} for index in range(200)]
+    assert backup.address_class(sites[0]["url"]) == "private"
+    assert backup.user_site_url_error(sites[0]["url"] + "a") == "too-long"
+    value = user_sites(*sites)
+    assert len(value.encode("utf-16-le")) // 2 <= backup.MAX_USER_SITES_CHARS
+    assert backup.validate_settings({"chatUserSites": value}) == ({"chatUserSites": value}, 0)
+
+
+def test_local_added_sites_round_trip_through_export_and_import(config):
+    ids = [site["id"] for site in LOCAL_SITES]
+    settings = {"chatUserSites": user_sites(*LOCAL_SITES), "chatSites": json.dumps(["claude", *ids], separators=(",", ":")),
+                "chatSiteOrder": json.dumps([ids[2], ids[0]], separators=(",", ":")),
+                "chatDefaultSite": ids[1], "middleClickOpens": ids[2]}
+    assert exported(settings) == {"ok": True, "saved": len(backup.BACKUP_KEYS), "dropped": 0}
+    reply = run("import")
+    assert reply["ok"] is True and reply["dropped"] == 0
+    assert {key: reply["settings"][key] for key in settings} == settings
+    assert set(reply) == {"ok", "exported_at", "settings", "dropped"}  # Codes and counts, nothing else.
 
 
 # --- strict JSON ----------------------------------------------------------------------------------
