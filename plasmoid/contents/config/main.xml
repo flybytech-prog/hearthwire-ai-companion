@@ -128,5 +128,11 @@
         <entry name="usageHistoryClearOwed" type="Bool">
             <default>false</default>
         </entry>
+        <entry name="backupAutoExport" type="Bool">
+            <default>false</default>
+        </entry>
+        <entry name="backupRestoreAt" type="String">
+            <default></default>
+        </entry>
     </group>
 </kcfg>

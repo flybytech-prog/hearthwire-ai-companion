@@ -423,7 +423,16 @@ starts with Plasma while it remains on a panel.
   and it starts signed out. It never holds
   sign-ins or anything about the encrypted folder (Stay signed in, Lock
   automatically, Unlock with), the zoom of each site, or the Usage history
-  choice. See [docs/privacy.md](docs/privacy.md#settings-backup).
+  choice. **Back up automatically when settings are applied** (off by
+  default) saves the backup about 3 seconds after you press Apply when a
+  backed-up setting changed, and once when you turn it on, replacing the
+  previous one without asking (with several Hearthwire widgets, the last one
+  to apply wins). The panel menu has **Back up settings** and **Restore
+  settings…**, which opens this section and starts an Import. Each backup is
+  signed with a key kept only on this computer
+  (`~/.local/share/hearthwire/backup-key`), so the import confirmation says
+  "Made by Hearthwire on this computer." or warns that it wasn't; a damaged
+  file is refused. See [docs/privacy.md](docs/privacy.md#settings-backup).
 
 The hover popup's settings are under **Settings → AI Provider Settings**
 (see below).
@@ -525,8 +534,9 @@ A package installs the same files as the script below, but for all users:
 the widget in `/usr/share/plasma/plasmoids/io.github.flybytechprog.hearthwire`,
 the helper as a system Python package (the widget runs it as
 `python3 -P -m hearthwire`), the icons in `/usr/share/icons/hicolor` and the
-usage alert events in `/usr/share/knotifications6`. It pulls in Plasma 6, the
-Qt Quick modules (with Qt Quick Shapes) and Python 3.11 or newer. The optional
+usage alert and settings backup notification events in
+`/usr/share/knotifications6`. It pulls in Plasma 6, the Qt Quick modules
+(with Qt Quick Shapes) and Python 3.11 or newer. The optional
 parts are left to you: the Fedora and Ubuntu packages recommend Qt WebEngine
 for the Chat tab, and every package lists the tools for Stay signed in
 (gocryptfs, fuse3, kdialog), Unlock with KDE Wallet (kwallet-query, qdbus6,
@@ -581,8 +591,9 @@ What a package leaves to you:
   ```
 
   Each prints `{"ok":true,…}` when it worked. A settings backup
-  (`~/.config/hearthwire/settings-backup.json`) stays; delete it by hand if
-  you don't want it.
+  (`~/.config/hearthwire/settings-backup.json`) and its signing key
+  (`~/.local/share/hearthwire/backup-key`) stay; delete them by hand if you
+  don't want them.
 
 Hearthwire's packages are built from the release tag by
 [the release workflow](.github/workflows/release.yml); the recipes are in
@@ -670,12 +681,13 @@ encrypted folder in the Chat tab (or turn Stay signed in off), then run:
 ```
 
 It deletes the encrypted folder (with its KDE Wallet key, if you set that
-up), the usage history of every widget if there is any, the usage alert events file
-(`knotifications6/hearthwire.notifyrc`) and the icons
+up), the usage history of every widget if there is any, the notification
+events file (`knotifications6/hearthwire.notifyrc`) and the icons
 (`icons/hicolor/scalable/apps/hearthwire*.svg`, the four listed above) and
 nothing else, and refuses while the folder is unlocked. A settings backup
 file (`~/.config/hearthwire/settings-backup.json`) stays in place, and the
-script says so.
+script says so; so does the backup's signing key
+(`~/.local/share/hearthwire/backup-key`).
 
 To remove a script install, for example to switch to a package, run
 `./scripts/install.sh --remove-script-install` (see

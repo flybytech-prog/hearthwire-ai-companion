@@ -157,7 +157,8 @@ def test_a_real_history_file_is_within_the_limit():
 
 
 def test_a_real_backup_document_is_within_the_limit():
-    document = settingsbackup.encode_document({"chatSites": '["claude","chatgpt"]'}, "2026-11-10T12:00:00Z")
+    document = settingsbackup.encode_document({"chatSites": '["claude","chatgpt"]'}, "2026-11-10T12:00:00Z",
+                                              bytes(range(32)))
     check_depth(document.decode("utf-8"), settingsbackup.MAX_JSON_DEPTH)
 
 

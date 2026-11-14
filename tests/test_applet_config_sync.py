@@ -60,6 +60,12 @@ def test_main_xml_uses_only_the_types_the_reader_knows():
         {"String", "Int", "Bool"}
 
 
+def test_the_backup_behavior_keys_are_in_the_table():
+    """Task 007: the Automatic backup switch and the menu's restore request."""
+    assert CONFIG_ENTRIES["backupAutoExport"] == ("Bool", False)
+    assert CONFIG_ENTRIES["backupRestoreAt"] == ("String", "")
+
+
 def test_every_backup_default_passes_the_backup_rules():
     """A widget left at its defaults exports every backup key, none dropped."""
     for key in BACKUP_KEYS:

@@ -94,6 +94,8 @@ CONFIG_ENTRIES: dict[str, tuple[str, object]] = {
     "middleClickOpens": ("String", "refresh"),
     "usageHistoryEnabled": ("Bool", False),
     "usageHistoryClearOwed": ("Bool", False),
+    "backupAutoExport": ("Bool", False),
+    "backupRestoreAt": ("String", ""),
 }
 
 

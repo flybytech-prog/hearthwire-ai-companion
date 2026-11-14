@@ -1,2 +1,3 @@
 module HearthwireStubs
 Marker 1.0 Marker.qml
+singleton SentNotifications 1.0 SentNotifications.qml

@@ -15,11 +15,11 @@ import pytest
 
 HARNESS = Path(__file__).resolve().parent / "mainqml"
 PATH = "/usr/lib/qt6:/usr/lib/qt6/bin:/usr/bin:/bin"
-# The 219 test functions of tst_main_wiring.qml, fifteen of them run once for
-# each of their data rows (3, 24, 24, 6, 6, 4, 4, 3, 2, 8, 3, 5, 3, 2 and 3), plus
-# QtTest's initTestCase and cleanupTestCase, which count as passed even when no
-# test ran.
-MIN_PASSED = 306
+# The 248 test functions of tst_main_wiring.qml, nineteen of them run once for
+# each of their data rows (3, 24, 24, 6, 6, 4, 4, 3, 2, 8, 3, 5, 3, 2, 3, 13, 3, 4
+# and 3), plus QtTest's initTestCase and cleanupTestCase, which count as passed
+# even when no test ran.
+MIN_PASSED = 354
 
 
 def _run(command, env, cwd):

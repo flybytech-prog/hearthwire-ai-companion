@@ -105,6 +105,11 @@ KCM.SimpleKCM {
     // old value.
     property bool cfg_usageHistoryClearOwed: false
     property bool cfg_usageHistoryClearOwedDefault: false
+    property bool cfg_backupAutoExport: false
+    property bool cfg_backupAutoExportDefault: false
+    // Written only by main.qml (panel menu → Restore settings…).
+    property string cfg_backupRestoreAt: ""
+    property string cfg_backupRestoreAtDefault: ""
 
 
     // main.qml may move to a new generation or layout, or store a zoom,
@@ -122,6 +127,8 @@ KCM.SimpleKCM {
                 page.cfg_chatSiteZoom = value
             else if (key === "usageHistoryClearOwed")
                 page.cfg_usageHistoryClearOwed = value
+            else if (key === "backupRestoreAt")
+                page.cfg_backupRestoreAt = value
         }
     }
 

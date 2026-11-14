@@ -5,9 +5,13 @@ One fixed file, no file dialog::
     $XDG_CONFIG_HOME (when absolute, else ~/.config)/
         hearthwire/                  0700, created only by export
             settings-backup.json     0600, replaced atomically
+    $XDG_DATA_HOME (when absolute, else ~/.local/share)/
+        hearthwire/                  0700, created only by export
+            backup-key               0600, 32 random bytes, made once (task 007)
 
-    {"format":"hearthwire-settings","version":1,"config_schema":3,
-     "exported_at":"YYYY-MM-DDTHH:MM:SSZ","settings":{...}}
+    {"format":"hearthwire-settings","version":2,"config_schema":3,
+     "exported_at":"YYYY-MM-DDTHH:MM:SSZ","settings":{...},
+     "sha256":"<64 hex>","signature":"<64 hex>"}
 
 ``export --applet N`` reads widget N's applied settings itself from Plasma's
 rc file (core/appletconfig.py), so nothing the user typed ever reaches argv
@@ -29,16 +33,30 @@ Task 006: an added site may also be a server on this computer (localhost,
 127.0.0.1, [::1]) or a home-network IP literal, over http or https. The keys
 and the format are unchanged; only the set of valid addresses grew
 (user_site_url_error, the same codes and order as ChatSites.js).
+
+Task 007: every backup has an identity. ``sha256`` is the plain SHA-256 of
+the canonical content (the five content keys as sorted, compact UTF-8 JSON
+of the parsed values, so whitespace and key order don't count); a mismatch is
+``damaged`` and refused. ``signature`` is an HMAC-SHA256 of SIGN_CONTEXT plus
+that content with this install's backup key, so import can tell a backup made
+here (origin ``this-computer``) from one made elsewhere or with another key
+(``other``); a version 1 file has neither and is ``unsigned``. The origin is
+informational: the same settings are kept whatever it is. Only export creates
+the key and never replaces one; status never reads it. The key never leaves
+the key file: not in argv, the environment, a reply, the backup or a log.
 """
 
 from __future__ import annotations
 
 import bisect
 import errno
+import hashlib
+import hmac
 import json
 import math
 import os
 import re
+import secrets
 import stat
 import time
 from collections.abc import Mapping
@@ -49,12 +67,26 @@ from typing import Callable, Optional
 from .appletconfig import applied_settings
 from .catalog import CATALOG_BY_ID, PROVIDER_CATALOG, PROVIDER_IDS
 from .jsondepth import check_depth
-from .webdata import APP_DIR, PRIVATE_MODE, HelperError, _close, _descriptors, open_base, open_child_dir
+from .webdata import (
+    APP_DIR, PRIVATE_MODE, HelperError, _close, _descriptors, data_base, open_base, open_child_dir,
+)
 
 OPERATIONS = ("status", "export", "import")
 FORMAT = "hearthwire-settings"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+# Versions import reads: 1 (1.0.x and 1.1 pre-release builds, no identity) and 2.
+READ_VERSIONS = (1, 2)
 CONFIG_SCHEMA = 3
+# What sha256 and signature cover, in the file's order; version 2 adds DIGEST_KEYS after them.
+CONTENT_KEYS = ("format", "version", "config_schema", "exported_at", "settings")
+DIGEST_KEYS = ("sha256", "signature")
+# The per-install signing key (M-1): in the data folder, not next to the backup.
+KEY_FILE = "backup-key"
+KEY_BYTES = 32
+# Domain separation: the key signs backups and nothing else.
+SIGN_CONTEXT = b"hearthwire-settings-backup\x00"
+# import's ``origin``: SettingsBackup.js ORIGINS.
+ORIGINS = ("this-computer", "other", "unsigned")
 BACKUP_FILE = "settings-backup.json"
 FILE_MODE = 0o600
 # 200 added sites with 40-unit names and 2048-character addresses fit (task 005).
@@ -70,9 +102,11 @@ MAX_CUSTOM_URLS_CHARS = 32768
 # Codes the plasmoid knows for --settings-backup; anything else is os-error.
 # applet-not-found and settings-unreadable are export's: the widget's rc entry
 # (core/appletconfig.py) is missing or ambiguous, or its rc file is unsafe to read.
+# damaged: a version 2 file whose sha256 doesn't match (status and import);
+# key-unusable: export's, the backup key or its folder is unsafe (task 007).
 ERRORS = frozenset({
     "absent", "invalid", "unsupported", "too-large", "bad-data", "symlink", "not-owned", "unsafe-mode", "legacy-data",
-    "applet-not-found", "settings-unreadable", "os-error",
+    "applet-not-found", "settings-unreadable", "os-error", "damaged", "key-unusable",
 })
 
 # Saved and restored. main.xml keys plus the round-4 panelRing and middleClickOpens.
@@ -97,6 +131,7 @@ EXCLUDED_KEYS = (
     "chatVaultUnlock", "chatSiteZoom", "configSchemaVersion",
     "initialSetupComplete", "usageHistoryEnabled", "usageHistoryClearOwed",
     "chatProfileLayout", "chatPendingSiteClears",
+    "backupAutoExport", "backupRestoreAt",  # task 007: a restore never changes backup behavior
 )
 
 # Chat sites as in plasmoid/contents/ui/ChatSites.js (``sites``) and the
@@ -135,6 +170,8 @@ _STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # _write_file's temporary names: what a crashed export left behind.
 _TEMPORARY_NAME = re.compile(r"settings-backup\.json\.[0-9a-f]{16}\.tmp")
+_KEY_TEMPORARY_NAME = re.compile(r"backup-key\.[0-9a-f]{16}\.tmp")
+_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -1089,54 +1126,246 @@ def _valid_stamp(value: object) -> bool:
     return True
 
 
-def parse_document(data: bytes) -> tuple[str, dict[str, object], int]:
-    """(exported_at, checked settings, number dropped) of a backup file's bytes."""
+# --- the backup key (task 007) ------------------------------------------------------------------------
+
+
+def _key_directory(environ: Optional[Mapping[str, str]], opened: list[int], *, create: bool) -> Optional[int]:
+    """``<data>/hearthwire``: never a symlink, ours, not group- or other-writable.
+
+    Only ``create`` (export, after refuse_legacy_data) makes it (0700); an
+    existing folder is never changed. Its faults raise their own codes, which
+    the caller turns into key-unusable.
+    """
+    base = open_base(data_base(environ), create=create)
+    if base is None:
+        return None
+    opened.append(base)
+    directory = open_child_dir(base, APP_DIR, create=False)
+    if directory is None:
+        if not create:
+            return None
+        directory = open_child_dir(base, APP_DIR, create=True)
+        if directory is None:
+            raise HelperError("os-error")
+    opened.append(directory)
+    try:
+        info = os.fstat(directory)
+    except OSError:
+        raise HelperError("os-error") from None
+    if _unsafe(info.st_mode):
+        raise HelperError("unsafe-mode")
+    return directory
+
+
+def _read_key(directory: int) -> Optional[bytes]:
+    """The key's 32 bytes, None when there is no key; key-unusable when it is unsafe."""
+    try:
+        descriptor = os.open(KEY_FILE, _READ_FLAGS, dir_fd=directory)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise HelperError("key-unusable" if error.errno == errno.ELOOP else "os-error") from None
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077
+                or info.st_size != KEY_BYTES):
+            raise HelperError("key-unusable")
+        key = os.pread(descriptor, KEY_BYTES + 1, 0)
+    except OSError:
+        raise HelperError("os-error") from None
+    finally:
+        _close(descriptor)
+    if len(key) != KEY_BYTES:
+        raise HelperError("key-unusable")
+    return key
+
+
+def _clear_stale_key_temporaries(directory: int) -> None:
+    """Delete key temporaries a crashed export left; never follows a link."""
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if _KEY_TEMPORARY_NAME.fullmatch(name):
+            _unlink(directory, name)
+
+
+def _create_key(directory: int) -> bytes:
+    """Make the key once, race-safe: an O_EXCL temporary (0600), fsync, then a hard link.
+
+    link() never replaces: when another export made the key first, that key is
+    read and used, so two widgets exporting at once end up with the same key.
+    """
+    key = secrets.token_bytes(KEY_BYTES)
+    temporary = f"{KEY_FILE}.{secrets.token_hex(8)}.tmp"
+    try:
+        descriptor = os.open(temporary, _CREATE_FLAGS, FILE_MODE, dir_fd=directory)
+    except OSError:
+        raise HelperError("os-error") from None
+    try:
+        try:
+            view = memoryview(key)
+            while view:
+                view = view[os.write(descriptor, view):]
+            if stat.S_IMODE(os.fstat(descriptor).st_mode) != FILE_MODE:
+                os.fchmod(descriptor, FILE_MODE)
+            os.fsync(descriptor)
+        finally:
+            _close(descriptor)
+        try:
+            os.link(temporary, KEY_FILE, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+            made = True
+        except FileExistsError:
+            made = False
+    except OSError:
+        raise HelperError("os-error") from None
+    finally:
+        _unlink(directory, temporary)
+    try:
+        os.fsync(directory)
+    except OSError:
+        raise HelperError("os-error") from None
+    if made:
+        return key
+    existing = _read_key(directory)
+    if existing is None:
+        raise HelperError("os-error")  # Made and removed again while we looked.
+    return existing
+
+
+def _signing_key(environ: Optional[Mapping[str, str]], *, create: bool) -> Optional[bytes]:
+    """This install's key. Without ``create`` a missing key is None and nothing is made.
+
+    Any unsafe key or folder is key-unusable; nothing is ever replaced or
+    repaired (M-5), so a planted file never becomes this computer's key.
+    """
+    with _descriptors() as opened:
+        try:
+            directory = _key_directory(environ, opened, create=create)
+        except HelperError as error:
+            if error.code == "os-error":
+                raise
+            raise HelperError("key-unusable") from None
+        if directory is None:
+            return None
+        if create:
+            _clear_stale_key_temporaries(directory)
+        key = _read_key(directory)
+        if key is None and create:
+            key = _create_key(directory)
+        return key
+
+
+def _import_key(environ: Optional[Mapping[str, str]]) -> Optional[bytes]:
+    """import's view: an absent, unsafe or unreadable key can't verify anything (origin other)."""
+    try:
+        return _signing_key(environ, create=False)
+    except HelperError:
+        return None
+
+
+# --- the document -------------------------------------------------------------------------------------
+
+
+def canonical(document: Mapping[str, object]) -> bytes:
+    """The bytes sha256 and signature cover: the content keys, sorted and compact (M-2)."""
+    try:
+        return json.dumps({key: document[key] for key in CONTENT_KEYS}, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (UnicodeEncodeError, ValueError):
+        # A lone surrogate from a \ud800 escape has no UTF-8 form.
+        raise HelperError("invalid") from None
+
+
+def content_sha256(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def content_signature(key: bytes, content: bytes) -> str:
+    return hmac.new(key, SIGN_CONTEXT + content, hashlib.sha256).hexdigest()
+
+
+def _is_digest(value: object) -> bool:
+    return isinstance(value, str) and _DIGEST.fullmatch(value) is not None
+
+
+def parse_document(
+    data: bytes,
+    signing_key: Optional[Callable[[], Optional[bytes]]] = None,
+) -> tuple[str, dict[str, object], int, str]:
+    """(exported_at, checked settings, number dropped, origin) of a backup file's bytes.
+
+    A version 2 file's sha256 is always checked (damaged). Its signature is
+    checked only with ``signing_key``, which is called once, after the
+    checksum passed; without one (status) a version 2 file counts as other.
+    """
     try:
         document = strict_loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         raise HelperError("invalid") from None
     if not isinstance(document, dict) or document.get("format") != FORMAT:
         raise HelperError("invalid")
-    for key, expected in (("version", FORMAT_VERSION), ("config_schema", CONFIG_SCHEMA)):
+    for key in ("version", "config_schema"):
         if type(document.get(key)) is not int:
             raise HelperError("invalid")
-        if document[key] != expected:
-            raise HelperError("unsupported")
-    if set(document) != {"format", "version", "config_schema", "exported_at", "settings"}:
+    if document["version"] not in READ_VERSIONS or document["config_schema"] != CONFIG_SCHEMA:
+        raise HelperError("unsupported")
+    signed = document["version"] >= 2
+    if set(document) != set(CONTENT_KEYS + (DIGEST_KEYS if signed else ())):
+        raise HelperError("invalid")
+    if signed and not all(_is_digest(document[key]) for key in DIGEST_KEYS):
         raise HelperError("invalid")
     if not _valid_stamp(document["exported_at"]) or not isinstance(document["settings"], dict):
         raise HelperError("invalid")
+    origin = "unsigned"
+    if signed:
+        content = canonical(document)
+        if not hmac.compare_digest(content_sha256(content), document["sha256"]):
+            raise HelperError("damaged")  # M-4: refused, not a warning.
+        key = signing_key() if signing_key is not None else None
+        origin = "other"
+        if key is not None and hmac.compare_digest(content_signature(key, content), document["signature"]):
+            origin = "this-computer"
+    # M-6: the origin never changes what is kept.
     settings, dropped = validate_settings(document["settings"])
-    return document["exported_at"], settings, dropped
+    return document["exported_at"], settings, dropped, origin
 
 
-def encode_document(settings: dict[str, object], exported_at: str) -> bytes:
-    document = {
+def encode_document(settings: dict[str, object], exported_at: str, key: bytes) -> bytes:
+    """A version 2 file: the content keys, then sha256 and signature over their canonical form."""
+    document: dict[str, object] = {
         "format": FORMAT,
         "version": FORMAT_VERSION,
         "config_schema": CONFIG_SCHEMA,
         "exported_at": exported_at,
         "settings": settings,
     }
+    content = canonical(document)
+    document["sha256"] = content_sha256(content)
+    document["signature"] = content_signature(key, content)
     return (_dumps(document) + "\n").encode("utf-8")
 
 
 # --- operations ---------------------------------------------------------------------------------------
 
 
-def _load(environ: Optional[Mapping[str, str]]) -> tuple[str, dict[str, object], int]:
+def _load(
+    environ: Optional[Mapping[str, str]],
+    signing_key: Optional[Callable[[], Optional[bytes]]] = None,
+) -> tuple[str, dict[str, object], int, str]:
     with _descriptors() as opened:
         directory = _backup_directory(environ, opened, create=False)
         if directory is None:
             raise HelperError("absent")
         data = _read_file(directory)
-    return parse_document(data)
+    return parse_document(data, signing_key)
 
 
 def status(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
-    """Whether a valid backup is there, and when it was made; creates nothing."""
+    """Whether a valid backup is there, and when it was made; creates nothing, never reads the key."""
     try:
-        exported_at, _, _ = _load(environ)
+        exported_at, _, _, _ = _load(environ)
     except HelperError as error:
         if error.code == "absent":
             return {"ok": True, "exists": False}
@@ -1150,7 +1379,7 @@ def export(
     *,
     clock: Callable[[], float] = time.time,
 ) -> dict[str, object]:
-    """Replace the backup with widget ``applet``'s applied settings, checked.
+    """Replace the backup with widget ``applet``'s applied settings, checked and signed.
 
     Only what Plasma has saved counts (press Apply first); a key the rc file
     lacks has its main.xml default. Read only on the rc file.
@@ -1160,13 +1389,21 @@ def export(
     settings, dropped = validate_settings(applied_settings(applet, BACKUP_KEYS, config_base(environ)))
     if not settings:
         raise HelperError("bad-data")  # Never replace a backup with nothing.
-    encoded = encode_document(settings, time.strftime(_STAMP_FORMAT, time.gmtime(int(clock()))))
-    if len(encoded) > MAX_FILE_BYTES:
+    exported_at = time.strftime(_STAMP_FORMAT, time.gmtime(int(clock())))
+    # The digests are fixed-length hex, so a zero key gives the real size:
+    # too-large is found before any folder or key is made.
+    if len(encode_document(settings, exported_at, bytes(KEY_BYTES))) > MAX_FILE_BYTES:
         raise HelperError("too-large")
     with _descriptors() as opened:
-        directory = _backup_directory(environ, opened, create=True)
+        directory = _backup_directory(environ, opened, create=True)  # refuse_legacy_data first
         if directory is None:
             raise HelperError("os-error")
+        key = _signing_key(environ, create=True)
+        if key is None:
+            raise HelperError("os-error")
+        encoded = encode_document(settings, exported_at, key)
+        if len(encoded) > MAX_FILE_BYTES:
+            raise HelperError("too-large")
         _check_target(directory)
         _clear_stale_temporaries(directory)
         _write_file(directory, encoded)
@@ -1174,9 +1411,9 @@ def export(
 
 
 def import_settings(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
-    """The backup's checked settings; the widget applies them only after Replace and Apply."""
-    exported_at, settings, dropped = _load(environ)
-    return {"ok": True, "exported_at": exported_at, "settings": settings, "dropped": dropped}
+    """The backup's checked settings and origin; the widget applies them only after Replace and Apply."""
+    exported_at, settings, dropped, origin = _load(environ, lambda: _import_key(environ))
+    return {"ok": True, "exported_at": exported_at, "settings": settings, "dropped": dropped, "origin": origin}
 
 
 def run(

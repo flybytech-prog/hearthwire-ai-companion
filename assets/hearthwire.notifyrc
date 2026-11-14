@@ -9,3 +9,7 @@ Action=Popup
 [Event/usageReset]
 Name=Plan reset
 Action=Popup
+
+[Event/settingsBackup]
+Name=Settings backup
+Action=Popup

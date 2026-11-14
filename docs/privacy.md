@@ -174,16 +174,18 @@ while.
 
 ## Settings backup
 
-**Export** and **Import** (Settings → General → Backup) use one fixed file;
-there is no file dialog.
+**Export** and **Import** (Settings → General → Backup), the panel menu's
+**Back up settings** and **Restore settings…**, and **Automatic backup** use
+one fixed file; there is no file dialog.
 
 - Where: `$XDG_CONFIG_HOME/hearthwire/settings-backup.json` (usually
   `~/.config/hearthwire/settings-backup.json`). The folder is mode `0700`
   (made, or tightened, by Export) and the file mode `0600`, so only you can
   read it. It is replaced atomically. A symlink, another user's file, or a
   folder or file other users may write to is refused and left alone.
-- What is in it: a format name, a version, the settings format (`3`), the
-  time of the export (UTC), and these settings: `trackedProviders`,
+- What is in it: a format name, a version (`2`), the settings format (`3`),
+  the time of the export (UTC), two checksums (see
+  [Backup identity](#backup-identity)), and these settings: `trackedProviders`,
   `providerMetrics`, `providerOrder`, `usageMode`, `refreshInterval`,
   `tooltipShowsUsage`, `tooltipMetrics`, `usageCompact`, `usageWarnPercent`,
   `usageCriticalPercent`, `usageNormalColor`, `usageWarnColor`,
@@ -201,8 +203,9 @@ there is no file dialog.
   `chatSignInStorage`, `chatProfileGeneration`, `chatAutoLockMinutes`,
   `chatVaultUnlock`, `chatSiteZoom`, `configSchemaVersion`,
   `initialSetupComplete`, `usageHistoryEnabled`, `usageHistoryClearOwed`,
-  `chatProfileLayout` and `chatPendingSiteClears`.
-  An import never turns on Usage history or Stay signed in.
+  `chatProfileLayout`, `chatPendingSiteClears`, `backupAutoExport` and
+  `backupRestoreAt`. An import never turns on Usage history or Stay signed
+  in, and never changes Automatic backup. The backup key is never in it.
 - Export saves the widget's applied settings only: the helper reads them
   itself from Plasma's configuration file
   (`~/.config/plasma-org.kde.plasma.desktop-appletsrc`, or
@@ -211,8 +214,25 @@ there is no file dialog.
   user's. It reads only a widget whose plugin is Hearthwire, never another
   widget's settings. A setting the file doesn't have counts as its
   default. Changes not yet applied on any settings page are not exported, so
-  press **Apply** first. It asks before it replaces an existing backup, and
-  never replaces one with an empty one.
+  press **Apply** first. The Export button asks before it replaces an
+  existing backup; the menu's **Back up settings** and Automatic backup
+  replace it without asking. None of them replaces a backup with an empty
+  one.
+- **Automatic backup** (off by default; Settings → General → Backup, "Back
+  up automatically when settings are applied"): about 3 seconds after you
+  press Apply with a changed backed-up setting, and once when you turn it on,
+  the widget exports the same way as the button, to the same file. Starting
+  Plasma exports nothing, and applying with nothing changed exports nothing.
+  A success is silent; a failure shows one notification with a fixed reason
+  (once per reason, until an export works again). There is one file per
+  user and no older copies: with several Hearthwire widgets that have it on,
+  the last one to apply wins.
+- **Back up settings** in the panel menu exports at once and shows a
+  notification ("Settings backed up" or a fixed reason). **Restore
+  settings…** opens Settings on General at the Backup section and starts an
+  Import there, with the same checks and confirmation as the Import button;
+  nothing changes until you press Replace and then Apply. Notifications
+  never contain a path, a setting or helper text.
 - No setting you entered is passed on a command line: the helper's command
   holds only fixed words, the step (status, export or import) and two whole
   numbers (a run number and the widget's id). Other local users can't see
@@ -235,7 +255,49 @@ there is no file dialog.
   you press **Apply** on the General page.
 - The file stays until you delete it. `scripts/install.sh
   --uninstall-web-data` leaves it in place and says where it is, and
-  removing the widget leaves it too.
+  removing the widget leaves it too. Both also leave the backup key.
+
+### Backup identity
+
+Each backup made by Hearthwire 1.1 or later (format version 2) carries a
+plain SHA-256 of its content (`sha256`) and an HMAC-SHA256 of it
+(`signature`) made with a key that only this install has. Both cover the
+format, version, settings format, export time and settings, as the helper
+reads them (whitespace and key order don't count).
+
+- The key: `$XDG_DATA_HOME/hearthwire/backup-key` (usually
+  `~/.local/share/hearthwire/backup-key`), 32 random bytes, mode `0600` in a
+  `0700` folder, so only you can read it. The first export makes it; it is
+  never changed after that and has no rotation. It is deliberately not next
+  to the backup in `~/.config` (copying or syncing that folder would carry
+  the key along), not in the encrypted folder (export must work while it is
+  locked, or with Off) and not in KDE Wallet (reading it can wait on a
+  prompt, and the wallet would not keep it from programs running as you
+  either). The key is never shown, logged, written into the backup, put in
+  a reply, the environment or a command line. A key file that is a symlink,
+  another user's, readable or writable by others, not exactly 32 bytes, or
+  in a folder others may write to is never used or replaced: Export then
+  stops with "The backup key … isn't safe to use", and you delete it to
+  make a new one. Status never reads it; Import only reads it.
+- What Import shows, before you can press Replace:
+  - checksum and signature match: "Made by Hearthwire on this computer.";
+  - checksum doesn't match (the file was damaged or edited): **refused**,
+    "The backup file is damaged", and nothing changes;
+  - checksum matches but the signature doesn't (another computer, user or
+    key, or a deleted key): "Not made by this Hearthwire: check every change
+    below before you press Replace." The import still works;
+  - a version 1 file (Hearthwire 1.0.x and 1.1 pre-release builds) has no
+    checksums: the same warning, and the import still works. Every new
+    export writes version 2.
+- The result is for your information only: the same settings are checked
+  and kept, with the same preview, whatever it says. After you apply a
+  restored backup, the next export signs those settings with this
+  install's key.
+- Deleting the key makes every earlier backup show the warning. Hearthwire
+  1.0.1 can't read a version 2 file ("made by a different version") and
+  ignores the key.
+- What it protects against and what it doesn't: see the
+  [Threat model](#threat-model).
 
 ## Chat tab
 
@@ -657,14 +719,16 @@ only in these places: the Antigravity token cache described above; only if
 you choose Encrypted, the encrypted folder (written by Qt WebEngine through
 gocryptfs) and, with Unlock with KDE Wallet, its key slot next to it; only if
 you turn on Usage history, the [usage history](#usage-history) folder; only
-when you press Export, the [settings backup](#settings-backup) file; and, only
+when you export (button, menu or Automatic backup), the
+[settings backup](#settings-backup) file and, the first time, its
+[backup key](#backup-identity) (`~/.local/share/hearthwire/backup-key`); and, only
 after the one-time upgrade from the previous name, a backup of Plasma's panel
 layout (see the last section of this page).
 
 Installing or removing a release package (pacman, dnf, apt) changes only
 files under `/usr`. A package runs nothing as you and never reads, moves or
 deletes anything in your home folder, so removing it keeps the usage history,
-the settings backup, the encrypted folder with its key slots, the KDE Wallet
+the settings backup and its key, the encrypted folder with its key slots, the KDE Wallet
 key, the Antigravity token cache and the widget settings. To delete the
 chat sign-ins and the usage history, use the helper commands in the
 README's "Install from a package" section before you remove the package.
@@ -1055,6 +1119,28 @@ It does not protect against:
 - other local users seeing, in the process list, the path of a file dropped
   on the Ollama chat (and, with Usage history on, its percentages), unless
   `/proc` is mounted with `hidepid` as below.
+
+The settings backup's [identity](#backup-identity) protects against:
+
+- accidental damage (disk errors, a truncated copy or sync): the file is
+  refused;
+- a backup that came from elsewhere (another computer or user, a dotfiles
+  repository, a shared or downloaded file, a sync conflict copy): a warning;
+- tampering by something that can write `~/.config/hearthwire` but can't read
+  `~/.local/share/hearthwire` (for example a sync tool limited to the config
+  folder): a warning.
+
+It does not protect against:
+
+- anything running as you, root, or anyone with a copy of your home folder
+  including `~/.local/share`: they can read the key and sign any file (and
+  could change Plasma's settings directly anyway);
+- an older genuine backup from this computer put back in place (there is no
+  replay protection);
+- reading the file: it is not encrypted;
+- older files counting as "made on this computer" after you move or restore
+  your home folder with the key;
+- proving anything to anyone else: this is not a public-key signature.
 
 ### Recommended system settings
 

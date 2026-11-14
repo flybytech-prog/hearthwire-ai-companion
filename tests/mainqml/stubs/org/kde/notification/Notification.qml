@@ -1,11 +1,13 @@
 import QtQml
+import HearthwireStubs
 
-// Never reaches the session bus.
+// Never reaches the session bus; sendEvent() only records what was asked.
 QtObject {
     // tst_main_wiring.qml checks this: the real type has no such property.
     property bool isStub: true
 
-    enum Urgency { NormalUrgency }
+    // The real KNotification values.
+    enum Urgency { LowUrgency = 10, NormalUrgency = 50 }
 
     property string componentName
     property string eventId
@@ -16,5 +18,6 @@ QtObject {
     property string text
 
     function sendEvent() {
+        SentNotifications.record(this)
     }
 }

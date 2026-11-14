@@ -17,17 +17,24 @@ var BACKUP_KEYS = [
     "panelRing", "middleClickOpens", "chatCustomUrls",
     "chatUserSites", "chatSiteOrder"
 ]
-// Sign-ins, the encrypted folder, zoom, first-run state and the history opt-in.
+// Sign-ins, the encrypted folder, zoom, first-run state, the history opt-in
+// and the backup's own switch and restore request.
 var EXCLUDED_KEYS = [
     "chatSignInStorage", "chatProfileGeneration", "chatAutoLockMinutes",
     "chatVaultUnlock", "chatSiteZoom", "configSchemaVersion",
     "initialSetupComplete", "usageHistoryEnabled", "usageHistoryClearOwed",
-    "chatProfileLayout", "chatPendingSiteClears"
+    "chatProfileLayout", "chatPendingSiteClears",
+    "backupAutoExport", "backupRestoreAt"
 ]
 var OPERATIONS = ["status", "export", "import"]
 var ERRORS = ["absent", "invalid", "unsupported", "too-large", "bad-data", "symlink", "not-owned",
               "unsafe-mode", "legacy-data", "os-error", "applet-not-found",
-              "settings-unreadable"]
+              "settings-unreadable", "damaged", "key-unusable"]
+// Where the helper says an imported file came from. Informational only: it
+// never changes which settings are kept or how they are checked.
+var ORIGINS = ["this-computer", "other", "unsigned"]
+// How long a menu Restore request (backupRestoreAt, in ms) stays fresh.
+var RESTORE_WINDOW_MS = 60000
 // A malformed reply; the helper's own "invalid" is about the file.
 var BAD_REPLY = "bad-reply"
 
@@ -101,7 +108,7 @@ function shownStamp(value) {
 }
 
 // A helper reply. status: {ok, exists, exportedAt}; export: {ok, saved,
-// dropped}; import: {ok, exportedAt, settings, dropped}; otherwise {ok: false,
+// dropped}; import: {ok, exportedAt, settings, dropped, origin}; otherwise {ok: false,
 // error}, error being one of ERRORS or BAD_REPLY. Nothing else is kept.
 function parseReply(op, exitCode, stdout) {
     var bad = { ok: false, error: BAD_REPLY }
@@ -132,9 +139,34 @@ function parseReply(op, exitCode, stdout) {
         return hasExactly(reply, ["ok", "saved", "dropped"]) && isCount(reply.saved) && reply.saved > 0
             && isCount(reply.dropped) ? { ok: true, saved: reply.saved, dropped: reply.dropped } : bad
     }
-    return hasExactly(reply, ["ok", "exported_at", "settings", "dropped"]) && validStamp(reply.exported_at)
+    return hasExactly(reply, ["ok", "exported_at", "settings", "dropped", "origin"]) && validStamp(reply.exported_at)
         && isObject(reply.settings) && isCount(reply.dropped)
-        ? { ok: true, exportedAt: reply.exported_at, settings: reply.settings, dropped: reply.dropped } : bad
+        && typeof reply.origin === "string" && ORIGINS.indexOf(reply.origin) >= 0
+        ? { ok: true, exportedAt: reply.exported_at, settings: reply.settings, dropped: reply.dropped,
+            origin: reply.origin } : bad
+}
+
+function isBackupKey(key) {
+    return typeof key === "string" && BACKUP_KEYS.indexOf(key) >= 0
+}
+
+// The backed-up values in BACKUP_KEYS order, as one string, so Automatic
+// backup can tell an Apply that changed nothing. In memory only.
+function fingerprint(configuration) {
+    var source = configuration || {}
+    return JSON.stringify(BACKUP_KEYS.map(function (key) {
+        var value = source[key]
+        return value === undefined ? null : value
+    }))
+}
+
+// A menu Restore request still fresh at now: the digits main.qml wrote, at
+// most RESTORE_WINDOW_MS old and never in the future.
+function restoreRequested(text, now) {
+    if (typeof text !== "string" || !/^[0-9]{1,15}$/.test(text) || typeof now !== "number" || !isFinite(now))
+        return false
+    var age = now - Number(text)
+    return age >= 0 && age <= RESTORE_WINDOW_MS
 }
 
 // --- the widget's own check of an import ------------------------------------

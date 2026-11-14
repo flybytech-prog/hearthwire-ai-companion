@@ -19,6 +19,7 @@ import "TooltipLogic.js" as TooltipLogic
 import "UsageLogic.js" as UsageLogic
 import "UsageHistory.js" as UsageHistory
 import "InstallInfo.js" as InstallInfo
+import "SettingsBackup.js" as SettingsBackup
 
 PlasmoidItem {
     id: root
@@ -405,6 +406,25 @@ PlasmoidItem {
     property string historySourceName: ""
     property double historyStartedAt: 0
     property int historyRun: 0
+
+    // Settings backup from the panel menu and Automatic backup: export only,
+    // one at a time; the page in Settings → General does the rest.
+    property string backupOp: ""
+    property string backupSourceName: ""
+    property int backupRun: 0
+    // "menu" or "auto": who asked for the export that runs.
+    property string backupTrigger: ""
+    // The backed-up values at the last export (or at start), and those of
+    // the export that runs. In memory only: never logged, stored or sent.
+    property string backupFingerprint: ""
+    property string backupPendingFingerprint: ""
+    // Turning Automatic backup on exports once even with nothing changed.
+    property bool backupAutoForce: false
+    // The failure code an automatic export last told; "" after a success.
+    property string backupAutoFailed: ""
+    // How long Automatic backup waits after the last backed-up change, so
+    // one Apply (many keys) or quick toggles export once.
+    property int backupAutoWait: 3000
 
     // AI Provider Settings → Usage ring. Same reading rules and colors as
     // the hover popup and the bars.
@@ -1749,6 +1769,107 @@ PlasmoidItem {
             notification.sendEvent()
     }
 
+    // The helper reads this widget's applied settings itself; nothing else
+    // goes with the command. fp: the fingerprint the export starts from.
+    function runBackupExport(trigger, fp) {
+        if (root.backupOp !== "")
+            return
+        root.backupRun = ChatStorage.nextRun(root.backupRun)
+        var command = SettingsBackup.backupCommand("export", root.backupRun, Plasmoid.id)
+        if (command === "") {
+            root.backupTrigger = trigger
+            root.finishBackupExport({ok: false, error: "no-applet"})
+            return
+        }
+        root.backupOp = "export"
+        root.backupTrigger = trigger
+        root.backupPendingFingerprint = fp
+        root.backupSourceName = command
+        backupSource.connectSource(command)
+    }
+
+    // A change made while the export ran is still noticed: the fingerprint
+    // becomes the one the export started from.
+    function finishBackupExport(reply) {
+        var trigger = root.backupTrigger
+        var fp = root.backupPendingFingerprint
+        root.backupOp = ""
+        root.backupSourceName = ""
+        root.backupTrigger = ""
+        root.backupPendingFingerprint = ""
+        if (reply.ok) {
+            root.backupFingerprint = fp
+            root.backupAutoFailed = ""
+            if (trigger === "menu")
+                root.notifyBackup("saved", "")
+            return
+        }
+        if (trigger === "menu") {
+            root.notifyBackup("failed", reply.error)
+        } else if (reply.error !== root.backupAutoFailed) {
+            // Once per failure until the next success: no notice on every Apply.
+            root.backupAutoFailed = reply.error
+            root.notifyBackup("auto-failed", reply.error)
+        }
+    }
+
+    // Fixed texts only, chosen by the code: never a reply's text or a path.
+    function backupFailureText(code) {
+        switch (code) {
+        case "too-large":
+            return i18n("The settings are too large to back up.")
+        case "bad-data":
+            return i18n("These settings couldn't be backed up.")
+        case "symlink":
+        case "not-owned":
+        case "unsafe-mode":
+            return i18n("The backup folder isn't safe to use. Check its owner and permissions.")
+        case "key-unusable":
+            return i18n("The backup key can't be used. See Settings → General → Backup.")
+        case "legacy-data":
+            return i18n("Run the installer again with --restart-plasma first.")
+        case "applet-not-found":
+        case "settings-unreadable":
+            return i18n("This widget's applied settings couldn't be read.")
+        default:
+            return i18n("Something went wrong. Nothing was changed.")
+        }
+    }
+
+    // outcome: "saved", "failed" (menu) or "auto-failed"; failure: a checked
+    // error code (SettingsBackup.parseReply), or "".
+    function notifyBackup(outcome, failure) {
+        var notification = backupNotification.createObject(root, {outcome: outcome, failure: failure})
+        if (notification)
+            notification.sendEvent()
+    }
+
+    // Automatic backup, about 3 s after a backed-up setting changed (one
+    // Apply writes many keys) and once after the switch is turned on.
+    function autoBackup() {
+        if (Plasmoid.configuration.backupAutoExport !== true)
+            return
+        if (root.backupOp !== "") {
+            autoBackupTimer.restart()
+            return
+        }
+        var fp = SettingsBackup.fingerprint(Plasmoid.configuration)
+        if (fp === root.backupFingerprint && !root.backupAutoForce)
+            return
+        root.backupAutoForce = false
+        root.runBackupExport("auto", fp)
+    }
+
+    // Panel menu → Restore settings…: Settings → General reads the request
+    // (fresh for SettingsBackup.RESTORE_WINDOW_MS) and shows the import.
+    function restoreSettings() {
+        var action = Plasmoid.internalAction("configure")
+        if (!action)
+            return
+        Plasmoid.configuration.backupRestoreAt = String(Date.now())
+        action.trigger()
+    }
+
     function setUsageMode(mode) {
         Plasmoid.configuration.usageMode = mode === "used" ? "used" : "remaining"
     }
@@ -1846,6 +1967,26 @@ PlasmoidItem {
                 return
             root.finishInstallInfo(data["exit code"], data["stdout"])
         }
+    }
+
+    // Exports only; only stdout's checked fields are used.
+    Plasma5Support.DataSource {
+        id: backupSource
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            backupSource.disconnectSource(source)
+            if (source !== root.backupSourceName)
+                return
+            root.finishBackupExport(SettingsBackup.parseReply("export", data["exit code"], data["stdout"]))
+        }
+    }
+
+    Timer {
+        id: autoBackupTimer
+        interval: root.backupAutoWait
+        repeat: false
+        onTriggered: root.autoBackup()
     }
 
     Plasma5Support.DataSource {
@@ -1948,6 +2089,25 @@ PlasmoidItem {
         }
     }
 
+    // A settings backup result from the panel menu or Automatic backup.
+    Component {
+        id: backupNotification
+
+        Notification {
+            property string outcome: ""
+            property string failure: ""
+
+            componentName: "hearthwire"
+            eventId: "settingsBackup"
+            iconName: "hearthwire"
+            urgency: outcome === "saved" ? Notification.LowUrgency : Notification.NormalUrgency
+            autoDelete: true
+            title: outcome === "saved" ? i18n("Settings backed up")
+                : outcome === "auto-failed" ? i18n("Automatic settings backup failed") : i18n("Settings backup failed")
+            text: outcome === "saved" ? i18n("The earlier backup was replaced.") : root.backupFailureText(failure)
+        }
+    }
+
     Timer {
         id: firstRunSettingsTimer
         interval: 1200
@@ -2005,6 +2165,27 @@ PlasmoidItem {
         // step is dropped unless status says locked with a wallet slot.
         if (root.chatStorageMode === "encrypted" && root.chatUnlockSetting === "wallet")
             root.chatEnqueue(["status", "auto-unlock"])
+        root.backupRun = ChatStorage.firstRun(Date.now(), Math.random())
+        // Last, after every start-up write above: starting Plasma exports nothing.
+        root.backupFingerprint = SettingsBackup.fingerprint(Plasmoid.configuration)
+    }
+
+    // Automatic backup: Settings → General's switch, and any backed-up key
+    // while it is on.
+    Connections {
+        target: Plasmoid.configuration
+        function onValueChanged(key, value) {
+            if (key === "backupAutoExport") {
+                if (value === true) {
+                    root.backupAutoForce = true
+                    autoBackupTimer.restart()
+                } else {
+                    autoBackupTimer.stop()
+                }
+            } else if (Plasmoid.configuration.backupAutoExport === true && SettingsBackup.isBackupKey(key)) {
+                autoBackupTimer.restart()
+            }
+        }
     }
 
     // Settings → Chat added or removed sites (Apply, a backup Replace).
@@ -2140,6 +2321,17 @@ PlasmoidItem {
             icon.name: "view-refresh"
             visible: root.usageShown
             onTriggered: root.refresh()
+        },
+        PlasmaCore.Action {
+            text: i18n("Back up settings")
+            icon.name: "document-export"
+            enabled: root.backupOp === ""
+            onTriggered: root.runBackupExport("menu", SettingsBackup.fingerprint(Plasmoid.configuration))
+        },
+        PlasmaCore.Action {
+            text: i18n("Restore settings…")
+            icon.name: "document-import"
+            onTriggered: root.restoreSettings()
         }
     ]
 }

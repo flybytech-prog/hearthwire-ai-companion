@@ -131,7 +131,8 @@ def run_export(monkeypatch, tmp_path):
     monkeypatch.setattr(settingsbackup, "applied_settings", fake_applied_settings)
     config = tmp_path / "config"
     config.mkdir(mode=0o700)
-    environ = {"XDG_CONFIG_HOME": str(config), "HOME": str(tmp_path)}
+    # XDG_DATA_HOME too: export makes the backup key there (task 007), never in the real home.
+    environ = {"XDG_CONFIG_HOME": str(config), "XDG_DATA_HOME": str(tmp_path / "data"), "HOME": str(tmp_path)}
     reply = settingsbackup.export(7, environ, clock=lambda: 1_793_923_829)
     assert reply["ok"] is True
     document = json.loads((config / "hearthwire" / "settings-backup.json").read_text(encoding="utf-8"))
@@ -421,3 +422,46 @@ def test_js_number_reads_the_forms_the_widget_uses():
     assert js_number("var A = 448 * 1024\n", "A") == 458752
     assert js_number("var A = 207\n", "A") == 207
     assert js_number("var A = B + 1\n", "A") is None
+
+
+# --- task 007: reply words, the same on both sides -----------------------------------------
+
+
+def js_words(code, name):
+    match = re.search(rf"^var {name} = \[(.*?)\]", code, re.DOTALL | re.MULTILINE)
+    assert match, f"{SETTINGS_BACKUP_JS.name}: var {name} is missing"
+    return re.findall(r'"([a-z-]+)"', match.group(1))
+
+
+def reply_word_problems(code, errors, origins):
+    """SettingsBackup.js ERRORS is the helper's ERRORS, ORIGINS its ORIGINS (same order)."""
+    problems = []
+    js_errors = js_words(code, "ERRORS")
+    if len(set(js_errors)) != len(js_errors):
+        problems.append("SettingsBackup.js ERRORS has duplicates")
+    if set(js_errors) != set(errors):
+        problems.append(f"ERRORS differ: {sorted(set(js_errors) ^ set(errors))}")
+    if js_words(code, "ORIGINS") != list(origins):
+        problems.append("SettingsBackup.js ORIGINS differs from the helper's")
+    return problems
+
+
+def test_the_error_codes_and_origins_match_the_widget():
+    problems = reply_word_problems(read(SETTINGS_BACKUP_JS), settingsbackup.ERRORS, settingsbackup.ORIGINS)
+    assert not problems, problems
+    assert {"damaged", "key-unusable"} <= settingsbackup.ERRORS
+    assert settingsbackup.ORIGINS == ("this-computer", "other", "unsigned")
+
+
+@pytest.mark.parametrize(("old", "new", "errors", "origins"), [
+    ('"damaged", ', "", settingsbackup.ERRORS, settingsbackup.ORIGINS),
+    ('"key-unusable"', '"key-unusable", "bad-key"', settingsbackup.ERRORS, settingsbackup.ORIGINS),
+    ('"key-unusable"', '"key-unusable", "damaged"', settingsbackup.ERRORS, settingsbackup.ORIGINS),
+    ('"other", "unsigned"', '"unsigned", "other"', settingsbackup.ERRORS, settingsbackup.ORIGINS),
+    ('"other", "unsigned"', '"other"', settingsbackup.ERRORS, settingsbackup.ORIGINS),
+    ("", "", settingsbackup.ERRORS - {"key-unusable"}, settingsbackup.ORIGINS),
+    ("", "", settingsbackup.ERRORS, settingsbackup.ORIGINS + ("elsewhere",)),
+])
+def test_proof_reply_word_rule_catches(old, new, errors, origins):
+    code = mutated(SETTINGS_BACKUP_JS, old, new) if old else read(SETTINGS_BACKUP_JS)
+    assert reply_word_problems(code, errors, origins)

@@ -112,6 +112,13 @@ KCM.SimpleKCM {
     // old value.
     property bool cfg_usageHistoryClearOwed: false
     property bool cfg_usageHistoryClearOwedDefault: false
+    // Automatic backup; never part of a backup, so a restore can't change it.
+    property bool cfg_backupAutoExport: false
+    property bool cfg_backupAutoExportDefault: false
+    // Written only by main.qml (panel menu → Restore settings…); kept in
+    // step so Apply never writes back an old value.
+    property string cfg_backupRestoreAt: ""
+    property string cfg_backupRestoreAtDefault: ""
 
     // Page-local only; the folder actions always start collapsed.
     property bool showFolderActions: false
@@ -393,6 +400,11 @@ KCM.SimpleKCM {
     property var backupPlan: null
     // The chat addresses it would change (SettingsBackup.addressChanges).
     property var backupAddressChanges: []
+    // Where the helper says the imported file came from (SettingsBackup.ORIGINS);
+    // shown only, never part of the checks.
+    property string backupOrigin: ""
+    // A menu Restore waiting for the step that runs (the status at open).
+    property bool restorePending: false
 
     // Every step names this widget; nothing runs without a usable id.
     function runBackup(op) {
@@ -433,7 +445,24 @@ KCM.SimpleKCM {
         page.confirmingImport = false
         page.backupPlan = null
         page.backupAddressChanges = []
+        page.backupOrigin = ""
         page.runBackup("import")
+    }
+
+    // Panel menu → Restore settings…: the Backup part in view and the
+    // usual import, which asks before anything changes.
+    function startRestore() {
+        page.restorePending = false
+        page.scrollToBackup()
+        page.requestImport()
+    }
+
+    function scrollToBackup() {
+        var flickable = page.flickable
+        if (!flickable || !flickable.contentItem)
+            return
+        var top = backupSection.mapToItem(flickable.contentItem, 0, 0).y
+        flickable.contentY = Math.max(0, Math.min(top, flickable.contentHeight - flickable.height))
     }
 
     function finishBackup(op, reply) {
@@ -442,10 +471,21 @@ KCM.SimpleKCM {
         if (op === "status") {
             page.backupState = reply.ok ? (reply.exists ? "exists" : "absent") : reply.error
             page.backupExportedAt = reply.ok ? reply.exportedAt : ""
+            // A Restore asked for while this ran; one step runs at a time.
+            if (page.restorePending)
+                page.startRestore()
             return
+        }
+        // This import answers a Restore asked for while it ran.
+        if (op === "import" && page.restorePending) {
+            page.restorePending = false
+            page.scrollToBackup()
         }
         if (!reply.ok) {
             page.backupMessage = reply.error
+            // A failed export runs no status: the Restore goes now.
+            if (page.restorePending)
+                page.startRestore()
             return
         }
         if (op === "export") {
@@ -506,6 +546,7 @@ KCM.SimpleKCM {
                 }
             })
         page.backupExportedAt = reply.exportedAt
+        page.backupOrigin = reply.origin
         page.confirmingImport = true
     }
 
@@ -646,6 +687,10 @@ KCM.SimpleKCM {
             return i18n("This widget's applied settings weren't found. Press Apply, then try again. Nothing was changed.")
         case "settings-unreadable":
             return i18n("Plasma's settings file for this widget couldn't be read safely, so nothing was exported. Check the owner and type of ~/.config/plasma-org.kde.plasma.desktop-appletsrc.")
+        case "damaged":
+            return i18n("The backup file is damaged: its checksum doesn't match, so it wasn't used. Nothing was changed.")
+        case "key-unusable":
+            return i18n("The backup key (~/.local/share/hearthwire/backup-key) isn't safe to use, so nothing was exported. Delete it to make a new one; backups made with the old key then show a warning on import.")
         case "no-applet":
             return i18n("This widget couldn't be identified, so the backup can't be used. Nothing was changed.")
         default:
@@ -720,6 +765,10 @@ KCM.SimpleKCM {
         page.historyClearRun = ChatStorage.firstRun(Date.now(), Math.random())
         page.backupRun = ChatStorage.firstRun(Date.now(), Math.random())
         page.runBackup("status")
+        // Opened by panel menu → Restore settings…: the import follows the status.
+        page.restorePending = SettingsBackup.restoreRequested(Plasmoid.configuration.backupRestoreAt, Date.now())
+        if (page.restorePending && page.backupOp === "")
+            page.startRestore()
         page.runVault("status")
         page.checkInstall()
     }
@@ -739,6 +788,16 @@ KCM.SimpleKCM {
                 page.cfg_chatSiteZoom = value
             else if (key === "usageHistoryClearOwed")
                 page.cfg_usageHistoryClearOwed = value
+            else if (key === "backupRestoreAt") {
+                page.cfg_backupRestoreAt = value
+                // Restore from the menu while Settings is already open.
+                if (SettingsBackup.restoreRequested(value, Date.now())) {
+                    if (page.backupOp === "")
+                        page.startRestore()
+                    else
+                        page.restorePending = true
+                }
+            }
         }
     }
 
@@ -1385,6 +1444,8 @@ KCM.SimpleKCM {
         // --- Backup ---------------------------------------------------------
 
         Kirigami.Separator {
+            id: backupSection
+            objectName: "backupSection"
             Kirigami.FormData.isSection: true
             Kirigami.FormData.label: i18n("Backup")
         }
@@ -1414,7 +1475,7 @@ KCM.SimpleKCM {
                 id: backupHelp
                 objectName: "backupHelp"
                 Layout.alignment: Qt.AlignTop
-                toolTipText: i18n("One file on this computer, in the hearthwire folder of your configuration folder (usually ~/.config). It holds these settings, including your custom chat addresses. Sign-ins, the encrypted folder, zoom and the usage history setting are not part of it.")
+                toolTipText: i18n("One file on this computer, in the hearthwire folder of your configuration folder (usually ~/.config). It holds these settings, including your custom chat addresses. Sign-ins, the encrypted folder, zoom and the usage history setting are not part of it. Each backup is signed with a key kept only on this computer (in ~/.local/share/hearthwire), so Import can tell a backup made here from one made elsewhere.")
             }
         }
         QQC2.Label {
@@ -1425,6 +1486,24 @@ KCM.SimpleKCM {
             opacity: 0.72
             text: i18n("Export saves the applied settings: press Apply first.")
             Layout.preferredWidth: page.wrappedTextWidth
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.preferredWidth: page.wrappedTextWidth
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.CheckBox {
+                objectName: "backupAutoExport"
+                Layout.fillWidth: true
+                Layout.maximumWidth: Math.ceil(implicitWidth)
+                text: i18n("Back up automatically when settings are applied")
+                checked: page.cfg_backupAutoExport
+                onToggled: page.cfg_backupAutoExport = checked
+            }
+            Kirigami.ContextualHelpButton {
+                objectName: "backupAutoHelp"
+                toolTipText: i18n("Saved about 3 seconds after you press Apply when a backed-up setting changed, and once when you turn this on. It replaces the previous backup without asking. With several Hearthwire widgets, the last one to apply wins. The backup never holds sign-ins, the encrypted folder, zoom or the usage history setting.")
+            }
         }
         RowLayout {
             spacing: Kirigami.Units.smallSpacing
@@ -1493,6 +1572,20 @@ KCM.SimpleKCM {
                     }
                 }
             ]
+        }
+
+        // Informational only: every origin gets the same checks and preview.
+        QQC2.Label {
+            objectName: "backupOrigin"
+            Layout.fillWidth: true
+            visible: page.confirmingImport
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            color: page.backupOrigin === "this-computer" ? Kirigami.Theme.textColor : Kirigami.Theme.negativeTextColor
+            text: page.backupOrigin === "this-computer"
+                ? i18n("Made by Hearthwire on this computer.")
+                : i18n("Not made by this Hearthwire: check every change below before you press Replace.")
+            Layout.preferredWidth: page.wrappedTextWidth
         }
 
         QQC2.Label {

@@ -98,7 +98,7 @@ def run_install(tmp_path, *, xdg_data_home=None, python_stub=PYTHON_STUB, cwd=No
     return completed, home
 
 
-def test_notifyrc_declares_the_component_and_both_alert_events():
+def test_notifyrc_declares_the_component_and_its_three_events():
     parser = configparser.ConfigParser(interpolation=None)
     parser.optionxform = str
     parser.read_string(NOTIFYRC.read_text(encoding="utf-8"))
@@ -106,6 +106,7 @@ def test_notifyrc_declares_the_component_and_both_alert_events():
         "Global": {"IconName": "hearthwire", "Comment": "Hearthwire"},
         "Event/usageLow": {"Name": "Plan running low", "Action": "Popup"},
         "Event/usageReset": {"Name": "Plan reset", "Action": "Popup"},
+        "Event/settingsBackup": {"Name": "Settings backup", "Action": "Popup"},  # task 007
     }
 
 

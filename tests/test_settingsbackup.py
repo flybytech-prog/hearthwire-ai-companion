@@ -1,6 +1,7 @@
 """Settings backup (core/settingsbackup.py) and --settings-backup."""
 
 import ast
+import base64
 import ipaddress
 import json
 import os
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from hearthwire import cli
-from hearthwire.core import appletconfig
+from hearthwire.core import appletconfig, legacy
 from hearthwire.core import settingsbackup as backup
 from hearthwire.core.catalog import PROVIDER_CATALOG
 
@@ -172,6 +173,9 @@ def test_the_decided_keys_are_on_the_right_side():
                 "chatSiteZoom", "configSchemaVersion", "initialSetupComplete", "chatProfileLayout",
                 "chatPendingSiteClears"):
         assert key in backup.EXCLUDED_KEYS
+    # Task 007: a restore never changes backup behavior.
+    assert backup.EXCLUDED_KEYS[-2:] == ("backupAutoExport", "backupRestoreAt")
+    assert not {"backupAutoExport", "backupRestoreAt"} & set(backup.BACKUP_KEYS)
 
 
 def test_every_backup_key_has_a_rule():
@@ -1296,7 +1300,10 @@ def test_the_longest_settings_export_fits_512_kib_and_import(config, capsys):
     path = config / "settings-backup.json"
     size = path.stat().st_size
     assert 400 * 1024 < size <= backup.MAX_FILE_BYTES
-    assert run("import") == {"ok": True, "exported_at": STAMP, "settings": settings, "dropped": 0}
+    assert run("import") == {"ok": True, "exported_at": STAMP, "settings": settings, "dropped": 0,
+                             "origin": "this-computer"}
+    # Task 007: format 2 (sha256 and signature) still leaves room under the cap.
+    assert backup.MAX_FILE_BYTES - size >= 16 * 1024, backup.MAX_FILE_BYTES - size
     # The widget's reply cap (SettingsBackup.MAX_REPLY_CHARS, UTF-16 units) holds the import reply.
     assert cli.main(["--settings-backup", "import"]) == 0
     out = capsys.readouterr().out
@@ -1307,6 +1314,7 @@ def test_the_longest_settings_export_fits_512_kib_and_import(config, capsys):
     path.write_bytes(data[:-1] + b" " * (backup.MAX_FILE_BYTES - size) + b"\n")
     assert path.stat().st_size == backup.MAX_FILE_BYTES
     assert run("import")["settings"] == settings
+    assert run("import")["origin"] == "this-computer"  # Whitespace isn't part of the canonical form.
     path.write_bytes(data[:-1] + b" " * (backup.MAX_FILE_BYTES + 1 - size) + b"\n")
     assert run("import") == {"ok": False, "error": "too-large"}
     assert run("status") == {"ok": False, "error": "too-large"}
@@ -1368,7 +1376,9 @@ def test_local_added_sites_round_trip_through_export_and_import(config):
     reply = run("import")
     assert reply["ok"] is True and reply["dropped"] == 0
     assert {key: reply["settings"][key] for key in settings} == settings
-    assert set(reply) == {"ok", "exported_at", "settings", "dropped"}  # Codes and counts, nothing else.
+    # Codes, counts and the origin word, nothing else.
+    assert set(reply) == {"ok", "exported_at", "settings", "dropped", "origin"}
+    assert reply["origin"] == "this-computer"
 
 
 # --- strict JSON ----------------------------------------------------------------------------------
@@ -1392,7 +1402,9 @@ def test_export_writes_a_private_file_atomically(config):
     path = config / "settings-backup.json"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert os.listdir(config) == ["settings-backup.json"]
-    assert json.loads(path.read_text()) == document(GOOD_KEPT)
+    written = json.loads(path.read_text())
+    assert list(written) == ["format", "version", "config_schema", "exported_at", "settings", "sha256", "signature"]
+    assert {key: written[key] for key in backup.CONTENT_KEYS} == document(GOOD_KEPT, version=2)
     assert path.read_text().endswith("}\n")
     assert "chatSignInStorage" not in path.read_text()
 
@@ -1400,7 +1412,8 @@ def test_export_writes_a_private_file_atomically(config):
 def test_export_status_import_round_trip(config):
     exported(GOOD)
     assert run("status") == {"ok": True, "exists": True, "exported_at": STAMP}
-    assert run("import") == {"ok": True, "exported_at": STAMP, "settings": GOOD_KEPT, "dropped": 0}
+    assert run("import") == {"ok": True, "exported_at": STAMP, "settings": GOOD_KEPT, "dropped": 0,
+                             "origin": "this-computer"}
     # Exporting what import gave keeps it unchanged.
     before = (config / "settings-backup.json").read_bytes()
     exported(GOOD_KEPT)
@@ -1643,7 +1656,8 @@ def test_import_drops_and_counts_odd_settings(config):
 
 @pytest.mark.parametrize(("content", "error"), [
     ("", "invalid"), ("not json", "invalid"), (b"\xff", "invalid"), ("[]", "invalid"),
-    (document(format="other"), "invalid"), (document(version=2), "unsupported"),
+    (document(format="other"), "invalid"), (document(version=3), "unsupported"),
+    (document(version=0), "unsupported"),
     (document(config_schema=2), "unsupported"), (document(config_schema=4), "unsupported"),
     (document(version="1"), "invalid"), (document(version=True), "invalid"), (document(version=1.0), "invalid"),
     (document(exported_at="2026-11-06 00:10:29Z"), "invalid"), (document(exported_at="2026-13-06T00:10:29Z"), "invalid"),
@@ -1737,6 +1751,519 @@ def test_xdg_config_home_must_be_absolute(tmp_path, monkeypatch):
     assert backup.config_base() == str(tmp_path / "xdg")
     monkeypatch.delenv("XDG_CONFIG_HOME")
     assert backup.config_base() == str(tmp_path / "home" / ".config")
+
+
+# --- backup identity: format 2, the key, origin (task 007) ---------------------------------------
+
+KEY = bytes(range(32))
+OTHER_KEY = bytes(range(100, 132))
+CONTENT_KEYS = ["format", "version", "config_schema", "exported_at", "settings"]
+FILE_KEYS = CONTENT_KEYS + ["sha256", "signature"]
+# The golden vector (plan §8.1): fixed key and document, fixed bytes and digests.
+# Checked once against openssl (sha256sum; dgst -sha256 -mac HMAC) when written.
+GOLDEN_SETTINGS = {"usageMode": "used", "refreshInterval": 300, "chatKeepOpen": True,
+                   "chatUserSites": user_sites(SITE_B)}
+GOLDEN_CANONICAL = (
+    '{"config_schema":3,"exported_at":"2026-11-06T00:10:29Z","format":"hearthwire-settings",'
+    '"settings":{"chatKeepOpen":true,"chatUserSites":"[{\\"id\\":\\"user-00ff00aa\\",'
+    '\\"name\\":\\"Ünïcode \U0001f600\\",\\"url\\":\\"https://b.example.net/x?y=1\\"}]",'
+    '"refreshInterval":300,"usageMode":"used"},"version":2}'
+).encode("utf-8")
+GOLDEN_SHA256 = "a657a668276e3d25cc16834f654e79b49409be1946d40b5cbce8d34de61e39fb"
+GOLDEN_SIGNATURE = "2bc75862457d36fe1881a938c501bc1e055ff0ee2904c7412377e9705232d86a"
+
+
+def data_folder():
+    return Path(os.environ["XDG_DATA_HOME"]) / "hearthwire"
+
+
+def key_path():
+    return data_folder() / "backup-key"
+
+
+def install_key(key=KEY, *, mode=0o600, folder_mode=0o700):
+    data_folder().mkdir(parents=True, exist_ok=True)
+    data_folder().chmod(folder_mode)
+    key_path().write_bytes(key)
+    key_path().chmod(mode)
+    return key_path()
+
+
+def signed(settings=None, *, key=KEY, **overrides):
+    """A version 2 document, its digests computed here with ``key``."""
+    content = document(settings, **dict({"version": 2}, **overrides))
+    body = backup.canonical(content)
+    return dict(content, sha256=backup.content_sha256(body), signature=backup.content_signature(key, body))
+
+
+def key_forms(key):
+    """Every way the key could leak: raw, hex in both cases, base64 and base64url."""
+    return [key, key.hex().encode(), key.hex().upper().encode(), base64.b64encode(key),
+            base64.urlsafe_b64encode(key), base64.b64encode(key).rstrip(b"=")]
+
+
+def test_the_golden_vector():
+    content = document(GOLDEN_SETTINGS, version=2)
+    assert backup.canonical(content) == GOLDEN_CANONICAL
+    assert backup.content_sha256(GOLDEN_CANONICAL) == GOLDEN_SHA256
+    assert backup.content_signature(KEY, GOLDEN_CANONICAL) == GOLDEN_SIGNATURE
+    assert backup.SIGN_CONTEXT == b"hearthwire-settings-backup\x00"
+    # The file itself: content keys in order, then the two digests, compact, one newline.
+    assert backup.encode_document(GOLDEN_SETTINGS, STAMP, KEY) == (
+        '{"format":"hearthwire-settings","version":2,"config_schema":3,"exported_at":"%s","settings":%s,'
+        '"sha256":"%s","signature":"%s"}\n' % (STAMP, json.dumps(GOLDEN_SETTINGS, ensure_ascii=False,
+                                                                 separators=(",", ":")),
+                                                GOLDEN_SHA256, GOLDEN_SIGNATURE)).encode("utf-8")
+
+
+def test_export_writes_format_2_signed_with_a_new_private_key(config):
+    assert not data_folder().exists()
+    assert exported(GOOD)["ok"] is True
+    assert stat.S_IMODE(data_folder().stat().st_mode) == 0o700
+    info = key_path().lstat()
+    assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size == 32
+    assert os.listdir(data_folder()) == ["backup-key"]
+    key = key_path().read_bytes()
+    written = json.loads((config / "settings-backup.json").read_text(encoding="utf-8"))
+    assert list(written) == FILE_KEYS and written["version"] == 2
+    body = backup.canonical(written)
+    assert written["sha256"] == backup.content_sha256(body)
+    assert written["signature"] == backup.content_signature(key, body)
+    # A second export reuses the key, untouched.
+    assert exported(GOOD, now=NOW + 60)["ok"] is True
+    assert key_path().read_bytes() == key and key_path().lstat().st_ino == info.st_ino
+    assert run("import")["origin"] == "this-computer"
+
+
+def test_the_key_is_0600_whatever_the_umask(config):
+    write_rc(GOOD)
+    old = os.umask(0)
+    try:
+        assert run("export")["ok"] is True
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(key_path().stat().st_mode) == 0o600
+    assert stat.S_IMODE(data_folder().stat().st_mode) == 0o700
+
+
+def test_the_key_is_made_through_an_exclusive_temporary_and_a_link(config, monkeypatch):
+    write_rc(GOOD)
+    opened, linked = [], []
+    real_open, real_link = os.open, os.link
+
+    def watching_open(name, flags, *args, **kwargs):
+        if str(name).startswith("backup-key"):
+            opened.append((str(name), flags, args))
+        return real_open(name, flags, *args, **kwargs)
+
+    def watching_link(source, target, *args, **kwargs):
+        linked.append((source, target, kwargs))
+        return real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", watching_open)
+    monkeypatch.setattr(os, "link", watching_link)
+    assert run("export")["ok"] is True
+    reads = [entry for entry in opened if not entry[1] & os.O_CREAT]
+    creates = [entry for entry in opened if entry[1] & os.O_CREAT]
+    assert [name for name, _, _ in reads] == ["backup-key"]  # Looked for first, never created by that name.
+    assert len(creates) == 1
+    name, flags, args = creates[0]
+    assert re.fullmatch(r"backup-key\.[0-9a-f]{16}\.tmp", name)
+    assert flags & os.O_EXCL and flags & os.O_NOFOLLOW and args[0] == 0o600
+    assert [(source, target) for source, target, _ in linked] == [(name, "backup-key")]
+    assert linked[0][2]["follow_symlinks"] is False
+    assert os.listdir(data_folder()) == ["backup-key"]  # The temporary is gone.
+
+
+def test_a_key_made_by_another_export_at_link_time_is_used_not_replaced(config, monkeypatch):
+    write_rc(GOOD)
+    real_link = os.link
+
+    def racing_link(source, target, *args, **kwargs):
+        install_key(OTHER_KEY)  # Another widget's export won the race.
+        return real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", racing_link)
+    assert run("export")["ok"] is True
+    assert key_path().read_bytes() == OTHER_KEY
+    assert os.listdir(data_folder()) == ["backup-key"]
+    written = json.loads((config / "settings-backup.json").read_text(encoding="utf-8"))
+    assert written["signature"] == backup.content_signature(OTHER_KEY, backup.canonical(written))
+    monkeypatch.setattr(os, "link", real_link)
+    assert run("import")["origin"] == "this-computer"
+
+
+def test_stale_key_temporaries_are_removed_and_a_symlinked_one_is_unlinked(config, tmp_path):
+    install_key()
+    target = tmp_path / "precious"
+    target.write_bytes(b"keep")
+    (data_folder() / "backup-key.0123456789abcdef.tmp").write_bytes(b"half")
+    (data_folder() / "backup-key.fedcba9876543210.tmp").symlink_to(target)
+    keep = ["backup-key.short.tmp", "backup-key.0123456789ABCDEF.tmp", "vault-keys", "notes"]
+    for name in keep:
+        (data_folder() / name).write_text("not ours")
+    assert exported(GOOD)["ok"] is True
+    assert sorted(os.listdir(data_folder())) == sorted(keep + ["backup-key"])
+    assert target.read_bytes() == b"keep"
+    assert key_path().read_bytes() == KEY
+
+
+def test_key_material_never_reaches_the_file_a_reply_or_the_cli(config, capsys):
+    write_rc(GOOD)
+    outputs = []
+    for argv in (["export", "--applet", "7"], ["status"], ["import"], ["export", "--applet", "7"]):
+        assert cli.main(["--settings-backup", *argv]) == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)["ok"] is True
+        outputs += [captured.out.encode("utf-8"), captured.err.encode("utf-8")]
+    key = key_path().read_bytes()
+    outputs.append((config / "settings-backup.json").read_bytes())
+    outputs += [value.encode("utf-8", "surrogateescape") for value in os.environ.values()]
+    for form in key_forms(key):
+        for output in outputs:
+            assert form not in output
+    assert b"backup-key" not in b"".join(outputs[:-len(os.environ)])
+
+
+def test_a_reindented_or_reordered_file_is_still_this_computers(config):
+    exported(GOOD)
+    path = config / "settings-backup.json"
+    written = json.loads(path.read_text(encoding="utf-8"))
+    for text in (json.dumps(written, indent=4), json.dumps(dict(reversed(list(written.items()))), indent="\t"),
+                 json.dumps(dict(written, settings=dict(reversed(list(written["settings"].items())))))):
+        path.write_text(text, encoding="utf-8")
+        assert run("import") == {"ok": True, "exported_at": STAMP, "settings": GOOD_KEPT, "dropped": 0,
+                                 "origin": "this-computer"}
+
+
+def test_a_lone_surrogate_escape_is_invalid(config):
+    install_key()
+    text = json.dumps(signed()).replace('"used"', '"\\ud800"', 1)
+    assert '"\\ud800"' in text
+    write_backup(config, text)
+    assert run("import") == {"ok": False, "error": "invalid"}
+    assert run("status") == {"ok": False, "error": "invalid"}
+
+
+def test_one_changed_character_is_damaged_for_status_and_import(config):
+    exported(GOOD)
+    path = config / "settings-backup.json"
+    text = path.read_text(encoding="utf-8")
+    assert '"usageMode":"used"' in text
+    path.write_text(text.replace('"usageMode":"used"', '"usageMode":"usee"', 1), encoding="utf-8")
+    assert run("import") == {"ok": False, "error": "damaged"}
+    assert run("status") == {"ok": False, "error": "damaged"}
+
+
+def test_a_damaged_file_is_refused_before_the_key_is_read(config, monkeypatch):
+    install_key()
+    write_backup(config, dict(signed(), sha256="0" * 64))
+    looked = []
+    monkeypatch.setattr(backup, "_import_key", lambda environ: looked.append(1))
+    assert run("import") == {"ok": False, "error": "damaged"}
+    assert looked == []
+
+
+def test_status_never_reads_the_key(config, monkeypatch):
+    exported(GOOD)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("status read the key")
+
+    for name in ("_signing_key", "_import_key", "_read_key", "_key_directory"):
+        monkeypatch.setattr(backup, name, refuse)
+    assert run("status") == {"ok": True, "exists": True, "exported_at": STAMP}
+
+
+def test_a_checksum_recomputed_without_the_key_is_other(config):
+    exported(GOOD)
+    path = config / "settings-backup.json"
+    written = json.loads(path.read_text(encoding="utf-8"))
+    written["settings"]["usageMode"] = "remaining"
+    written["sha256"] = backup.content_sha256(backup.canonical(written))
+    path.write_text(json.dumps(written), encoding="utf-8")
+    reply = run("import")
+    assert reply["origin"] == "other" and reply["settings"]["usageMode"] == "remaining"
+
+
+def test_another_key_is_other(config):
+    install_key()
+    write_backup(config, signed(key=OTHER_KEY))
+    assert run("import")["origin"] == "other"
+
+
+def test_without_a_key_import_says_other_and_makes_none(config):
+    exported(GOOD)
+    key_path().unlink()
+    assert run("import") == {"ok": True, "exported_at": STAMP, "settings": GOOD_KEPT, "dropped": 0,
+                             "origin": "other"}
+    assert os.listdir(data_folder()) == []
+
+
+def test_status_and_import_never_make_the_data_folder_or_the_key(config):
+    write_backup(config, signed())
+    assert run("status")["ok"] is True
+    assert run("import")["origin"] == "other"
+    write_backup(config, document())
+    assert run("import")["origin"] == "unsigned"
+    assert not Path(os.environ["XDG_DATA_HOME"]).exists()
+
+
+def make_unusable(kind, tmp_path):
+    if kind == "symlink":
+        real = tmp_path / "real-key"
+        real.write_bytes(KEY)  # Even the right key is not read through a link.
+        real.chmod(0o600)
+        data_folder().mkdir(parents=True, mode=0o700)
+        key_path().symlink_to(real)
+    elif kind == "directory":
+        key_path().mkdir(parents=True, mode=0o700)
+        data_folder().chmod(0o700)
+    elif kind == "fifo":
+        data_folder().mkdir(parents=True, mode=0o700)
+        os.mkfifo(key_path(), 0o600)
+    elif kind == "folder-symlink":
+        real = tmp_path / "real-data"
+        real.mkdir(mode=0o700)
+        (real / "backup-key").write_bytes(KEY)
+        (real / "backup-key").chmod(0o600)
+        data_folder().parent.mkdir(parents=True)
+        data_folder().symlink_to(real)
+    elif kind.startswith("folder-"):
+        install_key(folder_mode=int(kind[len("folder-"):], 8))
+    elif kind.startswith("mode-"):
+        install_key(mode=int(kind[len("mode-"):], 8))
+    else:
+        install_key(KEY[:31] if kind == "short" else KEY + b"!")
+
+
+def snapshot(path):
+    info = os.lstat(path)
+    content = path.read_bytes() if stat.S_ISREG(info.st_mode) else None
+    return info.st_mode, info.st_ino, content
+
+
+UNUSABLE = ["symlink", "directory", "fifo", "short", "long", "mode-644", "mode-640", "mode-604", "mode-620",
+            "folder-770", "folder-702", "folder-777", "folder-symlink"]
+
+
+@pytest.mark.parametrize("kind", UNUSABLE)
+def test_an_unusable_key_is_other_on_import_and_refused_by_export(config, tmp_path, kind):
+    make_unusable(kind, tmp_path)
+    write_backup(config, signed())
+    before_key, before_folder = snapshot(key_path()), snapshot(data_folder())
+    before_file = (config / "settings-backup.json").read_bytes()
+    assert run("import")["origin"] == "other"
+    assert exported(GOOD) == {"ok": False, "error": "key-unusable"}
+    # Nothing replaced or repaired (M-5), and the old backup stays.
+    assert snapshot(key_path()) == before_key and snapshot(data_folder()) == before_folder
+    assert (config / "settings-backup.json").read_bytes() == before_file
+    assert sorted(os.listdir(data_folder())) == ["backup-key"]
+
+
+def test_someone_elses_key_is_unusable(config, monkeypatch):
+    install_key()
+    write_backup(config, signed())
+    real_fstat = os.fstat
+
+    def foreign_key(descriptor, *args):
+        info = real_fstat(descriptor, *args)
+        if stat.S_ISREG(info.st_mode) and info.st_size == 32:
+            values = list(info)
+            values[stat.ST_UID] = os.getuid() + 1
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(os, "fstat", foreign_key)
+    assert run("import")["origin"] == "other"
+    write_rc(GOOD)
+    assert run("export") == {"ok": False, "error": "key-unusable"}
+    monkeypatch.setattr(os, "fstat", real_fstat)
+    assert key_path().read_bytes() == KEY
+
+
+def test_a_version_1_file_is_unsigned_with_the_same_settings(config):
+    install_key()
+    write_backup(config, document(dict(GOOD, usageMode="nope")))
+    old = run("import")
+    write_backup(config, signed(dict(GOOD, usageMode="nope")))
+    new = run("import")
+    assert old.pop("origin") == "unsigned" and new.pop("origin") == "this-computer"
+    assert old == new and old["dropped"] == 1
+
+
+@pytest.mark.parametrize("change", [
+    lambda d: d.pop("signature"),
+    lambda d: d.pop("sha256"),
+    lambda d: d.update(sha256=d["sha256"].upper()),
+    lambda d: d.update(signature=d["signature"].upper()),
+    lambda d: d.update(sha256=d["sha256"][:63]),
+    lambda d: d.update(signature=d["signature"] + "0"),
+    lambda d: d.update(signature=" " + d["signature"][1:]),
+    lambda d: d.update(sha256=d["sha256"][:63] + "\n"),
+    lambda d: d.update(signature=None),
+    lambda d: d.update(sha256=int("1" * 64)),
+    lambda d: d.update(extra="1"),
+    lambda d: d.update(version=1),  # A version 1 file carrying both fields.
+    lambda d: (d.update(version=1), d.pop("signature")),
+    lambda d: (d.update(version=1), d.pop("sha256")),
+])
+def test_odd_identity_fields_are_invalid(config, change):
+    install_key()
+    content = signed()
+    change(content)
+    write_backup(config, content)
+    assert run("import") == {"ok": False, "error": "invalid"}
+    assert run("status") == {"ok": False, "error": "invalid"}
+
+
+def test_export_while_old_data_waits_makes_nothing_in_the_data_folder(config):
+    write_rc(GOOD)
+    base = Path(os.environ["XDG_DATA_HOME"])
+    (base / legacy.LEGACY_NAME).mkdir(parents=True)
+    assert run("export") == {"ok": False, "error": "legacy-data"}
+    assert os.listdir(base) == [legacy.LEGACY_NAME] and not config.exists()
+
+
+def test_a_relative_xdg_data_home_falls_back_to_the_home_folder(config, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_DATA_HOME", "relative/data")
+    assert exported(GOOD)["ok"] is True
+    assert (tmp_path / "home" / ".local" / "share" / "hearthwire" / "backup-key").stat().st_size == 32
+    assert not (tmp_path / "relative").exists()
+
+
+def test_a_too_large_export_makes_no_key(config, monkeypatch):
+    monkeypatch.setattr(backup, "MAX_FILE_BYTES", 200)
+    assert exported(GOOD) == {"ok": False, "error": "too-large"}
+    assert not Path(os.environ["XDG_DATA_HOME"]).exists()
+
+
+# --- identity source pins, each with a mutation proof ----------------------------------------------
+
+
+def module_function(tree, name):
+    return next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name)
+
+
+def digest_compare_problems(source):
+    """Both digest checks use hmac.compare_digest, the checksum first; no ==/!= on a digest."""
+    tree = ast.parse(source)
+    problems = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare) and any(isinstance(op, (ast.Eq, ast.NotEq)) for op in node.ops):
+            text = ast.unparse(node)
+            if re.search(r"sha256|signature|digest", text):
+                problems.append(f"== or != on a digest: {text}")
+    parse = module_function(tree, "parse_document")
+    calls = [node for node in ast.walk(parse) if isinstance(node, ast.Call)
+             and ast.unparse(node.func) == "hmac.compare_digest"]
+    wanted = {"hmac.compare_digest(content_sha256(content), document['sha256'])",
+              "hmac.compare_digest(content_signature(key, content), document['signature'])"}
+    if {ast.unparse(call) for call in calls} != wanted or len(calls) != 2:
+        problems.append(f"parse_document must compare with {sorted(wanted)}")
+        return problems
+    by_text = {ast.unparse(call): call.lineno for call in calls}
+    key_reads = [node.lineno for node in ast.walk(parse) if isinstance(node, ast.Call)
+                 and ast.unparse(node.func) == "signing_key"]
+    damaged = [node.lineno for node in ast.walk(parse) if isinstance(node, ast.Raise)
+               and "damaged" in ast.unparse(node)]
+    checksum = by_text["hmac.compare_digest(content_sha256(content), document['sha256'])"]
+    signature = by_text["hmac.compare_digest(content_signature(key, content), document['signature'])"]
+    if len(damaged) != 1 or not checksum <= damaged[0] < min(key_reads + [signature]):
+        problems.append("the checksum must be checked (and refused as damaged) before the key or the HMAC")
+    return problems
+
+
+def key_source_problems(source):
+    """secrets.token_bytes(KEY_BYTES) in _create_key is the only key source; KEY_BYTES is 32."""
+    tree = ast.parse(source)
+    problems = []
+    sources = [(node.lineno, ast.unparse(node)) for node in ast.walk(tree) if isinstance(node, ast.Call)
+               and re.fullmatch(r"(os\.urandom|secrets\.\w+|random\.\w+|os\.getrandom)", ast.unparse(node.func))]
+    create = module_function(tree, "_create_key")
+    inside = {(node.lineno, ast.unparse(node)) for node in ast.walk(create) if isinstance(node, ast.Call)}
+    key_sources = [text for line, text in sources if (line, text) in inside and not text.startswith("secrets.token_hex(8)")]
+    if key_sources != ["secrets.token_bytes(KEY_BYTES)"]:
+        problems.append(f"_create_key must take the key from secrets.token_bytes(KEY_BYTES), found {key_sources}")
+    if [text for _, text in sources].count("secrets.token_bytes(KEY_BYTES)") != 1:
+        problems.append("secrets.token_bytes(KEY_BYTES) must appear exactly once")
+    if not re.search(r"^KEY_BYTES = 32$", source, re.MULTILINE):
+        problems.append("KEY_BYTES must be 32")
+    return problems
+
+
+def sign_context_problems(source):
+    tree = ast.parse(source)
+    body = module_function(tree, "content_signature")
+    calls = [ast.unparse(node) for node in ast.walk(body) if isinstance(node, ast.Call)
+             and ast.unparse(node.func) == "hmac.new"]
+    problems = [] if calls == ["hmac.new(key, SIGN_CONTEXT + content, hashlib.sha256)"] else [
+        f"content_signature must be hmac.new(key, SIGN_CONTEXT + content, hashlib.sha256), found {calls}"]
+    if 'SIGN_CONTEXT = b"hearthwire-settings-backup\\x00"' not in source:
+        problems.append("SIGN_CONTEXT changed")
+    return problems
+
+
+def test_digests_are_compared_in_constant_time_checksum_first():
+    problems = digest_compare_problems(SOURCE.read_text(encoding="utf-8"))
+    assert not problems, problems
+
+
+def test_the_key_comes_only_from_secrets_token_bytes_32():
+    problems = key_source_problems(SOURCE.read_text(encoding="utf-8"))
+    assert not problems, problems
+
+
+def test_the_signature_has_its_context():
+    problems = sign_context_problems(SOURCE.read_text(encoding="utf-8"))
+    assert not problems, problems
+
+
+def source_mutated(old, new):
+    text = SOURCE.read_text(encoding="utf-8")
+    assert text.count(old) == 1, f"proof fixture out of date: {old!r}"
+    return text.replace(old, new)
+
+
+CHECKSUM_LINE = 'if not hmac.compare_digest(content_sha256(content), document["sha256"]):'
+SIGNATURE_LINE = 'hmac.compare_digest(content_signature(key, content), document["signature"])'
+CHECKSUM_BLOCK = ("        " + CHECKSUM_LINE + "\n"
+                  '            raise HelperError("damaged")  # M-4: refused, not a warning.\n')
+KEY_READ = "        key = signing_key() if signing_key is not None else None\n"
+HMAC_BLOCK = (KEY_READ + '        origin = "other"\n'
+              "        if key is not None and " + SIGNATURE_LINE + ":\n"
+              '            origin = "this-computer"\n')
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    (CHECKSUM_LINE, 'if content_sha256(content) != document["sha256"]:'),
+    (SIGNATURE_LINE, 'content_signature(key, content) == document["signature"]'),
+    (SIGNATURE_LINE, 'hmac.compare_digest(content_signature(key, content), document["sha256"])'),
+    (CHECKSUM_BLOCK + HMAC_BLOCK, HMAC_BLOCK + CHECKSUM_BLOCK),       # HMAC checked before the checksum
+    (CHECKSUM_BLOCK + KEY_READ, KEY_READ + CHECKSUM_BLOCK),           # key read before the checksum
+])
+def test_proof_digest_compare_rule_catches(old, new):
+    assert digest_compare_problems(source_mutated(old, new))
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("key = secrets.token_bytes(KEY_BYTES)", "key = os.urandom(16)"),
+    ("key = secrets.token_bytes(KEY_BYTES)", "key = os.urandom(KEY_BYTES)"),
+    ("key = secrets.token_bytes(KEY_BYTES)", "key = secrets.token_bytes(16)"),
+    ("KEY_BYTES = 32\n", "KEY_BYTES = 16\n"),
+])
+def test_proof_key_source_rule_catches(old, new):
+    assert key_source_problems(source_mutated(old, new))
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("hmac.new(key, SIGN_CONTEXT + content, hashlib.sha256)", "hmac.new(key, content, hashlib.sha256)"),
+    ("hmac.new(key, SIGN_CONTEXT + content, hashlib.sha256)", "hmac.new(key, content + SIGN_CONTEXT, hashlib.sha256)"),
+    ('SIGN_CONTEXT = b"hearthwire-settings-backup\\x00"', 'SIGN_CONTEXT = b""'),
+])
+def test_proof_sign_context_rule_catches(old, new):
+    assert sign_context_problems(source_mutated(old, new))
 
 
 # --- the CLI --------------------------------------------------------------------------------------
@@ -1835,7 +2362,7 @@ def test_the_module_imports_only_the_standard_library_and_no_network():
             # legacy: only legacy-data; appletconfig: the applied settings; jsondepth: the depth limit.
             assert node.module in ("appletconfig", "catalog", "jsondepth", "webdata", "legacy"), node.module
     assert imported <= {"__future__", "collections", "datetime", "errno", "json", "math", "os", "pathlib", "re",
-                        "stat", "time", "typing", "bisect"}, imported
+                        "stat", "time", "typing", "bisect", "hashlib", "hmac", "secrets"}, imported
     for banned in ("socket", "http", "urllib", "ssl", "subprocess"):
         assert banned not in imported
 

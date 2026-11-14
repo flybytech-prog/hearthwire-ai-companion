@@ -89,6 +89,8 @@ TestCase {
             verify(SettingsBackup.BACKUP_KEYS.indexOf(key) < 0, key)
         })
         verify(SettingsBackup.EXCLUDED_KEYS.indexOf("usageHistoryEnabled") >= 0)
+        // Task 007: a restore never changes backup behavior.
+        compare(SettingsBackup.EXCLUDED_KEYS.slice(-2), ["backupAutoExport", "backupRestoreAt"])
     }
 
     readonly property string helper: "env HEARTHWIRE_RUN=7 python3 -P -m hearthwire --settings-backup "
@@ -144,8 +146,103 @@ TestCase {
         compare(reply("status", {ok: true, exists: false}), {ok: true, exists: false, exportedAt: ""})
         compare(reply("status", {ok: true, exists: true, exported_at: stamp}), {ok: true, exists: true, exportedAt: stamp})
         compare(reply("export", {ok: true, saved: 28, dropped: 1}), {ok: true, saved: 28, dropped: 1})
-        compare(reply("import", {ok: true, exported_at: stamp, settings: {popupSize: "large"}, dropped: 2}),
-                {ok: true, exportedAt: stamp, settings: {popupSize: "large"}, dropped: 2})
+        compare(reply("import", {ok: true, exported_at: stamp, settings: {popupSize: "large"}, dropped: 2,
+                                 origin: "this-computer"}),
+                {ok: true, exportedAt: stamp, settings: {popupSize: "large"}, dropped: 2, origin: "this-computer"})
+    }
+
+    // Task 007: every origin the helper gives is kept as it is.
+    function test_importOrigins() {
+        compare(SettingsBackup.ORIGINS, ["this-computer", "other", "unsigned"])
+        SettingsBackup.ORIGINS.forEach(function (origin) {
+            compare(reply("import", {ok: true, exported_at: stamp, settings: {}, dropped: 0, origin: origin}),
+                    {ok: true, exportedAt: stamp, settings: {}, dropped: 0, origin: origin}, origin)
+        })
+    }
+
+    function test_importOriginStrict() {
+        var base = function (extra) {
+            var object = {ok: true, exported_at: stamp, settings: {popupSize: "large"}, dropped: 0}
+            for (var key in extra)
+                object[key] = extra[key]
+            return object
+        }
+        compare(reply("import", base({})), bad, "missing (a 1.0/006 reply)")
+        ;["", "This-Computer", "this computer", "mine", "other ", "<b>other</b>"].forEach(function (origin) {
+            compare(reply("import", base({origin: origin})), bad, "unknown: " + origin)
+        })
+        ;[null, 1, true, ["other"], {origin: "other"}].forEach(function (origin) {
+            compare(reply("import", base({origin: origin})), bad, "not a string: " + JSON.stringify(origin))
+        })
+        compare(reply("import", base({origin: "other", signature: "00"})), bad, "extra key")
+        compare(reply("status", {ok: true, exists: false, origin: "other"}), bad, "not on status")
+        compare(reply("export", {ok: true, saved: 1, dropped: 0, origin: "other"}), bad, "not on export")
+    }
+
+    function test_newErrorCodesPassThrough() {
+        ;["status", "export", "import"].forEach(function (op) {
+            compare(reply(op, {ok: false, error: "damaged"}), {ok: false, error: "damaged"}, op)
+            compare(reply(op, {ok: false, error: "key-unusable"}), {ok: false, error: "key-unusable"}, op)
+        })
+    }
+
+    function test_restoreWindow() {
+        compare(SettingsBackup.RESTORE_WINDOW_MS, 60000)
+        var now = 1763100000000
+        compare(SettingsBackup.restoreRequested(String(now), now), true, "now")
+        compare(SettingsBackup.restoreRequested(String(now - 59999), now), true, "59 999 ms ago")
+        compare(SettingsBackup.restoreRequested(String(now - 60000), now), true, "60 000 ms ago")
+        compare(SettingsBackup.restoreRequested(String(now - 60001), now), false, "60 001 ms ago")
+        compare(SettingsBackup.restoreRequested(String(now + 1), now), false, "in the future")
+        compare(SettingsBackup.restoreRequested("", now), false, "empty")
+        compare(SettingsBackup.restoreRequested("1763100000000000", 1763100000000000), false, "16 digits")
+        compare(SettingsBackup.restoreRequested("999999999999999", 999999999999999), true, "15 digits")
+        compare(SettingsBackup.restoreRequested("1e3", 1000), false, "exponent")
+        compare(SettingsBackup.restoreRequested(" 1", 1), false, "leading space")
+        compare(SettingsBackup.restoreRequested("1 ", 1), false, "trailing space")
+        compare(SettingsBackup.restoreRequested("-1", 0), false, "sign")
+        compare(SettingsBackup.restoreRequested("0x10", 16), false, "hex")
+        compare(SettingsBackup.restoreRequested("1.5", 2), false, "fraction")
+        ;[undefined, null, now, true, [String(now)], {}].forEach(function (value) {
+            compare(SettingsBackup.restoreRequested(value, now), false, "not a string: " + String(value))
+        })
+        compare(SettingsBackup.restoreRequested(String(now), String(now)), false, "now must be a number")
+        compare(SettingsBackup.restoreRequested(String(now), NaN), false, "now NaN")
+    }
+
+    function test_isBackupKey() {
+        SettingsBackup.BACKUP_KEYS.forEach(function (key) { compare(SettingsBackup.isBackupKey(key), true, key) })
+        SettingsBackup.EXCLUDED_KEYS.forEach(function (key) { compare(SettingsBackup.isBackupKey(key), false, key) })
+        ;["", "backupAutoExport", "backupRestoreAt", "toString", "__proto__", undefined, null, 3].forEach(function (key) {
+            compare(SettingsBackup.isBackupKey(key), false, String(key))
+        })
+    }
+
+    function test_fingerprint() {
+        var config = Object.assign({}, good)
+        var first = SettingsBackup.fingerprint(config)
+        compare(typeof first, "string")
+        compare(SettingsBackup.fingerprint(Object.assign({}, good)), first, "stable for the same values")
+        compare(JSON.parse(first).length, SettingsBackup.BACKUP_KEYS.length, "one value per key, in order")
+        compare(JSON.parse(first)[0], good.trackedProviders)
+        // Each of the 30 keys changes it.
+        SettingsBackup.BACKUP_KEYS.forEach(function (key) {
+            var changed = Object.assign({}, good)
+            changed[key] = typeof good[key] === "boolean" ? !good[key]
+                : typeof good[key] === "number" ? good[key] + 1 : good[key] + "x"
+            verify(SettingsBackup.fingerprint(changed) !== first, key)
+        })
+        // Keys outside the backup don't.
+        var other = Object.assign({}, good, {chatSiteZoom: "{\"claude\":2}", usageHistoryEnabled: true,
+                                             backupAutoExport: true, backupRestoreAt: "1", initialSetupComplete: true})
+        compare(SettingsBackup.fingerprint(other), first, "non-backup keys ignored")
+        // A missing value is null, never dropped (positions stay fixed).
+        var missing = Object.assign({}, good)
+        delete missing.popupSize
+        var values = JSON.parse(SettingsBackup.fingerprint(missing))
+        compare(values.length, SettingsBackup.BACKUP_KEYS.length)
+        compare(values[SettingsBackup.BACKUP_KEYS.indexOf("popupSize")], null)
+        compare(SettingsBackup.fingerprint(undefined), SettingsBackup.fingerprint({}))
     }
 
     function test_errorCodesKept() {
@@ -154,7 +251,7 @@ TestCase {
         })
         compare(SettingsBackup.ERRORS, ["absent", "invalid", "unsupported", "too-large", "bad-data", "symlink",
                                         "not-owned", "unsafe-mode", "legacy-data", "os-error", "applet-not-found",
-                                        "settings-unreadable"])
+                                        "settings-unreadable", "damaged", "key-unusable"])
     }
 
     function test_rejectsBadReplies() {
@@ -176,10 +273,10 @@ TestCase {
         compare(reply("export", {ok: true, saved: 1.5, dropped: 0}), bad, "saved type")
         compare(reply("export", {ok: true, saved: 1, dropped: -1}), bad, "dropped")
         compare(reply("export", {ok: true, saved: 1, dropped: 0, x: 1}), bad, "extra")
-        compare(reply("import", {ok: true, exported_at: "x", settings: {}, dropped: 0}), bad, "import stamp")
-        compare(reply("import", {ok: true, exported_at: stamp, settings: [], dropped: 0}), bad, "settings type")
-        compare(reply("import", {ok: true, exported_at: stamp, settings: {}, dropped: "0"}), bad, "dropped type")
-        compare(reply("import", {ok: true, exported_at: stamp, settings: {}, dropped: 0, x: 1}), bad, "extra")
+        compare(reply("import", {ok: true, exported_at: "x", settings: {}, dropped: 0, origin: "other"}), bad, "import stamp")
+        compare(reply("import", {ok: true, exported_at: stamp, settings: [], dropped: 0, origin: "other"}), bad, "settings type")
+        compare(reply("import", {ok: true, exported_at: stamp, settings: {}, dropped: "0", origin: "other"}), bad, "dropped type")
+        compare(reply("import", {ok: true, exported_at: stamp, settings: {}, dropped: 0, origin: "other", x: 1}), bad, "extra")
     }
 
     function test_replyErrorsNeverCarryTheirText() {

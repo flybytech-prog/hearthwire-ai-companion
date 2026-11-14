@@ -1151,7 +1151,9 @@ these points.
 
 Saves the widget's settings to one fixed file and reads them back (plan D71;
 no file dialog; `src/hearthwire/core/settingsbackup.py`). The widget runs it
-from **Settings → General → Backup**. No network, no credentials.
+from **Settings → General → Backup**, and `export` also from the panel menu's
+**Back up settings** and from Automatic backup (task 007). No network, no
+credentials.
 
 Export saves the **applied** settings: the helper reads them itself, read
 only, from Plasma's own config (`src/hearthwire/core/appletconfig.py`), so
@@ -1199,19 +1201,70 @@ are not in the backup.
   export left (audit I1; a symlink there is unlinked, never followed).
   `scripts/install.sh --uninstall-web-data` keeps the backup (it holds no
   sign-ins) and says so, with its path, when it exists (audit I2).
-- Format: `{"format":"hearthwire-settings","version":1,"config_schema":3,"exported_at":"YYYY-MM-DDTHH:MM:SSZ","settings":{...}}`,
-  exactly these keys. Another `version` or `config_schema` is `unsupported`.
+- Format (version 2, task 007; written compact in this key order, ending in a newline):
+  `{"format":"hearthwire-settings","version":2,"config_schema":3,"exported_at":"YYYY-MM-DDTHH:MM:SSZ","settings":{...},"sha256":"<64 hex>","signature":"<64 hex>"}`.
+  Import also reads version 1, `{"format":…,"version":1,"config_schema":3,"exported_at":…,"settings":{…}}`
+  (1.0.x and 1.1 pre-release builds); export always writes version 2.
+  Exactly these keys per version (a version 1 file with either digest, or a
+  version 2 file without one, is `invalid`); each digest is 64 lowercase hex
+  digits (`fullmatch`, else `invalid`). `version` and `config_schema` must be
+  integers (not booleans, else `invalid`); a `version` other than 1 or 2, or
+  a `config_schema` other than 3, is `unsupported`.
+- Canonical content (what both digests cover; M-2): `CONTENT_KEYS =
+  ("format", "version", "config_schema", "exported_at", "settings")` as
+  parsed from the file (before `validate_settings` drops anything),
+  `json.dumps({k: doc[k] for k in CONTENT_KEYS}, ensure_ascii=False,
+  sort_keys=True, separators=(",", ":"), allow_nan=False)` in UTF-8. So
+  whitespace and key order don't count. A lone surrogate (a `\ud800`
+  escape) has no UTF-8 form and is `invalid`.
+  - `sha256 = hashlib.sha256(content).hexdigest()`;
+  - `signature = hmac.new(key, b"hearthwire-settings-backup\x00" + content, hashlib.sha256).hexdigest()`
+    (the prefix is `SIGN_CONTEXT`, domain separation).
+  - Both are compared with `hmac.compare_digest`, the checksum first. A
+    fixed test vector in `tests/test_settingsbackup.py` pins the bytes.
+- `origin` (import only; informational, M-6: it never changes which
+  settings are kept):
+
+  | File | Result |
+  | --- | --- |
+  | version 2, checksum and signature match this install's key | `"origin":"this-computer"` |
+  | version 2, checksum doesn't match | `{"ok":false,"error":"damaged"}` from `status` and `import` (refused, M-4) |
+  | version 2, checksum matches; signature doesn't, or the key is missing or unusable | `"origin":"other"` |
+  | version 1 | `"origin":"unsigned"` |
+
+- Backup key (M-1): `$XDG_DATA_HOME` (when absolute, else
+  `~/.local/share`)`/hearthwire/backup-key`, exactly 32 bytes from
+  `secrets.token_bytes(32)`, raw, mode `0600`. The folder is opened with
+  `webdata.open_base` / `open_child_dir` (no symlink, ours) and must not be
+  group- or other-writable; only `export` makes it (`0700`), after
+  `refuse_legacy_data`, and an existing one is never changed. Only `export`
+  makes the key: an `O_CREAT|O_EXCL|O_NOFOLLOW` temporary
+  `backup-key.<16 hex>.tmp` at `0600`, fsynced, then `link()`ed to
+  `backup-key` (never replaces; on `EEXIST` the existing key is read and
+  used, so two exports at once share one key), the temporary unlinked and
+  the folder fsynced. Export first deletes stale `backup-key.<16 hex>.tmp`
+  files (a symlink is unlinked, never followed). Read (`export` and
+  `import`; `status` never reads it, and `import` only after the checksum
+  passed) with `O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC|O_NOCTTY`; it must be
+  a regular file, ours, with no group or other bits and exactly 32 bytes.
+  Otherwise `export` is `key-unusable` and `import` gives `other`; the key
+  is never replaced or repaired (M-5). No rotation. The key is never in
+  argv, the environment, stdout, stderr, a reply, the backup or a log.
+  `scripts/install.sh --uninstall-web-data` and package removal leave it
+  (M-9).
 
 | Command | Success reply |
 | --- | --- |
 | `--settings-backup status [--applet N]` | `{"ok":true,"exists":false}` or `{"ok":true,"exists":true,"exported_at":"..."}` |
 | `--settings-backup export --applet N` | `{"ok":true,"saved":N,"dropped":M}` |
-| `--settings-backup import [--applet N]` | `{"ok":true,"exported_at":"...","settings":{...},"dropped":M}` |
+| `--settings-backup import [--applet N]` | `{"ok":true,"exported_at":"...","settings":{...},"dropped":M,"origin":"this-computer"\|"other"\|"unsigned"}` |
 
 `--applet N` (1 to 2147483648, the widget's Plasma applet id) is required
 with `export`; `status` and `import` accept it and ignore it. `--data` is
 refused everywhere; `--settings-backup` stands alone. `status` and `import`
-create nothing and check the whole file the same way.
+create nothing (no folder, no key) and check the whole file the same way,
+the checksum included; only `import` checks the signature. The argv is
+unchanged by task 007: no key, path or setting is ever on the command line.
 
 One check (`validate_settings`) runs on the applied settings export reads
 (every `BACKUP_KEYS` key, defaults included) and on the import file. JSON with NaN, Infinity, overflowing numbers or duplicate keys is
@@ -1258,7 +1311,9 @@ is absent or dropped). Any other `user-` id drops that whole key.
 | `chatCustomUrls` | JSON object `{webSiteId: address}` (D74); every address non-empty and valid under the rules of `ChatSites.validateCustomUrl` (https only, http only for Local and only to loopback, at most 2048 UTF-16 units, no whitespace or control characters, no user info, no local address except for Local). One bad entry drops the whole key |
 
 `BACKUP_KEYS` and `EXCLUDED_KEYS` together are every `main.xml` key, with no
-overlap (`tests/test_settings_backup_sync.py`).
+overlap (`tests/test_settings_backup_sync.py`). `backupAutoExport` and
+`backupRestoreAt` (task 007) are excluded, so a restore never changes backup
+behavior.
 
 The helper is stricter than the widget about custom addresses: it rejects
 every C0 and C1 control character in them, while
@@ -1274,7 +1329,10 @@ value failed; excluded keys are never read. An export that keeps nothing is
 Errors (`{"ok":false,"error":"<code>"}`, exit 0): `absent` (no backup;
 `import` only), `invalid` (not a backup file), `unsupported` (another
 version or schema), `too-large` (file over 512 KiB, or an export that would
-be), `bad-data` (export: no applied setting passed), `symlink`, `not-owned`,
+be), `damaged` (`status` and `import`: a version 2 file whose `sha256`
+doesn't match its content), `key-unusable` (`export` only: the backup key or
+its folder is unsafe, see above; nothing was exported), `bad-data` (export:
+no applied setting passed), `symlink`, `not-owned`,
 `unsafe-mode` (the backup folder or file is group- or other-writable),
 `legacy-data` (`export` only: the previous version's data still waits for the
 installer), `applet-not-found` (`export` only: no rc file has exactly one
@@ -1291,7 +1349,14 @@ anything odd gives no command. One step runs at a time.
 - `status` when the General page opens and after each export, for the
   "Last backup" line.
 - `export` on **Export**, and after an inline **Replace** confirmation when
-  a backup exists (or its status isn't known to be `absent`).
+  a backup exists (or its status isn't known to be `absent`). main.qml also
+  runs exactly `SettingsBackup.backupCommand("export", root.backupRun,
+  Plasmoid.id)` for the menu's **Back up settings** and for Automatic backup
+  (`backupAutoExport`, about 3 s after an Apply that changed a backup key,
+  and once when it is turned on); it never runs `status` or `import`.
+- **Restore settings…** writes `backupRestoreAt` (`String(Date.now())`) and
+  opens Settings; General runs `status` then `import` when that request is
+  at most 60 s old (`SettingsBackup.restoreRequested`).
   The helper saves the applied settings it reads itself; changes not yet
   applied do not count, so the page asks for Apply first.
 - `import` on **Import**. `SettingsBackup.importPlan` checks every value
@@ -1300,7 +1365,9 @@ anything odd gives no command. One step runs at a time.
   pairs, and `ChatSites.validateUserSite` / `serializeUserSites` with the
   same cross-key check, the added ids taken only from the import's own
   `chatUserSites`), drops what fails, and adds that to the helper's
-  `dropped`. The confirmation lists address changes, added sites ("Adds
+  `dropped`. `origin` is shown as one line ("Made by Hearthwire on this
+computer." or, for `other` and `unsigned`, one warning) and is never passed
+to `importPlan` or `addressChanges`. The confirmation lists address changes, added sites ("Adds
   <name> (<host>)") and removed ones ("Removes <name> and deletes its site
   data when you apply") as plain text, at most 8 lines and a count. It also
   drops both levels when the warning level isn't below the critical one, and

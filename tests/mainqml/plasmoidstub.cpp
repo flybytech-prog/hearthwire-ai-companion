@@ -12,10 +12,28 @@
 #include <QQmlExtensionPlugin>
 #include <QQmlListProperty>
 #include <QQmlPropertyMap>
+#include <QStringList>
 #include <QUrl>
 #include <QVariant>
 #include <QXmlStreamReader>
 #include <QtQml>
+
+class PlasmoidStub;
+
+// Plasma's "configure" action, when a test asks for one: trigger() only
+// records itself and what backupRestoreAt held at that moment.
+class ActionStub : public QObject
+{
+    Q_OBJECT
+
+public:
+    ActionStub(PlasmoidStub *owner, const QString &name);
+    Q_INVOKABLE void trigger();
+
+private:
+    PlasmoidStub *m_owner;
+    QString m_name;
+};
 
 class PlasmoidStub : public QObject
 {
@@ -27,6 +45,11 @@ class PlasmoidStub : public QObject
     Q_PROPERTY(bool busy MEMBER m_busy NOTIFY changed)
     Q_PROPERTY(int formFactor MEMBER m_formFactor NOTIFY changed)
     Q_PROPERTY(QQmlListProperty<QObject> contextualActions READ contextualActions CONSTANT)
+    // false (kiosk: no actions) unless a test sets it; put back in init().
+    Q_PROPERTY(bool actionsAvailable MEMBER m_actionsAvailable NOTIFY changed)
+    // Each trigger() as "name" and backupRestoreAt at that moment.
+    Q_PROPERTY(QStringList triggered MEMBER m_triggered NOTIFY changed)
+    Q_PROPERTY(QStringList triggeredRestoreAt MEMBER m_triggeredRestoreAt NOTIFY changed)
     QML_ATTACHED(PlasmoidStub)
 
 public:
@@ -79,8 +102,21 @@ public:
         return true;
     }
 
-    // The real applet's actions are never triggered in these tests.
-    Q_INVOKABLE QObject *internalAction(const QString &) { return nullptr; }
+    // The real applet's actions are never triggered in these tests; with
+    // actionsAvailable a stand-in records the trigger instead.
+    Q_INVOKABLE QObject *internalAction(const QString &name)
+    {
+        if (!m_actionsAvailable)
+            return nullptr;
+        return new ActionStub(this, name);
+    }
+
+    void recordTrigger(const QString &name)
+    {
+        m_triggered.append(name);
+        m_triggeredRestoreAt.append(m_configuration->value(QStringLiteral("backupRestoreAt")).toString());
+        Q_EMIT changed();
+    }
 
 Q_SIGNALS:
     void changed();
@@ -110,7 +146,22 @@ private:
     bool m_busy = false;
     int m_formFactor = 0;
     QList<QObject *> m_actions;
+    bool m_actionsAvailable = false;
+    QStringList m_triggered;
+    QStringList m_triggeredRestoreAt;
 };
+
+ActionStub::ActionStub(PlasmoidStub *owner, const QString &name)
+    : QObject(owner)
+    , m_owner(owner)
+    , m_name(name)
+{
+}
+
+void ActionStub::trigger()
+{
+    m_owner->recordTrigger(m_name);
+}
 
 QML_DECLARE_TYPE(PlasmoidStub)
 
