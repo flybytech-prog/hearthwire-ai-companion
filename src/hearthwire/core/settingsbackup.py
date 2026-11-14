@@ -196,7 +196,8 @@ _URL_FORBIDDEN = re.compile("[" + _JS_SPACE + "\x00-\x1f\x7f]")
 _AUTHORITY_FORBIDDEN = re.compile("[@\\\\%" + _JS_SPACE + "]")
 _SCHEME_PREFIX = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*):")
 _AUTHORITY_PREFIX = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://([^/?#]*)")
-_SCHEME_REST = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*):(.*)")
+# JS /^...:(.*)$/: "." stops at every JS line terminator, not only \n (006 phase 2 parity).
+_SCHEME_REST = re.compile("([A-Za-z][A-Za-z0-9+.\\-]*):([^\n\r\u2028\u2029]*)")
 _BRACKET_AUTHORITY = re.compile(r"(\[::1\])(?::([0-9]{1,5}))?")
 _HOST_AUTHORITY = re.compile(r"([A-Za-z0-9.\-]+)(?::([0-9]{1,5}))?")
 _USER_BRACKET_AUTHORITY = re.compile(r"\[([0-9A-Fa-f:]{2,39})\](?::([0-9]{1,5}))?")  # parse_user_url only
@@ -367,14 +368,22 @@ def _ipv6_groups(text: str) -> Optional[list[int]]:
 def canonical_ipv6(text: str) -> str:
     """ChatSites.js canonicalIpv6: the WHATWG / Chromium serialization of ``text``, "" when invalid.
 
-    ``text`` is the literal without brackets. Lower case, no leading zeros, and
-    the first longest run of two or more zero groups written as ``::``. Not
-    ipaddress: from Python 3.13 it writes ::ffff:0:0/96 with a dotted IPv4 tail,
-    which no browser does. A literal is canonical when this equals its lower case.
+    ``text`` is the literal, brackets optional and kept as given (as in JS).
+    Lower case, no leading zeros, and the first longest run of two or more zero
+    groups written as ``::``. Not ipaddress: from Python 3.13 it writes
+    ::ffff:0:0/96 with a dotted IPv4 tail, which no browser does. A literal is
+    canonical when this equals its lower case.
     """
-    groups = _ipv6_groups(text.lower())
+    bracketed = text.startswith("[")
+    inner = text[1:-1] if bracketed and text.endswith("]") and len(text) > 1 else text
+    groups = _ipv6_groups(inner.lower())
     if groups is None:
         return ""
+    return "[" + _ipv6_text(groups) + "]" if bracketed else _ipv6_text(groups)
+
+
+def _ipv6_text(groups: list[int]) -> str:
+    """The serialization of 8 groups: lower case, no leading zeros, the first longest zero run as ``::``."""
     start, length = -1, 1
     index = 0
     while index < 8:

@@ -733,6 +733,9 @@ def test_canonical_ipv4(host, canonical):
     ("", ""), (":", ""), (":::", ""), ("1::2::3", ""), ("12345::", ""), ("1:2:3:4:5:6:7", ""),
     ("1:2:3:4:5:6:7:8:9", ""), ("1:2:3:4:5:6:7:8::", ""), (":1::", ""), ("::1:", ""), ("g::", ""),
     ("::1.2.3.4", ""), ("fe80::1%eth0", ""),
+    # Brackets are optional and kept as given, as ChatSites.js canonicalIpv6 does (006 phase 2).
+    ("[fd00::1]", "[fd00::1]"), ("[FD00:0::1]", "[fd00::1]"), ("[::]", "[::]"), ("[fd00::1", ""), ("fd00::1]", ""),
+    ("[]", ""), ("[", ""), ("[[fd00::1]]", ""),
 ])
 def test_canonical_ipv6(text, serialized):
     assert backup.canonical_ipv6(text) == serialized
@@ -918,6 +921,92 @@ def test_the_url_fuzz_gives_the_same_codes_and_classes_as_chat_sites_js(tmp_path
                    if found != [backup.user_site_url_error(url), backup.address_class(url)]]
     assert len(results) == len(cases)
     assert differences == [], differences[:40]
+
+
+HELPER_PARITY_QML = """import QtQuick
+import QtTest
+import "ChatSites.js" as ChatSites
+import "ChatSitesGolden.js" as Golden
+
+TestCase {
+    name: "HelperParity"
+    function shape(parsed) {
+        return parsed === null ? null : [parsed.scheme, parsed.host, parsed.port]
+    }
+    function test_dump() {
+        var urls = Golden.ADDRESSES.concat(%s)
+        var literals = %s
+        console.log("PARITY " + JSON.stringify([
+            Golden.ADDRESSES.length,
+            urls.map(function (url) { return [shape(ChatSites.parseUrl(url)), shape(ChatSites.parseUserUrl(url))] }),
+            literals.map(function (text) { return [ChatSites.canonicalIpv6(text), ChatSites.canonicalIpv4(text)] })
+        ]))
+    }
+}
+"""
+
+
+def golden_addresses():
+    """ChatSitesGolden.js ADDRESSES (005's recorded built-in table), read from the file."""
+    text = (ROOT / "tests" / "qml" / "ChatSitesGolden.js").read_text(encoding="utf-8")
+    block = re.search(r"(?ms)^var ADDRESSES = \[\n(.*?)^\]", text)
+    assert block, "ChatSitesGolden.js: var ADDRESSES is missing"
+    return json.loads("[" + block.group(1).rstrip().rstrip(",") + "]")
+
+
+def helper_literals():
+    """IPv4 and IPv6 literal texts, bare and bracketed, for the canonical helpers."""
+    rng = random.Random(60064)
+    literals = []
+    for _ in range(300):
+        for literal in ipv6_spellings(rng, random_groups(rng, rng.choice(IPV6_FIRST_GROUPS))):
+            literals += [literal, "[" + literal + "]", literal.upper()]
+    for _ in range(300):
+        literals += ipv4_spellings(rng, random_quad(rng))
+    literals += ["", "[", "]", "[]", "[[::1]]", "[::1", "::1]", "::ffff:1.2.3.4", "1::2::3", ":::", "g::", "0x7f.1"]
+    return list(dict.fromkeys(literals))
+
+
+def test_the_parsers_and_canonical_helpers_match_chat_sites_js(tmp_path):
+    """parseUrl, parseUserUrl, canonicalIpv6 and canonicalIpv4, value by value, against the Python port.
+
+    006 phase 2 (hostOf decision, condition a): for every address whose authority
+    isn't bracketed, the wide parser gives exactly what parseUrl gives, in both
+    ports, over the golden table's addresses and the whole fuzz corpus.
+    """
+    shutil.copy2(ROOT / "tests" / "qml" / "ChatSitesGolden.js", tmp_path / "ChatSitesGolden.js")
+    fuzz = url_fuzz_cases() + [url for url, _, _ in USER_URL_CASES]
+    literals = helper_literals()
+    count, parsed, canonical = chat_sites_js_results(tmp_path, HELPER_PARITY_QML % (json.dumps(fuzz), json.dumps(literals)))
+    urls = golden_addresses() + fuzz
+    assert count == len(golden_addresses()) > 50 and len(parsed) == len(urls)
+    shape = (lambda found: None if found is None else list(found))
+    differences, bracketless = [], 0
+    for url, (narrow, wide) in zip(urls, parsed):
+        expected = [shape(backup.parse_url(url)), shape(backup.parse_user_url(url))]
+        if [narrow, wide] != expected:
+            differences.append((url, [narrow, wide], expected))
+        match = re.match(r"[A-Za-z][A-Za-z0-9+.\-]*://([^/?#]*)", url)
+        if not (match and match.group(1).startswith("[")):
+            bracketless += 1
+            if wide != narrow:
+                differences.append((url, "wide parser differs from parseUrl", narrow, wide))
+        elif narrow is not None and wide != narrow:
+            differences.append((url, "[::1] read differently", narrow, wide))
+    assert bracketless > 3000
+    for text, found in zip(literals, canonical):
+        if found != [backup.canonical_ipv6(text), backup.canonical_ipv4(text)]:
+            differences.append((text, found, [backup.canonical_ipv6(text), backup.canonical_ipv4(text)]))
+    assert differences == [], differences[:40]
+
+
+def test_the_wide_parser_reads_every_non_bracketed_address_as_parse_url():
+    """Condition (a) on the Python side, without qmltestrunner."""
+    for url in golden_addresses() + url_fuzz_cases() + [url for url, _, _ in USER_URL_CASES]:
+        match = re.match(r"[A-Za-z][A-Za-z0-9+.\-]*://([^/?#]*)", url)
+        narrow = backup.parse_url(url)
+        if not (match and match.group(1).startswith("[")) or narrow is not None:
+            assert backup.parse_user_url(url) == narrow, url
 
 
 def test_parse_url_still_reads_only_the_loopback_bracket():

@@ -205,12 +205,19 @@ starts with Plasma while it remains on a panel.
   first**, the split view's list and the middle-click list), **Edit** and,
   for sites you added, **Remove**. Nothing is saved until you press
   **Apply**.
-  - **Add site…** adds any `https://` site by name and address; it starts on,
-    at the end of the list (above Ollama when Ollama is last), and its icon
-    is the first letter of its name. You can add up to 200 sites. For now an
-    added site must have a public name: `http://`, this computer and IP
-    addresses (`https://192.168.1.10/`) are refused until local sites arrive
-    in a later version. Names are 1 to 40 characters with at least one
+  - **Add site…** adds a site by name and address; it starts on, at the end
+    of the list (above Ollama when Ollama is last), and its icon is the
+    first letter of its name. You can add up to 200 sites. The address is
+    one of these (more in the next point):
+    - an `https://` site with a public name, such as `https://chat.example.org/`;
+    - a server **on this computer**: `localhost`, `127.0.0.1` or `[::1]`,
+      over `http://` or `https://`, with any port;
+    - a device **on your home network**, given by its IP address in
+      `10.x.x.x`, `172.16.x.x`–`172.31.x.x`, `192.168.x.x` or IPv6
+      `fc00::/7` (such as `fd00::20`), over `http://` or `https://`, with any
+      port, for example `http://192.168.1.20:3000/`.
+
+    Names are 1 to 40 characters with at least one
     letter or digit, unique in any case (also against the built-in names),
     without `<`, `>`, `&`, control characters, any invisible character
     (Unicode's default-ignorable characters such as zero-width spaces,
@@ -221,6 +228,39 @@ starts with Plasma while it remains on a panel.
     table. Unassigned code points are not checked (they show as a box).
     Look-alike letters from other scripts are not detected: the letter badge
     and the address shown next to each site tell them apart.
+  - **This computer and the home network.** Each such site matches only its
+    exact address: the same scheme, host and port. Its pages can't open or
+    frame any other address on this computer or your network, and windows
+    it opens to this computer or the network, its own address included, are
+    blocked. Public `https://` pages still open as for any site.
+    - A site on this computer loads only after the same check as Local web
+      UI: the program on that port must belong to you, to root or to the
+      `ollama` account, never to another user. The editor says so under the
+      address. If the check fails, only the pages on that port go blank.
+    - Plain `http://` to a home-network address isn't encrypted. The editor
+      notes it, the table shows the address as `http://…`, and a backup
+      import says "not encrypted". Anyone on your network can read and
+      change that traffic. On another network (a café, a hotel) a different
+      device can have the same address and would get this site's sign-in
+      and saved data, though never another site's. Use `https://` with a
+      certificate your system trusts to rule this out (self-signed
+      certificates are refused). A page over plain `http://` on the network
+      also isn't a "secure context" for the browser engine, so some web
+      UIs work only partly there (no service workers, clipboard or
+      `crypto.subtle`); on this computer `http://` is.
+    - Refused, with a message that says why:
+      - `http://` with a name (`http://nas.local/`): any device on the
+        network can answer for a name;
+      - other spellings of this computer (`127.0.0.2`, `localhost.`,
+        short names such as `nas`);
+      - IP addresses not written in their usual form (`192.168.1.020`,
+        `0xc0.168.1.1`, `[fd00:0:0:0:0:0:0:1]`; write `[fd00::1]`), because
+        the page must match the address the engine reports;
+      - link-local addresses (`169.254.x.x`, `fe80::`), which aren't
+        stable and include the cloud metadata address;
+      - every other IP address, including public ones and `100.64.0.0/10`
+        (carrier-grade NAT, also Tailscale's IPv4 range): use a name.
+        Tailscale's IPv6 addresses are inside `fc00::/7` and work.
   - Each added site gets its own sign-in, as the built-in ones do (see
     [docs/privacy.md](docs/privacy.md#one-profile-per-chat-site)): no site
     sees another site's cookies or storage.
@@ -305,8 +345,8 @@ starts with Plasma while it remains on a panel.
   exact host to the site, never its subdomains. Don't put passwords or tokens
   in an address; it is stored in your Plasma configuration file. The widget
   never opens a page, window or embedded frame on this computer for any site
-  but Local web UI, and for it allows plain `http://` only at the configured
-  address; background requests a page makes itself (fetch, WebSocket, images)
+  but Local web UI and the sites you added on this computer, and for them
+  allows plain `http://` only at the configured address; background requests a page makes itself (fetch, WebSocket, images)
   aren't filtered, as in any browser. "This computer" means `localhost`,
   `*.localhost`, `localhost.localdomain`, `*.localhost.localdomain`,
   `ip6-localhost`, `ip6-loopback`, every name without a dot, `[::1]`,
@@ -315,12 +355,17 @@ starts with Plasma while it remains on a panel.
   is treated as this computer and owner-checked. See
   [docs/privacy.md](docs/privacy.md).
 - **A chat server on another machine** (for example Open WebUI on your home
-  server): give it an `https://` address with a certificate your system
-  trusts (self-signed certificates are refused), or forward it to this
-  computer with an SSH tunnel such as `ssh -N -L 3000:localhost:3000 server`
-  (use `ssh -N -L 3000:server:3000 gateway` when it runs on a third machine)
-  and keep Local web UI at `http://localhost:3000/`. Without a tunnel, give
-  it a full name such as `nas.lan`: a short name counts as this computer.
+  server): add it with **Add site…** by its home-network IP address (see
+  above), give it an `https://` address with a certificate your system trusts
+  (self-signed certificates are refused), or forward it to this computer with
+  an SSH tunnel such as `ssh -N -L 3000:localhost:3000 server` (use
+  `ssh -N -L 3000:server:3000 gateway` when it runs on a third machine) and
+  keep Local web UI at `http://localhost:3000/`. For Local web UI itself,
+  give it a full name such as `nas.lan`: a short name counts as this
+  computer. Whatever you use, a local model server should check the `Host`
+  header and require a sign-in (Open WebUI accounts; for Ollama,
+  `OLLAMA_ORIGINS`): any web page you open can try to reach a server on your
+  network through a name it controls (DNS rebinding), as in any browser.
 
 ### Settings → General
 

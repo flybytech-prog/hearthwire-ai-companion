@@ -220,12 +220,13 @@ there is no file dialog.
 - Import reads the file; the helper and then the widget check every value,
   and a value the widget would not store is left out ("Settings left out:
   N"). An added site is kept only when every added site in the file is
-  valid (exactly an id, a name and an `https://` address, nothing else), and
+  valid (exactly an id, a name and an address the widget accepts, nothing
+  else; see [Custom and added addresses](#custom-and-added-addresses)), and
   `chatSites`, `chatSiteOrder`, `chatDefaultSite` and `middleClickOpens` may
   name only the added sites the same file keeps. Before **Replace**, the
   confirmation lists each chat address the import would change, each site it
   adds, and each added site it removes, as plain text and shortened when
-  long. An added site the backup moves to another host is listed as removed
+  long; a site it adds over plain `http://` is marked "not encrypted". An added site the backup moves to another host is listed as removed
   and added. **A site the backup doesn't have, or moves to another host, is
   removed when you apply, and its data is deleted** (as for Remove, see
   [One profile per chat site](#one-profile-per-chat-site)); a red warning
@@ -317,12 +318,19 @@ Sites you add:
   sign-ins, its own `site-user-<8 hex>` folder in the encrypted folder). Its
   sign-in windows use its profile; a page it frames from another site shows
   as signed out.
-- It may only be an `https://` address with a public name. Addresses on this
-  computer, IP addresses (any form, such as `192.168.1.10`, `10.1` or
-  `0x7f000001`) and `http://` are refused for now; local and home-network
-  sites come in a later version. An added site's pages, frames and windows
-  can't open this computer or a private, link-local or loopback IP address.
-  Like any browser, it may follow redirects and sign-in pages to other public
+- Its address is an `https://` address with a public name, a server on this
+  computer (`localhost`, `127.0.0.1` or `[::1]`), or a home-network IP
+  address (`10.x`, `172.16–31.x`, `192.168.x`, IPv6 `fc00::/7`); the last two
+  over `http://` or `https://` (see
+  [Custom and added addresses](#custom-and-added-addresses) and
+  [Local web UI and sites on this computer](#local-web-ui-and-sites-on-this-computer)).
+  Its kind is worked out from the address each time and never stored, so a
+  hand edit or a backup can't make a public host count as this computer.
+  A public added site's pages, frames and windows can't open this computer
+  or a private, link-local or loopback IP address. One on this computer or
+  the network opens only its own exact address (scheme, host and port)
+  there, never another one, and no window to this computer or the network,
+  its own address included. Like any browser, it may follow redirects and sign-in pages to other public
   `https://` hosts; a link you click to another host opens in your browser.
 - Changing an added site's address to **another host** makes it a new site
   (the editor says so): the old site is signed out and its data deleted on
@@ -686,16 +694,44 @@ password (`https://user:pass@host/`) are refused, and text that isn't a valid
 address is never saved. A custom address adds only its exact host to the site;
 an added site's address is its own host, and nothing else is stored with it.
 
-### Local web UI
+An added site's address may be:
 
-Local web UI is off by default. It is the only site whose pages may use plain
-`http:`, and only for the exact address and port you configured on this
-computer (`localhost`, `127.0.0.1`, or `[::1]`); traffic over loopback never
-leaves the computer, but it is not encrypted. That rule covers the pages and
-embedded frames the widget controls; the Local page's own background requests
-(fetch, WebSocket, images, scripts) are not filtered by the widget.
+- `https://` with a public name;
+- this computer, written `localhost`, `127.0.0.1` or `[::1]`, over `http://`
+  or `https://`, any port;
+- a home-network IP address in `10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16` or IPv6 `fc00::/7`, over `http://` or `https://`, any
+  port.
 
-For every other site, the widget never opens or navigates to this computer:
+Everything else is refused, the same way by the widget and by the backup
+helper (one set of rules, tested against each other):
+
+- `http://` with a name, `.local` and `.lan` included: the widget can't check
+  names, and any device on the network can answer for one (mDNS, DNS);
+- other spellings of this computer (`127.0.0.2`, `localhost.`, names
+  without a dot);
+- IP addresses not in their usual form (`192.168.1.020`, `0xc0.168.1.1`,
+  `3232235777`, `[fd00:0:0:0:0:0:0:1]`; IPv6 is written short, `[fd00::1]`),
+  because pages are matched against the exact address the engine reports;
+- IPv6 zone ids (`fe80::1%eth0`) and IPv4 inside IPv6 (`[::ffff:192.168.1.1]`);
+- link-local addresses (`169.254.0.0/16`, `fe80::/10`): they aren't stable,
+  and `169.254.169.254` is the cloud metadata address;
+- every other IP address: public ones, and `100.64.0.0/10` (carrier-grade
+  NAT, which on many providers is their side of the line; Tailscale's IPv4
+  range). Tailscale's IPv6 addresses are inside `fc00::/7` and are accepted.
+
+### Local web UI and sites on this computer
+
+Local web UI is off by default. It and the sites you added on this computer
+or your home network are the only sites whose pages may use plain `http:`,
+and only for the exact address and port configured (for Local web UI and the
+sites on this computer: `localhost`, `127.0.0.1`, or `[::1]`); traffic over
+loopback never leaves the computer, but it is not encrypted. That rule covers
+the pages and embedded frames the widget controls; the page's own background
+requests (fetch, WebSocket, images, scripts) are not filtered by the widget.
+
+For every other site, and for an added site anywhere but its own address,
+the widget never opens or navigates to this computer:
 not as the page, not in a new window, and not in an embedded frame. Like in
 any browser, though, a page can still make background requests (fetch,
 WebSocket, images and similar) to this computer or to names that resolve to it
@@ -705,27 +741,58 @@ WebSocket, images and similar) to this computer or to names that resolve to it
   history on its side. Clear chat data signs you out of it in the widget but
   does not delete anything stored by the server.
 - **The port's owner is checked.** On a shared computer, another user could
-  start their own server on the port before yours does. Before the Local page
-  is created, and before each main-frame navigation of a Local page to this
-  computer, the widget asks the helper who owns the listening socket (the same
+  start their own server on the port before yours does. Before the Local page,
+  or the page of a site you added on this computer, is created, and before
+  each of its main-frame navigations to this computer, the widget asks the helper who owns the listening socket (the same
   check as for Ollama; the helper sees only the port number). It loads
   nothing unless it belongs to you, root, or the system `ollama` account.
   Otherwise it shows "Another user's program is using port …" (or "Couldn't
   check which program is using port …", or "Nothing is using port …") with a
-  Retry button, and a Local page that was already open is replaced by an
-  empty page, so it can't keep talking to the new listener. A form sent to
+  Retry button, and every page on that port that was already open (Local
+  web UI or an added site) is replaced by an empty page, so it can't keep
+  talking to the new listener; pages on other ports stay. A form sent to
   the Local page is checked too; it can't be replayed, so after the check you
   send it again within 10 seconds. That one-time pass ends after 10 seconds,
-  on Dismiss and on any problem; later the form is checked again. Windows a Local page opens on this computer are dropped,
+  on Dismiss and on any problem; later the form is checked again. Windows
+  such a page opens on this computer are dropped,
   since they would skip the check. The check cannot tell your own programs
   apart, and a listener could change in the milliseconds between the check
   and the load. Requests the page makes by itself (fetch, WebSocket) after it
   loaded, and embedded frames, are not checked again.
-- A server on another machine needs `https:` with a certificate your system
-  trusts; pages with self-signed or otherwise invalid certificates are not
-  loaded. Address it by a full name such as `nas.lan`: a short name without a
-  dot counts as this computer. Alternatively, reach it through an SSH tunnel
-  to a local port.
+- **A server elsewhere on your home network** can be added with Add site… by
+  its IP address (see
+  [Custom and added addresses](#custom-and-added-addresses)). There is no
+  owner check for it: the widget can't ask another machine who is listening.
+  Over plain `http://`:
+  - anyone on the network can read and change the traffic, including the
+    site's cookies;
+  - a device that takes that address (by spoofing on your network, or simply
+    because another network such as a café or hotel uses the same address)
+    gets that site's cookies, and its pages run as that site: they can read
+    that site's saved data (Local Storage, IndexedDB, for example a web UI's
+    saved token or cached chats). It can't reach any other site's sign-in or
+    data, the encrypted folder's other sites or the widget, and it can't open
+    or frame this computer or other addresses on the network;
+  - the page isn't a "secure context" for the engine (unlike `http://` on
+    this computer), so service workers, the async clipboard, `crypto.subtle`
+    and `crypto.randomUUID` are unavailable and some web UIs work only
+    partly.
+
+  Use `https:` with a certificate your system trusts to rule this out; pages
+  with self-signed or otherwise invalid certificates are not loaded. An
+  `https:` page can't load or frame an `http:` one (mixed content).
+- **DNS rebinding.** An added site's own address can't be rebound: this
+  computer is fixed to `localhost`, `127.0.0.1` or `[::1]` (the engine
+  resolves `localhost` itself), home-network sites are IP addresses, and
+  `http://` names are refused. Any page in any site can still point a name
+  it controls at a server on this computer or your network and read its
+  unauthenticated replies, as in any browser; such a request never carries
+  the added site's cookies, which live in that site's own profile. Have local
+  model servers check the `Host` header and require a sign-in (Open WebUI
+  accounts; Ollama's `OLLAMA_ORIGINS`).
+- For Local web UI, address another machine by a full name such as
+  `nas.lan`: a short name without a dot counts as this computer.
+  Alternatively, reach it through an SSH tunnel to a local port.
 
 ### Ollama (built-in chat)
 
@@ -918,7 +985,8 @@ The Chat tab protects against:
   it never reads or changes the pages;
 - with the Ollama chat: other users' programs on the Ollama port, cloud
   models, and leftovers of the conversation on disk from Hearthwire;
-- with Local web UI: other users' programs on its port;
+- with Local web UI and sites you added on this computer: other users'
+  programs on their port;
 - one chat site's page using or reading another chat site's sign-in or data
   (each site has its own profile; see the limits under
   [One profile per chat site](#one-profile-per-chat-site));
@@ -950,6 +1018,13 @@ It does not protect against:
   every site's data;
 - what all sites share: the clipboard, your Downloads folder, your system
   browser and your network;
+- with a site you added on the home network over plain `http://`: anything
+  on the network between you and that device, and a device that takes its
+  address (it gets that one site's sign-in and data, never another site's);
+- background requests a page makes to this computer or your network (fetch,
+  WebSocket, images), which the widget can't filter; with a site on your
+  network, bugs in the web engine are reachable from that network, not only
+  from the internet;
 - swap, hibernation, core dumps, or clipboard managers, unless configured as
   below;
 - other local users seeing, in the process list, the path of a file dropped
