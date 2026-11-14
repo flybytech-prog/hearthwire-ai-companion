@@ -637,3 +637,131 @@ def test_cli_turns_any_surprise_with_an_address_into_unreadable(monkeypatch, cap
     monkeypatch.setattr(portowner, "run", boom)
     out = _cli(["--port-owner", "3000", "--address", LAN], capsys)
     assert json.loads(out) == UNREADABLE and LAN not in out
+
+
+# --- the widget's own command through a real shell (006 round 2, phase 2b) ------------------------
+#
+# OllamaChat.ownerCommand (run in qmltestrunner) builds the string the widget's
+# DataSource hands to `sh -c`. Here it goes through /bin/sh under a bare
+# environment, in a folder of one-letter files that `[fd00::20]` would glob to
+# if it weren't quoted. On PATH, `python3` is a shim that records its argv and
+# runs the real hearthwire.cli against a fake /proc/net.
+
+import os  # noqa: E402
+import re  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+UI = ROOT / "plasmoid" / "contents" / "ui"
+COMMAND_QML = """import QtQuick
+import QtTest
+import "OllamaChat.js" as OllamaChat
+
+TestCase {
+    name: "OwnerCommand"
+    function test_dump() {
+        console.log("COMMANDS " + JSON.stringify([
+            OllamaChat.ownerCommand(3000, 7, 2, "[fd00::20]"),
+            OllamaChat.ownerCommand(3000, 7, 2, "192.168.1.20"),
+            OllamaChat.ownerCommand(11434, 7, 2),
+            OllamaChat.ownerCommand(3000, 7, 2, "[fd00::20]';id;'")
+        ]))
+    }
+}
+"""
+SHIM = """#!{python}
+import json, os, sys
+from pathlib import Path
+with open(os.environ["HW_ARGV_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps({{"argv": sys.argv[1:], "run": os.environ.get("HEARTHWIRE_RUN"),
+                          "applet": os.environ.get("HEARTHWIRE_APPLET")}}) + "\\n")
+if sys.argv[1:4] != ["-P", "-m", "hearthwire"]:
+    sys.exit(97)
+sys.path.insert(0, os.environ["HW_SRC"])
+from hearthwire import cli
+from hearthwire.core import portowner
+portowner.PROC_NET = Path(os.environ["HW_FAKE_PROC"])
+portowner._BYTE_ORDER = "little"
+sys.exit(cli.main(sys.argv[4:]))
+"""
+
+
+def widget_commands(tmp_path):
+    runner = shutil.which("qmltestrunner", path="/usr/lib/qt6/bin:/usr/bin:/bin")
+    if runner is None:
+        pytest.skip("qmltestrunner is not installed")
+    folder = tmp_path / "qml"
+    folder.mkdir()
+    for script in UI.glob("*.js"):
+        shutil.copy2(script, folder / script.name)
+    (folder / "tst_command.qml").write_text(COMMAND_QML, encoding="utf-8")
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(folder), "LANG": "C.UTF-8", "QT_QPA_PLATFORM": "offscreen",
+           "XDG_RUNTIME_DIR": str(folder), "TMPDIR": str(folder)}
+    done = subprocess.run([runner, "-input", str(folder / "tst_command.qml")], env=env, cwd=folder,
+                          capture_output=True, text=True, timeout=120, check=False)
+    output = done.stdout + done.stderr
+    if "module \"QtTest\" is not installed" in output:
+        pytest.skip("QtTest is not installed")
+    found = re.search(r"COMMANDS (\[.*\])", output)
+    assert found, output[-3000:]
+    return json.loads(found.group(1))
+
+
+@pytest.fixture
+def shell(tmp_path):
+    """Runs a command string with /bin/sh -c the way Plasma5Support's executable engine does."""
+    bin_dir, proc_dir, work = tmp_path / "bin", tmp_path / "proc-net", tmp_path / "work"
+    for folder in (bin_dir, proc_dir, work):
+        folder.mkdir()
+    shim = bin_dir / "python3"
+    shim.write_text(SHIM.format(python=sys.executable), encoding="utf-8")
+    shim.chmod(0o755)
+    for bait in ("f", "d", "0", "2", ":"):  # What an unquoted [fd00::20] would glob to.
+        (work / bait).write_text("", encoding="ascii")
+    log = tmp_path / "argv.jsonl"
+    (proc_dir / "tcp").write_text(tcp_at(("0.0.0.0", HTTP, "0A", 4242)), encoding="ascii")
+    (proc_dir / "tcp6").write_text(tcp6_at(), encoding="ascii")
+    (proc_dir / "fib_trie").write_text(fib_trie((LAN, 32)), encoding="ascii")
+    (proc_dir / "if_inet6").write_text(if_inet6(), encoding="ascii")
+    (proc_dir / "ipv6_route").write_text(ipv6_route(), encoding="ascii")
+
+    def run(command):
+        if log.exists():
+            log.unlink()
+        env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HW_ARGV_LOG": str(log), "HW_FAKE_PROC": str(proc_dir),
+               "HW_SRC": str(ROOT / "src"), "HOME": str(work), "LANG": "C.UTF-8"}
+        done = subprocess.run(["/bin/sh", "-c", command], env=env, cwd=work, capture_output=True, text=True,
+                              timeout=60, check=False)
+        calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+        return done, calls
+
+    return run
+
+
+def test_the_widget_command_reaches_the_helper_exactly_through_sh(shell, tmp_path):
+    six, four, plain, hostile = widget_commands(tmp_path)
+    assert hostile == ""  # The widget builds no command for an address with shell characters.
+    assert six.endswith(" --address '[fd00::20]'")
+    done, calls = shell(six)
+    assert (done.returncode, done.stderr) == (0, "")
+    assert calls == [{"argv": ["-P", "-m", "hearthwire", "--port-owner", "3000", "--address", "[fd00::20]"],
+                      "run": "7", "applet": "2"}]
+    assert done.stdout == '{"ok":true,"owner":"remote"}\n'
+    # 192.168.1.20 is this (fake) computer's own address: the owner check, here another user's wildcard.
+    done, calls = shell(four)
+    assert calls[0]["argv"][3:] == ["--port-owner", "3000", "--address", "192.168.1.20"]
+    assert done.stdout == '{"ok":true,"owner":"other"}\n'
+    done, calls = shell(plain)
+    assert calls[0]["argv"][3:] == ["--port-owner", "11434"]
+    assert done.stdout == '{"ok":true,"owner":"none"}\n'
+
+
+def test_the_glob_bait_would_catch_an_unquoted_address(shell, tmp_path):
+    """Control: without the quotes the shell rewrites [fd00::20], and the helper refuses what is left."""
+    six = widget_commands(tmp_path)[0]
+    done, calls = shell(six.replace("'", ""))
+    assert calls and calls[0]["argv"][-1] != "[fd00::20]"
+    assert done.returncode == 2 and done.stdout == ""

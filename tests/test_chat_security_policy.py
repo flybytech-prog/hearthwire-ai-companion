@@ -3828,6 +3828,16 @@ def _function_body(code, name):
     return bodies[0] if len(bodies) == 1 else None
 
 
+# 006 round 2 (LOW-2): "remote" (the address isn't this computer's) is good
+# only for a check that named an address; everything else is ownerProblem's.
+OWNER_DONE_BODY = (
+    '{ if (ownerCheck.sourceName === "" || source !== ownerCheck.sourceName) return ownerTimer.stop() '
+    'ownerCheck.sourceName = "" if (ownerCheck.address !== "" && reply && reply.ok === true && '
+    'reply.owner === "remote") ownerCheck.finished(ownerCheck.port, "") '
+    "else ownerCheck.finished(ownerCheck.port, OllamaChat.ownerProblem(reply)) }"
+)
+
+
 def _local_gate_problems(web, check):
     problems = []
     handlers = [body for _, body in _blocks(web, NAV_HANDLER)]
@@ -3894,23 +3904,34 @@ def _local_gate_problems(web, check):
             or len(_hits(r"\bconnectSource\s*\(", blanked)) != 1:
         problems.append("LocalOwnerCheck.qml: runOwnerCheck must default to "
                         "`function (command) { ownerSource.connectSource(command) }`, the only connectSource")
+    # 006 round 2 (LOW-2): the third argument says whether this check named an
+    # --address, so "remote" is a known word only then.
     if len(re.findall(r'ownerCheck\s*\.\s*ownerDone\s*\(\s*source\s*,\s*OllamaChat\s*\.\s*parseOwnerReply\s*\(\s*'
-                      r'data\s*\[\s*"exit code"\s*\]\s*,\s*data\s*\[\s*"stdout"\s*\]\s*\)\s*\)', check)) != 1 \
+                      r'data\s*\[\s*"exit code"\s*\]\s*,\s*data\s*\[\s*"stdout"\s*\]\s*,\s*'
+                      r'ownerCheck\s*\.\s*address\s*!==\s*""\s*\)\s*\)', check)) != 1 \
             or len(re.findall(r"\bownerDone\s*\(", check)) != 2:
-        problems.append("LocalOwnerCheck.qml: ownerDone only from onNewData with parseOwnerReply(exit code, stdout)")
+        problems.append("LocalOwnerCheck.qml: ownerDone only from onNewData with "
+                        "parseOwnerReply(exit code, stdout, ownerCheck.address !== \"\")")
+    done = _function_body(check, "ownerDone")
+    if done is None or _squashed(done) != OWNER_DONE_BODY:
+        problems.append(f"LocalOwnerCheck.ownerDone must be exactly `{OWNER_DONE_BODY}`")
     if len(re.findall(r"\bOllamaChat\s*\.\s*ownerCommand\s*\(", check)) != 1:
         problems.append("LocalOwnerCheck.qml: the command comes from OllamaChat.ownerCommand, once")
-    good = 0
+    good = remote = 0
     for match in re.finditer(r"\bownerCheck\s*\.\s*finished\s*\(([^\n]*)\)\s*$", check, re.M):
         args = match.group(1)
         if re.fullmatch(r"\s*ownerCheck\s*\.\s*port\s*,\s*OllamaChat\s*\.\s*ownerProblem\s*\(\s*reply\s*\)\s*", args):
             good += 1
+        elif re.fullmatch(r'\s*ownerCheck\s*\.\s*port\s*,\s*""\s*', args) and done is not None \
+                and _squashed(done) == OWNER_DONE_BODY:
+            remote += 1  # Only the pinned remote branch of ownerDone (006 round 2).
         elif not re.fullmatch(r'\s*(?:ownerCheck\s*\.\s*)?port\s*,\s*"owner-unknown"\s*', args):
             problems.append(f"LocalOwnerCheck.qml:{_line_of(check, match.start())}: finished() other than "
                             'OllamaChat.ownerProblem(reply) or "owner-unknown"')
-    if good != 1 or len(re.findall(r"\bfinished\s*\(", blanked)) != len(re.findall(
+    if good != 1 or remote != 1 or len(re.findall(r"\bfinished\s*\(", blanked)) != len(re.findall(
             r"\bownerCheck\s*\.\s*finished\s*\(", blanked)) + 1:
-        problems.append("LocalOwnerCheck.qml: finished(port, OllamaChat.ownerProblem(reply)) exactly once")
+        problems.append("LocalOwnerCheck.qml: finished(port, OllamaChat.ownerProblem(reply)) exactly once, and "
+                        "finished(port, \"\") only in ownerDone's remote-with-an-address branch")
     return problems
 
 
@@ -3948,8 +3969,15 @@ LOCAL_GATE_MUTATIONS = [
      "    function retryLocalOwner() {\n        visitedSites.append({ site: \"local\" })\n"),
     (CHAT_WEB_VIEW, "                if (verdict === \"overlay\" && ChatSites.localOwnerPort({",
      "                if (false && ChatSites.localOwnerPort({"),
-    (LOCAL_OWNER_CHECK, 'ownerCheck.ownerDone(source, OllamaChat.parseOwnerReply(data["exit code"], data["stdout"]))',
+    (LOCAL_OWNER_CHECK, 'ownerCheck.ownerDone(source, OllamaChat.parseOwnerReply(data["exit code"], data["stdout"],\n'
+                        '                                                                    ownerCheck.address !== ""))',
      'ownerCheck.ownerDone(source, { ok: true, owner: "self" })'),
+    # 006 round 2: remote without an address, for any word, or always "named".
+    (LOCAL_OWNER_CHECK, 'if (ownerCheck.address !== "" && reply && reply.ok === true && reply.owner === "remote")',
+     'if (reply && reply.ok === true && reply.owner === "remote")'),
+    (LOCAL_OWNER_CHECK, 'reply.ok === true && reply.owner === "remote")', 'reply.ok === true && reply.owner !== "none")'),
+    (LOCAL_OWNER_CHECK, '                                                                    ownerCheck.address !== ""))',
+     "                                                                    true))"),
     (LOCAL_OWNER_CHECK, 'ownerCheck.finished(ownerCheck.port, "owner-unknown")', 'ownerCheck.finished(ownerCheck.port, "")'),
     (LOCAL_OWNER_CHECK, "ownerCheck.finished(ownerCheck.port, OllamaChat.ownerProblem(reply))",
      'ownerCheck.finished(ownerCheck.port, "")'),
@@ -6127,10 +6155,12 @@ def _split_view_problems(web, view):
         problems.append("exactly one `WebEngineView {`, inside the pageComponent Component")
     # 5. The navigation gate checks for the page's own pane.
     nav = [body for _, body in _blocks(web, NAV_HANDLER)]
+    retry_calls = re.findall(r"\bcheckLocalOwner\s*\(", _function_body(web, "nextOwnerRetry") or "")
     if len(nav) != 1 or len(re.findall(SPLIT_NAV_CHECK, nav[0])) != 1 \
-            or len(re.findall(r"\bcheckLocalOwner\s*\(", web)) != 3:
+            or len(re.findall(r"\bcheckLocalOwner\s*\(", web)) != 4 or len(retry_calls) != 1:
         problems.append("onNavigationRequested passes page.pane, page.site: "
-                        "checkLocalOwner(page, url, ..., false, page.pane, page.site)")
+                        "checkLocalOwner(page, url, ..., false, page.pane, page.site); the only other calls are "
+                        "syncViews' create and (006 round 2) nextOwnerRetry's")
     # 7. The toolbar acts on a sign-in window only when it covers the active pane.
     if len(_hits(SPLIT_ACTIVE_VIEW, web)) != 1 or len(_hits(r"\bproperty\s+var\s+activeView\b", web)) != 1:
         problems.append("activeView: chatWeb.overlayActive ? chatWeb.overlayView : chatWeb.paneView")
@@ -10987,12 +11017,22 @@ PARSE_USER_URL_FUNCTIONS = ("isPageUrl", "userAddress", "userOriginOf", "userSit
                             "classifyHomeSubframe", "rawUserSiteHosts", "userSiteHosts", "localOwnerPort")
 PARSE_USER_URL_PINS = (
     "if (isHomeSite(site)) { var wide = parseUserUrl(url)",
-    "var parsed = loopbackUser ? parseUserUrl(info.url) : parseUrl(info.url)",
+    "var parsed = loopbackUser || privateUser ? parseUserUrl(info.url) : parseUrl(info.url)",
 )
+# Values: the block openers (a named function, or a function-valued property).
 PARSE_USER_URL_OUTSIDE = {
-    "plasmoid/contents/ui/ChatWebView.qml": ("hostOf",),
-    "plasmoid/contents/ui/configChat.qml": ("hostChanges", "rowHost"),
+    "plasmoid/contents/ui/ChatWebView.qml": (r"\bfunction\s+hostOf\s*\([^)]*\)\s*\{",),
+    "plasmoid/contents/ui/configChat.qml": (r"\bfunction\s+hostChanges\s*\([^)]*\)\s*\{",
+                                            r"\bfunction\s+isShortName\s*\([^)]*\)\s*\{",
+                                            r"\bfunction\s+rowHost\s*\([^)]*\)\s*\{"),
+    # 006 round 2 (SEC INFO-3): the backup import's "Adds" host shows a non-default port.
+    "plasmoid/contents/ui/configGeneral.qml": (r"\bhostOf\s*:\s*function\s*\(\s*url\s*\)\s*\{",),
 }
+IMPORT_HOST_OF_BODY = (
+    '{ var host = ChatSites.shortHost(ChatSites.displayHost(url)) var parsed = ChatSites.parseUserUrl(url) '
+    'var standard = parsed && parsed.scheme === "http" ? "80" : "443" '
+    'return host !== "" && parsed && parsed.port !== "" && parsed.port !== standard ? host + ":" + parsed.port : host }'
+)
 ROW_HOST_PARSE = "var parsed = site.user === true ? ChatSites.parseUserUrl(address) : null"
 
 
@@ -11022,11 +11062,14 @@ def _narrow_parser_problems(chat_sites_raw, sources):
         if name.endswith("ChatSites.js"):
             continue
         found = [match.start() for match in re.finditer(r"\bparseUserUrl\s*\(", text)]
-        functions = PARSE_USER_URL_OUTSIDE.get(name, ())
-        inside = [at for function in functions
-                  for lo, hi in _block_spans(text, rf"\bfunction\s+{function}\s*\([^)]*\)\s*\{{") for at in found if lo <= at < hi]
-        if len(found) != len(functions) or sorted(inside) != sorted(found):
-            problems.append(f"{name}: parseUserUrl only in {functions or 'no function'}, once each")
+        openers = PARSE_USER_URL_OUTSIDE.get(name, ())
+        inside = [at for opener in openers for lo, hi in _block_spans(text, opener) for at in found if lo <= at < hi]
+        if len(found) != len(openers) or sorted(inside) != sorted(found) or len(set(inside)) != len(inside):
+            problems.append(f"{name}: parseUserUrl only in {openers or 'no function'}, once each")
+    general = sources.get("plasmoid/contents/ui/configGeneral.qml", "")
+    blocks = [body for _, body in _blocks(general, r"\bhostOf\s*:\s*function\s*\(\s*url\s*\)\s*\{")]
+    if len(blocks) != 1 or _squashed(blocks[0]) != IMPORT_HOST_OF_BODY:
+        problems.append(f"configGeneral.qml: the import's hostOf is display only, exactly `{IMPORT_HOST_OF_BODY}`")
     if len(_hits(_code_pattern(ROW_HOST_PARSE), sources.get("plasmoid/contents/ui/configChat.qml", ""))) != 1:
         problems.append(f"configChat.rowHost reads an address widely only for an added site: `{ROW_HOST_PARSE}`")
     return problems
@@ -11045,7 +11088,12 @@ NARROW_PARSER_MUTATIONS = {
     "new window wide": (CHAT_SITES_JS, "    var parsed = parseUrl(url)\n    if (parsed !== null && parsed.host !== \"\" && !site.local",
                         "    var parsed = parseUserUrl(url)\n    if (parsed !== null && parsed.host !== \"\" && !site.local"),
     "custom urls wide": (CHAT_SITES_JS, "function validateCustomUrl(", "function validateCustomUrl(/* 006 */"),
-    "wide parser for Local": (CHAT_SITES_JS, "loopbackUser ? parseUserUrl(info.url) : parseUrl(info.url)", "parseUserUrl(info.url)"),
+    "wide parser for Local": (CHAT_SITES_JS, "loopbackUser || privateUser ? parseUserUrl(info.url) : parseUrl(info.url)",
+                              "parseUserUrl(info.url)"),
+    "import host shows the url": (GENERAL_006, "                        ? host + \":\" + parsed.port : host",
+                                  "                        ? url : host"),
+    "import host for built-ins": (GENERAL_006, "hostOf: function (url) {\n", "hostOf: function (url) {\n"
+                                  "                    var wide = ChatSites.parseUserUrl(url)\n"),
     "wide parser reads more": (CHAT_SITES_JS, "    var parsed = parseUrl(value)\n    if (parsed !== null)\n        return parsed\n", ""),
     "wide parser zone ids": (CHAT_SITES_JS, "/^(\\[[0-9A-Fa-f:]{2,39}\\])", "/^(\\[[0-9A-Fa-f:%a-z]{2,39}\\])"),
     "row host for built-ins": (CONFIG_CHAT, ROW_HOST_PARSE, "var parsed = ChatSites.parseUserUrl(address)"),
@@ -11139,16 +11187,24 @@ def test_proof_exact_origin_rule_catches(name):
 
 # Rule 5: loopback added sites are owner-checked, through one predicate, in every
 # owner path of ChatWebView; no "local" literal is left there.
+# 006 round 2 (LOW-2): private added sites are owner-checked too, with their address.
 OWNER_CHECKED_BODY = ('{ var site = effectiveSite(siteId, customUrls, userSites) return site !== null && '
-                      '(site.local === true || (site.user === true && site.local_kind === "loopback")) }')
+                      "(site.local === true || isHomeSite(site)) }")
 LOCAL_OWNER_PORT_BODY = (
     '{ var info = request || {} var site = effectiveSite(info.siteId, info.customUrls, info.userSites) '
     'if (!site) return 0 var loopbackUser = site.user === true && site.local_kind === "loopback" '
-    'if (site.local !== true && !loopbackUser) return 0 '
-    'var parsed = loopbackUser ? parseUserUrl(info.url) : parseUrl(info.url) '
-    'if (parsed === null || parsed.host === "" || (parsed.scheme !== "http" && parsed.scheme !== "https") '
-    '|| !isLocalAddress(parsed.host)) return 0 if (parsed.port !== "") return parseInt(parsed.port, 10) '
+    'var privateUser = site.user === true && site.local_kind === "private" '
+    'if (site.local !== true && !loopbackUser && !privateUser) return 0 '
+    'var parsed = loopbackUser || privateUser ? parseUserUrl(info.url) : parseUrl(info.url) '
+    'if (parsed === null || parsed.host === "" || (parsed.scheme !== "http" && parsed.scheme !== "https")) return 0 '
+    "if (privateUser ? parsed.host !== site.exact_hosts[0] : !isLocalAddress(parsed.host)) return 0 "
+    'if (parsed.port !== "") return parseInt(parsed.port, 10) '
     'return parsed.scheme === "https" ? 443 : 80 }'
+)
+LOCAL_OWNER_ADDRESS_BODY = (
+    '{ var info = request || {} var site = effectiveSite(info.siteId, info.customUrls, info.userSites) '
+    'if (!site || site.user !== true || site.local_kind !== "private" || localOwnerPort(info) === 0) return "" '
+    "return site.exact_hosts[0] }"
 )
 LOCAL_OWNER_GATE_BODY = (
     '{ var info = request || {} if (info.isMainFrame === false || localOwnerPort(info) === 0) return "skip" '
@@ -11161,15 +11217,22 @@ WEB_OWNER_PINS = (
     "if (chatWeb.ownerChecked(page.site)) { if (page.site === chatWeb.localCreateSite) "
     "page.ownerPass = chatWeb.localCreatePass",
     "chatWeb.localCreateSite = site",
-    "var port = ChatSites.localOwnerPort({ siteId: site, customUrls: chatWeb.customUrls, userSites: chatWeb.userSites, url: url })",
+    # The check's port and (006 round 2) address both come from the checked site and url.
+    "var port = ChatSites.localOwnerPort({ siteId: site, customUrls: chatWeb.customUrls, userSites: chatWeb.userSites, url: url }) "
+    "var address = ChatSites.localOwnerAddress({ siteId: site, customUrls: chatWeb.customUrls, "
+    "userSites: chatWeb.userSites, url: url })",
     "if (chatWeb.ownerPending && chatWeb.ownerPending.site === siteId) {",
+    # A late answer for another port or address never counts for this check.
+    'if (!pending || pending.port !== port || (pending.address || "") !== localOwner.address) return',
+    "pane: pane === \"b\" ? \"b\" : \"a\", site: site, address: address }",
+    "if (chatWeb && chatWeb.ownerPending && chatWeb.ownerPending.url === url) localOwner.start(port, address)",
 )
 
 
 def _owner_checked_problems(sites, web):
     problems = []
     for name, expected in (("ownerChecked", OWNER_CHECKED_BODY), ("localOwnerPort", LOCAL_OWNER_PORT_BODY),
-                           ("localOwnerGate", LOCAL_OWNER_GATE_BODY)):
+                           ("localOwnerGate", LOCAL_OWNER_GATE_BODY), ("localOwnerAddress", LOCAL_OWNER_ADDRESS_BODY)):
         body = _function_body(sites, name)
         if body is None or _squashed(body) != expected:
             problems.append(f"ChatSites.{name} must be exactly `{expected}`")
@@ -11192,11 +11255,22 @@ def test_loopback_added_sites_are_owner_checked():
 
 
 OWNER_CHECKED_MUTATIONS = {
-    "Local only": (CHAT_SITES_JS, '(site.local === true || (site.user === true && site.local_kind === "loopback"))',
-                   "site.local === true"),
-    "port only for Local": (CHAT_SITES_JS, "    if (site.local !== true && !loopbackUser)\n", "    if (site.local !== true)\n"),
-    "port only for the own host": (CHAT_SITES_JS, "            || !isLocalAddress(parsed.host))\n        return 0\n",
-                                   "            || !isLoopbackHost(parsed.host))\n        return 0\n"),
+    "Local only": (CHAT_SITES_JS, "(site.local === true || isHomeSite(site))", "site.local === true"),
+    "loopback only": (CHAT_SITES_JS, "(site.local === true || isHomeSite(site))",
+                      '(site.local === true || (site.user === true && site.local_kind === "loopback"))'),
+    "port only for Local": (CHAT_SITES_JS, "    if (site.local !== true && !loopbackUser && !privateUser)\n",
+                            "    if (site.local !== true)\n"),
+    "port only for the own host": (CHAT_SITES_JS, " : !isLocalAddress(parsed.host))\n        return 0\n",
+                                   " : !isLoopbackHost(parsed.host))\n        return 0\n"),
+    # 006 round 2 (LOW-2).
+    "private site, any host": (CHAT_SITES_JS, "privateUser ? parsed.host !== site.exact_hosts[0] :", "privateUser ? false :"),
+    "no private check": (CHAT_SITES_JS, "    if (site.local !== true && !loopbackUser && !privateUser)\n",
+                         "    if (site.local !== true && !loopbackUser)\n"),
+    "address for loopback": (CHAT_SITES_JS, '|| site.local_kind !== "private" ||', '|| site.local_kind === "public" ||'),
+    "address from the url": (CHAT_SITES_JS, "        return \"\"\n    return site.exact_hosts[0]\n",
+                             "        return \"\"\n    return String(info.url)\n"),
+    "address dropped": (CHAT_WEB_VIEW, "localOwner.start(port, address)", "localOwner.start(port)"),
+    "stale address counts": (CHAT_WEB_VIEW, ' || (pending.address || "") !== localOwner.address)', ")"),
     "create skips user ids": (CHAT_WEB_VIEW, "                                           url: home }) === 0) {",
                               "                                           url: home }) === 0 || ChatSites.isUserSiteId(wanted)) {"),
     "gate keyed on local": (CHAT_WEB_VIEW, "                if (chatWeb.ownerChecked(page.site)) {\n",
@@ -11246,8 +11320,10 @@ def _home_blocking_problems(code):
         body = _function_body(code, name)
         if body is None or _squashed(body) != expected:
             problems.append(f"ChatSites.{name} must be exactly `{expected}`")
-    if len(_hits(r"\bisHomeTarget\s*\(", code)) != 4 or len(_hits(r"\bisHomeSite\s*\(", code)) != 4:
-        problems.append("isHomeTarget only in the three home branches; isHomeSite only in their dispatch")
+    if len(_hits(r"\bisHomeTarget\s*\(", code)) != 4 or len(_hits(r"\bisHomeSite\s*\(", code)) != 5 \
+            or "isHomeSite(site)" not in _squashed(_function_body(code, "ownerChecked") or ""):
+        problems.append("isHomeTarget only in the three home branches; isHomeSite only in their dispatch "
+                        "and (round 2) in ownerChecked")
     return problems
 
 
@@ -11321,7 +11397,9 @@ BLANK_LOCAL_VIEWS_BODY = (
     "customUrls: chatWeb.customUrls, userSites: chatWeb.userSites, url: view.url.toString() }) "
     'if (viewPort > 0 && viewPort === port) view.url = "about:blank" } }'
 )
-OWNER_PROBLEM_BRANCH = ('if (problem !== "") { chatWeb.localOwnerProblem = problem chatWeb.blankLocalViews(port) return }')
+# 006 round 2 (REV M-1): a problem also ends the Retry queue, so its message stays.
+OWNER_PROBLEM_BRANCH = ('if (problem !== "") { chatWeb.localOwnerProblem = problem chatWeb.ownerRetries = [] '
+                        "chatWeb.blankLocalViews(port) return }")
 
 
 def _blank_by_port_problems(web):
@@ -11355,10 +11433,22 @@ def test_proof_blank_by_port_rule_catches(old, new):
 # (userAddress) or userSiteNameError can return has its own case in
 # configChat.userSiteError, and the helper's port knows exactly the same codes.
 EDITOR_NOTE_TEXT = ('text: editor.notEncrypted ? i18n("Not encrypted on your network. https is recommended.") '
+                    # 006 round 2 (LOW-2): an https home-network address.
+                    ': editor.homeHttps ? i18n("For a server on this computer, use localhost.") '
                     ': i18n("Checked before loading: the program on this port must be yours or the system\'s.")')
 EDITOR_NOTE_HELP = ('toolTipText: i18n("Anyone on your network can read and change this traffic. On another network '
                     '(a café, a hotel) a different device can have the same address and would get this site\'s sign-in '
-                    'and saved data. Use https with a certificate your system trusts to rule this out.")')
+                    'and saved data. Use https with a certificate your system trusts to rule this out. For a server on '
+                    "this computer, use localhost: when this address is this computer's own, Hearthwire still checks "
+                    "that the program on the port is yours or the system's.\")")
+# 006 round 2: the error text may depend on the address only through isShortName (REV L-1).
+SITE_ERROR_PINS = (
+    'case "loopback-not-allowed": return page.isShortName(url) ? i18n("http is allowed only for this computer '
+    "(localhost, 127.0.0.1, [::1]) or a home-network IP address like 192.168.1.20. Other names need https and a full "
+    'name, like nas.example.org.") : i18n("On this computer, use localhost, 127.0.0.1 or [::1].")',
+    'case "link-local": return i18n("Link-local and cloud metadata addresses (169.254.x.x, fe80::, fd00:ec2::) '
+    "can't be added.\")",
+)
 PAGE_FAILED_TEXT = (
     'text: chatView.localSite ? i18n("Couldn\'t load. Is your local chat server running? You can change its address '
     'in Settings → Chat: Edit on the Local web UI row.") : chatView.homeSite ? i18n("Couldn\'t load. Is the server '
@@ -11397,6 +11487,11 @@ def _texts_006_problems(config, view, sites, helper):
               if 'objectName: "pageFailedMessage"' in body]
     if len(failed) != 1 or _squashed(PAGE_FAILED_TEXT) not in _squashed(failed[0]):
         problems.append(f"ChatView.qml: pageFailedMessage shows only the fixed `{PAGE_FAILED_TEXT}`")
+    errors = _function_body(config, "userSiteError") or ""
+    problems += _pin_problems(errors, SITE_ERROR_PINS, "configChat.userSiteError")
+    if len(re.findall(r"\burl\b", _strip_comments(errors, blank_strings=True))) != 1 \
+            or "page.isShortName(url)" not in errors or not re.search(r"\bfunction\s+userSiteError\s*\(\s*code\s*,\s*url\s*\)", config):
+        problems.append("configChat.userSiteError(code, url) reads url only through page.isShortName(url)")
     url_codes = _js_codes(sites, "userAddress", r'\bfail\(\s*"([a-z-]+)"\s*\)')
     name_codes = _js_codes(sites, "userSiteNameError", r'\breturn\s+"([a-z-]+)"')
     cases = _js_codes(config, "userSiteError", r'\bcase\s+"([a-z-]*)"\s*:')
@@ -11421,7 +11516,14 @@ TEXTS_006_MUTATIONS = {
                        "                    textFormat: Text.RichText\n                    text: editor.notEncrypted\n"),
     "note shows the address": (CONFIG_CHAT, '? i18n("Not encrypted on your network. https is recommended.")',
                                "? addressField.text"),
-    "help names the host": (CONFIG_CHAT, "to rule this out.\")\n", "to rule this out. %1\", addressField.text)\n"),
+    "help names the host": (CONFIG_CHAT, "the program on the port is yours or the system's.\")\n",
+                            "the program on the port is yours or the system's. %1\", addressField.text)\n"),
+    "note for https dropped": (CONFIG_CHAT, '                            ? i18n("For a server on this computer, use localhost.")\n',
+                               "                            ? addressField.text\n"),
+    "error shows the address": (CONFIG_CHAT, '                : i18n("On this computer, use localhost, 127.0.0.1 or [::1].")',
+                                '                : i18n("On this computer, use localhost, not %1.", url)'),
+    "link-local text drops metadata": (CONFIG_CHAT, "Link-local and cloud metadata addresses (169.254.x.x, fe80::, fd00:ec2::)",
+                                       "Link-local addresses (169.254.x.x, fe80::)"),
     "page text shows the url": (CHAT_VIEW, ': i18n("Couldn\'t load this page.")', ": chatView.web.activeView.url"),
     "new code without text": (CHAT_SITES_JS, '            return fail("link-local")\n', '            return fail("zone-id")\n'),
     "helper code drift": (SETTINGS_BACKUP_PY, '            return ("link-local", "")\n', '            return ("link-local-v6", "")\n'),
@@ -11485,3 +11587,234 @@ def test_proof_helper_006_rule_catches(old, new):
     source = SETTINGS_BACKUP_PY.read_text(encoding="utf-8")
     assert old in source
     assert _helper_006_problems(source.replace(old, new, 1))
+
+
+# --- Task 006 round 2: the owner check of home-network sites (SEC LOW-2, REV M-1) -----------------
+
+OLLAMA_CHAT_VIEW_R2 = UI / "OllamaChatView.qml"
+CHAT_OWNER_FILES = ("plasmoid/contents/ui/ChatWebView.qml", "plasmoid/contents/ui/ChatSites.js",
+                    "plasmoid/contents/ui/ChatView.qml", "plasmoid/contents/ui/configChat.qml",
+                    "plasmoid/contents/ui/OllamaChatView.qml")
+OWNERS_PIN = 'var OWNERS = ["none", "self", "system", "other"]'
+PARSE_OWNER_REPLY_BODY = (
+    '{ var bad = { ok: false, error: "bad-reply" } if (exitCode !== 0 || typeof stdout !== "string" || '
+    "stdout.length > 200) return bad var reply = parseObject(stdout) if (reply === null) return bad "
+    "if (reply.ok === true && (OWNERS.indexOf(reply.owner) >= 0 || (withAddress === true && reply.owner === "
+    '"remote"))) return { ok: true, owner: reply.owner } if (reply.ok === false && '
+    "OWNER_ERRORS.indexOf(reply.error) >= 0) return { ok: false, error: reply.error } return bad }"
+)
+TRUSTED_BODY = '{ return owner === "self" || owner === "system" }'
+OLLAMA_VIEW_REPLY = 'ollamaView.ownerDone(source, OllamaChat.parseOwnerReply(data["exit code"], data["stdout"]))'
+NAV_PASS_SPENT = 'if (gate !== "skip") page.ownerPass = ""'
+OLLAMA_VIEW_COMMAND = ("var command = OllamaChat.ownerCommand(OllamaChat.portOf(ollamaView.address), ollamaView.ownerRun, "
+                       "Math.max(0, ChatStorage.validInt(ollamaView.appletId)))")
+
+
+def _remote_once_problems(sources):
+    """Manager decision: remote is good for that one load only; every later navigation is checked again.
+
+    remote reaches ChatWebView as the plain "" of a good check (LocalOwnerCheck's
+    pinned ownerDone), so it gets exactly the one per-view, 10 s pass of self or
+    system, which the next main-frame navigation spends (localOwnerGate pinned).
+    No chat file knows the word, so nothing can remember it.
+    """
+    get = sources.get
+    web, view = get("plasmoid/contents/ui/ChatWebView.qml", ""), get("plasmoid/contents/ui/ChatView.qml", "")
+    check, sites = get("plasmoid/contents/ui/LocalOwnerCheck.qml", ""), get("plasmoid/contents/ui/ChatSites.js", "")
+    ollama, ollama_view = get("plasmoid/contents/ui/OllamaChat.js", ""), get("plasmoid/contents/ui/OllamaChatView.qml", "")
+    problems = _local_gate_problems(web, check) + _owner_pass_expiry_problems(web, view)
+    problems += _owner_checked_problems(sites, web)
+    navs = [body for _, body in _blocks(web, NAV_HANDLER)]
+    if len(navs) != 1 or len(_hits(_code_pattern(NAV_PASS_SPENT), navs[0])) != 1:
+        problems.append(f"onNavigationRequested spends the pass on every gated navigation: `{NAV_PASS_SPENT}`")
+    for name in CHAT_OWNER_FILES:
+        if re.search(r"\bremote\w*\b", _strip_comments(get(name, ""))):
+            problems.append(f"{name}: never knows \"remote\"; it arrives as a plain good check, once")
+    if len(_hits(r'"remote"', check)) != 1 or len(_hits(r'"remote"', ollama)) != 1 \
+            or re.search(r"\bremote\w*\b", _strip_comments(check, blank_strings=True)):
+        problems.append('"remote" only in OllamaChat.parseOwnerReply and LocalOwnerCheck.ownerDone, once each')
+    # Only a check that named an address can take it, and the Ollama chat's list can't.
+    problems += _pin_problems(ollama, (OWNERS_PIN,), "OllamaChat.js")
+    for name, expected in (("parseOwnerReply", PARSE_OWNER_REPLY_BODY), ("trusted", TRUSTED_BODY)):
+        body = _function_body(ollama, name)
+        if body is None or _squashed(body) != expected:
+            problems.append(f"OllamaChat.{name} must be exactly `{expected}`")
+    if len(_hits(r"\bparseOwnerReply\s*\(", ollama_view)) != 1 or len(_hits(_code_pattern(OLLAMA_VIEW_REPLY), ollama_view)) != 1:
+        problems.append(f"OllamaChatView.qml parses the reply without an address: `{OLLAMA_VIEW_REPLY}`")
+    if len(_hits(r"\bownerCommand\s*\(", ollama_view)) != 1 \
+            or len(_hits(_code_pattern(OLLAMA_VIEW_COMMAND), ollama_view)) != 1:
+        problems.append("OllamaChatView.qml builds its command with three arguments, never an address")
+    return problems
+
+
+def test_remote_counts_for_one_load_only_with_an_address_never_for_ollama():
+    problems = _remote_once_problems(_all_code())
+    assert not problems, problems
+
+
+REMOTE_ONCE_MUTATIONS = {
+    # Later checks skipped after remote.
+    "pass never expires after remote": [(CHAT_WEB_VIEW, "        view.ownerPassExpires = Date.now() + chatWeb.ownerPassLifetime\n",
+                                         "        view.ownerPassExpires = pending.address !== \"\" ? Number.MAX_VALUE"
+                                         " : Date.now() + chatWeb.ownerPassLifetime\n")],
+    "pass kept after remote": [(CHAT_WEB_VIEW, '                    if (gate !== "skip")\n',
+                                '                    if (gate !== "skip" && localOwner.address === "")\n')],
+    "gate skipped for home addresses": [(CHAT_SITES_JS, "    if (info.isMainFrame === false || localOwnerPort(info) === 0)\n",
+                                         "    if (info.isMainFrame === false || localOwnerPort(info) === 0"
+                                         " || localOwnerAddress(info) !== \"\")\n")],
+    "remote sites remembered": [
+        (CHAT_WEB_VIEW, "        chatWeb.localOwnerProblem = \"\"\n        // The next view Retry",
+         "        chatWeb.localOwnerProblem = \"\"\n        if (pending.address !== \"\") chatWeb.remoteSites.push(pending.site)\n"
+         "        // The next view Retry"),
+        (CHAT_WEB_VIEW, '                    if (gate === "check") {',
+         '                    if (gate === "check" && chatWeb.remoteSites.indexOf(page.site) < 0) {')],
+    "remote reported as its own word": [(LOCAL_OWNER_CHECK, '            ownerCheck.finished(ownerCheck.port, "")\n',
+                                          '            ownerCheck.finished(ownerCheck.port, "remote")\n')],
+    # Remote only with an address.
+    "remote without an address": [(OLLAMA_CHAT_JS, '(withAddress === true && reply.owner === "remote")', 'reply.owner === "remote"')],
+    "always named": [(LOCAL_OWNER_CHECK, '                                                                    ownerCheck.address !== ""))',
+                      "                                                                    true))")],
+    "remote for any word": [(LOCAL_OWNER_CHECK, 'if (ownerCheck.address !== "" && reply && reply.ok === true',
+                             "if (reply && reply.ok === true")],
+    # The Ollama chat can't take it.
+    "Ollama's list takes remote": [(OLLAMA_CHAT_JS, OWNERS_PIN, 'var OWNERS = ["none", "self", "system", "other", "remote"]')],
+    "Ollama parses with an address": [(OLLAMA_CHAT_VIEW_R2, 'data["exit code"], data["stdout"]))',
+                                       'data["exit code"], data["stdout"], true))')],
+    "Ollama names an address": [(OLLAMA_CHAT_VIEW_R2, "ChatStorage.validInt(ollamaView.appletId)))",
+                                 "ChatStorage.validInt(ollamaView.appletId)), \"[fd00::1]\")")],
+    "remote trusted": [(OLLAMA_CHAT_JS, '    return owner === "self" || owner === "system"\n',
+                        '    return owner === "self" || owner === "system" || owner === "remote"\n')],
+}
+
+
+@pytest.mark.parametrize("name", sorted(REMOTE_ONCE_MUTATIONS))
+def test_proof_remote_once_rule_catches(name):
+    sources = _all_code()
+    raws = {}
+    for path, old, new in REMOTE_ONCE_MUTATIONS[name]:
+        raw = raws.get(path, path.read_text(encoding="utf-8"))
+        assert old in raw, f"proof fixture out of date: {old!r} not in {_rel(path)}"
+        raws[path] = raw.replace(old, new, 1)
+    for path, raw in raws.items():
+        sources[_rel(path)] = _strip_comments(raw)
+    assert _remote_once_problems(sources)
+
+
+# The address the check names: only a private site's own host (localOwnerAddress,
+# rule 5), validated again by OWNER_ADDRESS and single-quoted (the shell never
+# globs "[...]"); the helper validates it a third time (--address, exit 2).
+# tests/test_port_owner.py runs the built string through sh -c with the real helper.
+OWNER_ADDRESS_PIN = r"var OWNER_ADDRESS = /^(?:(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}|\[[0-9a-f:]{2,39}\])$/"
+OWNER_COMMAND_BODY = (
+    '{ if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535 || validInt(run) < 0 '
+    '|| validInt(applet) < 0) return "" var named = address !== undefined && address !== null && address !== "" '
+    'if (named && (typeof address !== "string" || !OWNER_ADDRESS.test(address))) return "" '
+    'return "env HEARTHWIRE_RUN=" + run + " HEARTHWIRE_APPLET=" + applet + " python3 -P -m hearthwire --port-owner " '
+    "+ port + (named ? \" --address '\" + address + \"'\" : \"\") }"
+)
+OWNER_START_BODY = (
+    "{ ownerCheck.cancel() ownerCheck.run = ChatStorage.nextRun(ownerCheck.run) ownerCheck.port = port "
+    'ownerCheck.address = typeof address === "string" ? address : "" var command = OllamaChat.ownerCommand(port, '
+    "ownerCheck.run, Math.max(0, ChatStorage.validInt(ownerCheck.appletId)), ownerCheck.address) "
+    'if (command === "") { ownerCheck.finished(port, "owner-unknown") return } ownerCheck.sourceName = command '
+    "ownerTimer.interval = ownerCheck.timeout ownerTimer.restart() ownerCheck.runOwnerCheck(command) }"
+)
+
+
+def _owner_address_problems(ollama, check, web):
+    problems = []
+    if len(re.findall(r"(?m)^" + re.escape(OWNER_ADDRESS_PIN) + r"$", ollama)) != 1:
+        problems.append(f"OllamaChat.js: `{OWNER_ADDRESS_PIN}`")
+    for code, name, expected in ((ollama, "ownerCommand", OWNER_COMMAND_BODY), (check, "start", OWNER_START_BODY)):
+        body = _function_body(code, name)
+        if body is None or _squashed(body) != expected:
+            problems.append(f"{name} must be exactly `{expected}`")
+    if len(_hits(r"\blocalOwner\s*\.\s*start\s*\(", web)) != 1 or len(_hits(r"\bChatSites\s*\.\s*localOwnerAddress\s*\(", web)) != 1 \
+            or len(_hits(r"\blocalOwner\s*\.\s*start\s*\(\s*port\s*,\s*address\s*\)", web)) != 1 \
+            or len(_hits(r"\bvar\s+address\s*=\s*ChatSites\s*\.\s*localOwnerAddress\s*\(", web)) != 1:
+        problems.append("ChatWebView: localOwner.start(port, address) once, the address only from ChatSites.localOwnerAddress")
+    return problems
+
+
+def test_the_owner_address_is_validated_and_quoted():
+    problems = _owner_address_problems(_read_code(OLLAMA_CHAT_JS), _read_code(LOCAL_OWNER_CHECK), _read_code(CHAT_WEB_VIEW))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    (OLLAMA_CHAT_JS, r"|\[[0-9a-f:]{2,39}\])$/", r"|\[[^']{2,39}\])$/"),
+    (OLLAMA_CHAT_JS, "(named ? \" --address '\" + address + \"'\" : \"\")", "(named ? \" --address \" + address : \"\")"),
+    (OLLAMA_CHAT_JS, "(named ? \" --address '\" + address + \"'\" : \"\")", "(named ? ' --address \"' + address + '\"' : \"\")"),
+    (OLLAMA_CHAT_JS, ' || !OWNER_ADDRESS.test(address)))', "))"),
+    (LOCAL_OWNER_CHECK, 'ownerCheck.address = typeof address === "string" ? address : ""', "ownerCheck.address = String(address)"),
+    (CHAT_WEB_VIEW, "localOwner.start(port, address)", "localOwner.start(port, url)"),
+])
+def test_proof_owner_address_rule_catches(path, old, new):
+    ollama = _mutated(path, old, new) if path == OLLAMA_CHAT_JS else _read_code(OLLAMA_CHAT_JS)
+    check = _mutated(path, old, new) if path == LOCAL_OWNER_CHECK else _read_code(LOCAL_OWNER_CHECK)
+    web = _mutated(path, old, new) if path == CHAT_WEB_VIEW else _read_code(CHAT_WEB_VIEW)
+    assert _owner_address_problems(ollama, check, web)
+
+
+# REV M-1: Retry checks only the blank views and those on the failed port, one
+# at a time, never cancelling a check that runs, and never loads anything itself.
+NEXT_OWNER_RETRY_BODY = (
+    "{ while (!chatWeb.ownerPending && chatWeb.ownerRetries.length > 0) { var queue = chatWeb.ownerRetries.slice() "
+    "var view = queue.shift() chatWeb.ownerRetries = queue if (chatWeb.viewList().indexOf(view) < 0 || "
+    'view.homeUrl === "") continue if (ChatSites.localOwnerPort({ siteId: view.site, customUrls: chatWeb.customUrls, '
+    "userSites: chatWeb.userSites, url: view.homeUrl }) === 0) { view.url = view.homeUrl continue } "
+    "chatWeb.checkLocalOwner(view, view.homeUrl, false, false, view.pane, view.site) chatWeb.ownerPending.retry = true } }"
+)
+RETRY_PINS = (
+    "var failedPort = chatWeb.localOwnerPort",
+    'if (url === "" || ChatSites.isAboutBlank(url) || (port > 0 && port === failedPort)) queue.push(view)',
+    "chatWeb.ownerRetries = queue if (chatWeb.localViewMissing()) chatWeb.syncViews() chatWeb.nextOwnerRetry() }",
+)
+RETRY_REQUEUE = ("var replaced = chatWeb.ownerPending if (replaced && replaced.retry === true && replaced.view) "
+                 "chatWeb.ownerRetries = [replaced.view].concat(chatWeb.ownerRetries) localOwner.cancel()")
+
+
+def _retry_queue_problems(web):
+    problems = []
+    body = _function_body(web, "nextOwnerRetry")
+    if body is None or _squashed(body) != NEXT_OWNER_RETRY_BODY:
+        problems.append(f"ChatWebView.nextOwnerRetry must be exactly `{NEXT_OWNER_RETRY_BODY}`")
+    retry = _function_body(web, "retryLocalOwner") or ""
+    problems += _pin_problems(retry, RETRY_PINS, "ChatWebView.retryLocalOwner")
+    if re.search(r"\.\s*url\s*=(?!=)|\bcheckLocalOwner\s*\(|\.\s*cancel\s*\(|\bvisitedSites\b", retry):
+        problems.append("retryLocalOwner loads, checks or cancels nothing itself: the queue goes to nextOwnerRetry")
+    if _squashed(RETRY_REQUEUE) not in _squashed(_function_body(web, "checkLocalOwner") or ""):
+        problems.append(f"checkLocalOwner puts a replaced Retry check back first: `{RETRY_REQUEUE}`")
+    owners = {"checkLocalOwner": 1, "localOwnerFinished": 1, "retryLocalOwner": 1, "nextOwnerRetry": 1}
+    for name, count in owners.items():
+        if len(_hits(r"\bownerRetries\s*=(?!=)", _function_body(web, name) or "")) != count:
+            problems.append(f"ChatWebView.{name} sets ownerRetries {count} time(s)")
+    if len(_hits(r"\bownerRetries\s*=(?!=)", web)) != sum(owners.values()) \
+            or len(_hits(r"\.\s*retry\s*=(?!=)", web)) != 1 or len(_hits(r"\bnextOwnerRetry\b", web)) != 3:
+        problems.append("ownerRetries only in those four places; .retry set only by nextOwnerRetry, which "
+                        "runs from retryLocalOwner and after a good check only")
+    return problems
+
+
+def test_retry_checks_only_failed_views_one_at_a_time():
+    problems = _retry_queue_problems(_read_code(CHAT_WEB_VIEW))
+    assert not problems, problems
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("        while (!chatWeb.ownerPending && chatWeb.ownerRetries.length > 0) {\n",
+     "        while (chatWeb.ownerRetries.length > 0) {\n"),
+    ("            chatWeb.checkLocalOwner(view, view.homeUrl, false, false, view.pane, view.site)\n",
+     "            localOwner.cancel()\n            chatWeb.checkLocalOwner(view, view.homeUrl, false, false, view.pane, view.site)\n"),
+    ("(port > 0 && port === failedPort))\n                queue.push(view)", "true)\n                queue.push(view)"),
+    ("            chatWeb.ownerRetries = []\n            chatWeb.blankLocalViews(port)", "            chatWeb.blankLocalViews(port)"),
+    ("        chatWeb.ownerRetries = queue\n        // A missing view",
+     "        chatWeb.ownerRetries = queue\n        queue.forEach(function (view) { view.url = view.homeUrl })\n        // A missing view"),
+    ("            chatWeb.ownerPending.retry = true\n", ""),
+    ("            chatWeb.ownerRetries = [replaced.view].concat(chatWeb.ownerRetries)\n", "            replaced.view = null\n"),
+    ("            chatWeb.checkLocalOwner(view, view.homeUrl, false, false, view.pane, view.site)\n",
+     "            view.url = view.homeUrl\n"),
+])
+def test_proof_retry_queue_rule_catches(old, new):
+    web = _mutated(CHAT_WEB_VIEW, old, new)
+    assert _retry_queue_problems(web) or _blank_by_port_problems(web)
