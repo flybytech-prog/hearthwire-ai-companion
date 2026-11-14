@@ -777,6 +777,13 @@ WebSocket, images and similar) to this computer or to names that resolve to it
   - If it isn't, the connection leaves this computer, no local program can
     answer it, and the page loads. The widget can't ask another machine who
     is listening there.
+  - The check reads only the address and route tables. Firewall rules an
+    administrator set up, such as NAT, port forwarding or a transparent proxy
+    (`iptables`/`nftables` DNAT or REDIRECT), can still send that traffic to
+    a program on this computer, and the check doesn't see them. That is
+    accepted because only root can set up such rules, and root is trusted
+    anyway: it owns the system's programs and can read everything the widget
+    stores.
   - For a server on this computer, use `localhost` rather than its network
     address.
 

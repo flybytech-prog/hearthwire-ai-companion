@@ -115,6 +115,9 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="hearthwire",
         description="Read local AI CLI sessions and print subscription usage as JSON.",
+        # Only the full option names (006 SEC INFO-A): `--addr` is not `--address`.
+        # The widget and the scripts always spell them out (tests/test_cli_options.py).
+        allow_abbrev=False,
     )
     # Every option below may appear at most once.
     result.register("action", None, _StoreOnce)

@@ -1005,6 +1005,11 @@ plain form.
     `RTF_LOCAL` (`0x80000000`).
   - There is no bind test: with `net.ipv4.ip_nonlocal_bind` any user can
     bind any address, and that says nothing about where a connection goes.
+  - Packet-filter rules are not read. A NAT, port-forwarding or
+    transparent-proxy rule (`iptables`/`nftables` DNAT or REDIRECT) can send
+    traffic for a `remote` address to a local listener. Only root can set up
+    such a rule, and root is already a trusted owner (uid 0 counts as
+    `system`), so this is accepted and documented in `docs/privacy.md`.
   - A missing or unreadable table, a line of another shape, or a `fib_trie`
     without a single `LOCAL` route gives `unreadable`.
 - Counts sockets in state LISTEN (`0A`) on `<port>` whose local address a

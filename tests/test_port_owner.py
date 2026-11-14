@@ -366,7 +366,7 @@ def test_cli_port_owner_stands_alone(monkeypatch, capsys, extra):
 
 @pytest.mark.parametrize("argv", [["--port-owner", "11434", "--port-owner", "11434"],
                                   ["--port-owner", "11434", "--port-owner", "8080"],
-                                  ["--port-owner", "11434", "--port", "8080"]])
+                                  ["--port-owner", "11434", "--port-owner=8080"]])
 def test_cli_refuses_a_repeated_port_owner(monkeypatch, capsys, argv):
     monkeypatch.setattr(portowner, "run", lambda value: pytest.fail("must not run"))
     with pytest.raises(SystemExit) as raised:

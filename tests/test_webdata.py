@@ -1404,7 +1404,7 @@ def test_leading_zeros_and_repeated_options_exit_2_and_touch_nothing(data, capsy
     assert names(mounted / "web") == ["applet-1-g0"]
 
 
-@pytest.mark.parametrize("argv", [["--json", "--json"], ["--catalog", "--catalog"], ["--detect", "--det"],
+@pytest.mark.parametrize("argv", [["--json", "--json"], ["--catalog", "--catalog"], ["--detect", "--detect"],
                                   ["--vault", "status", "--vault", "lock"], ["--prompts", "list", "--prompts", "list"],
                                   ["--usage-history", "read", "--applet", "1", "--applet", "1"],
                                   ["--port-owner", "8080", "--port-owner", "9090"]])
