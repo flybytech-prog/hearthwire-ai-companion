@@ -1,3 +1,12 @@
+hearthwire (1.1.0-1) resolute; urgency=medium
+
+  * Every chat site has its own profile; sign in once more after upgrading.
+  * One site table in Settings -> Chat: add, edit, remove and reorder sites.
+  * Sites on this computer and the home network.
+  * Backups from the panel menu, optional automatic backup, signed backups.
+
+ -- flybytech-prog <104578369+flybytech-prog@users.noreply.github.com>  Mon, 16 Nov 2026 12:00:00 +0000
+
 hearthwire (1.0.1-1) resolute; urgency=medium
 
   * Warn when an older script install shadows the package.

@@ -6,7 +6,7 @@
 %global plugin io.github.flybytechprog.hearthwire
 
 Name:           hearthwire
-Version:        1.0.1
+Version:        1.1.0
 Release:        1%{?dist}
 Summary:        AI companion for KDE Plasma 6 with AI usage meters and AI chats
 
@@ -105,6 +105,12 @@ install -Dpm 0644 assets/hearthwire.notifyrc %{buildroot}%{_datadir}/knotificati
 %{_datadir}/knotifications6/hearthwire.notifyrc
 
 %changelog
+* Mon Nov 16 2026 flybytech-prog <104578369+flybytech-prog@users.noreply.github.com> - 1.1.0-1
+- Every chat site has its own profile; sign in once more after upgrading
+- One site table in Settings -> Chat: add, edit, remove and reorder sites
+- Sites on this computer and the home network
+- Backups from the panel menu, optional automatic backup, signed backups
+
 * Wed Nov 11 2026 flybytech-prog <104578369+flybytech-prog@users.noreply.github.com> - 1.0.1-1
 - Warn when an older script install shadows the package
 - Install hints per distro; install.sh fixes beside the package

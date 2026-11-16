@@ -14,7 +14,7 @@
         "Id": "io.github.flybytechprog.hearthwire",
         "License": "MIT",
         "Name": "Hearthwire",
-        "Version": "1.0.1",
+        "Version": "1.1.0",
         "Website": "https://github.com/flybytech-prog/hearthwire-ai-companion"
     },
     "X-Plasma-API-Minimum-Version": "6.0",
