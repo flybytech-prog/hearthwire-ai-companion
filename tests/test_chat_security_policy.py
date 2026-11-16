@@ -4881,7 +4881,8 @@ BACKUP_FAILURE_TEXT_BODY = (
     'case "bad-data": return i18n("These settings couldn\'t be backed up.") '
     'case "symlink": case "not-owned": case "unsafe-mode": '
     'return i18n("The backup folder isn\'t safe to use. Check its owner and permissions.") '
-    'case "key-unusable": return i18n("The backup key can\'t be used. See Settings → General → Backup.") '
+    'case "key-unusable": return i18n("The backup key can\'t be used. Delete the file backup-key in Hearthwire\'s '
+    'data folder; the next backup makes a new one.") '
     'case "legacy-data": return i18n("Run the installer again with --restart-plasma first.") '
     'case "applet-not-found": case "settings-unreadable": '
     'return i18n("This widget\'s applied settings couldn\'t be read.") '
@@ -4957,7 +4958,9 @@ def test_proof_notification_text_rule_catches(snippet):
     assert _notification_text_problems(code)
 
 
-BACKUP_NOTIFICATION_TEXT = 'text: outcome === "saved" ? i18n("The earlier backup was replaced.") : root.backupFailureText(failure)'
+# Round 2 (L-2): main.qml can't know whether a backup existed, so the
+# neutral, always-true sentence (accepted by the manager).
+BACKUP_NOTIFICATION_TEXT = 'text: outcome === "saved" ? i18n("Any earlier backup was replaced.") : root.backupFailureText(failure)'
 BACKUP_TEXT_MUTATIONS = {
     "text uses the reply's code": (BACKUP_NOTIFICATION_TEXT, BACKUP_NOTIFICATION_TEXT.replace(
         "root.backupFailureText(failure)", "failure")),
@@ -9160,8 +9163,9 @@ def _backup_command_problems(sources):
                               "main.qml")
     if len(_hits(r"\bSettingsBackup\s*\.\s*parseReply\s*\(", main)) != 1:
         problems.append("main.qml reads one backup reply, an export's (SettingsBackup.parseReply once)")
-    if len(_hits(r"\bfinishBackupExport\s*\(", main)) != 3:
-        problems.append("finishBackupExport runs only from backupSource and runBackupExport's no-applet path")
+    if len(_hits(r"\bfinishBackupExport\s*\(", main)) != 4:
+        problems.append("finishBackupExport runs only from backupSource, runBackupExport's no-applet path "
+                        "and the stale gate (giveUpBackupExport)")
     for where, code in (("configGeneral.qml", general), ("main.qml", main)):
         for _, body in _blocks(code, r"\bPlasma5Support\s*\.\s*DataSource\s*\{"):
             if re.search(r"(?:^|[\n;])\s*id\s*:\s*backupSource\b", _top_level_raw(body)) and _hits(r"\bstderr\b", body):
@@ -9337,9 +9341,10 @@ BACKUP_ORIGINS_PIN = 'var ORIGINS = ["this-computer", "other", "unsigned"]'
 # Task 007: the identity codes, word for word (plan §4.2).
 BACKUP_IDENTITY_TEXTS = {
     "damaged": 'i18n("The backup file is damaged: its checksum doesn\'t match, so it wasn\'t used. Nothing was changed.")',
-    "key-unusable": 'i18n("The backup key (~/.local/share/hearthwire/backup-key) isn\'t safe to use, so nothing was '
-                    "exported. Delete it to make a new one; backups made with the old key then show a warning on "
-                    'import.")',
+    # Round 2 (L-2): what to do, naming the file without a path.
+    "key-unusable": 'i18n("The backup key isn\'t safe to use, so nothing was exported. Delete the file backup-key in '
+                    "Hearthwire's data folder: the next export makes a new one, and older backups then show as not "
+                    'made by this Hearthwire.")',
 }
 BACKUP_LABELS = {
     "backupStatus": "page.backupStatusText()",
@@ -12210,18 +12215,34 @@ def test_proof_apply_backup_never_assigns_the_backup_keys():
 # the first fingerprint is the last start-up step; the fingerprint stays in
 # memory. Every export from main.qml is the menu's or autoBackup's.
 
+# Round 2 (H-1): busy, or a menu Restore still in its window, re-arms; the
+# restore must never overwrite the file it reads.
 AUTO_BACKUP_BODY = (
     "{ if (Plasmoid.configuration.backupAutoExport !== true) return "
-    'if (root.backupOp !== "") { autoBackupTimer.restart() return } '
+    'if (root.backupOp !== "" || SettingsBackup.restoreRequested(Plasmoid.configuration.backupRestoreAt, Date.now())) '
+    "{ autoBackupTimer.restart() return } "
     "var fp = SettingsBackup.fingerprint(Plasmoid.configuration) "
     "if (fp === root.backupFingerprint && !root.backupAutoForce) return "
     'root.backupAutoForce = false root.runBackupExport("auto", fp) }'
 )
+# Round 2 (H-1): Plasma re-emits every key, changed or not, on each Apply and
+# after the widget's own writes. Only a real off -> on change of the switch
+# forces an export; anything else only restarts the timer, and autoBackup's
+# fingerprint check then finds nothing to do.
 AUTO_BACKUP_HANDLER_BODY = (
-    '{ if (key === "backupAutoExport") { if (value === true) { root.backupAutoForce = true '
-    "autoBackupTimer.restart() } else { autoBackupTimer.stop() } } "
-    "else if (Plasmoid.configuration.backupAutoExport === true && SettingsBackup.isBackupKey(key)) "
-    "{ autoBackupTimer.restart() } }"
+    '{ if (key === "backupAutoExport") { var on = value === true '
+    "if (on && !root.backupAutoOn) { root.backupAutoForce = true autoBackupTimer.restart() } "
+    "else if (!on) { root.backupAutoForce = false autoBackupTimer.stop() } root.backupAutoOn = on } "
+    "else if (root.backupAutoOn && SettingsBackup.isBackupKey(key)) { autoBackupTimer.restart() } }"
+)
+AUTO_ON_BASELINE = "root.backupAutoOn = Plasmoid.configuration.backupAutoExport === true"
+# Round 2 (INFO-3): an export that never answers is given up; its late reply
+# no longer matches backupSourceName.
+BACKUP_STALE_TIMER = ("{ id: backupStaleTimer interval: root.backupStaleWait repeat: false "
+                      "onTriggered: root.giveUpBackupExport() }")
+GIVE_UP_BACKUP_EXPORT_BODY = (
+    '{ if (root.backupOp === "") return backupSource.disconnectSource(root.backupSourceName) '
+    "root.finishBackupExport({ok: false, error: SettingsBackup.BAD_REPLY}) }"
 )
 AUTO_BACKUP_TIMER = "{ id: autoBackupTimer interval: root.backupAutoWait repeat: false onTriggered: root.autoBackup() }"
 RUN_BACKUP_EXPORT_BODY = (
@@ -12229,10 +12250,10 @@ RUN_BACKUP_EXPORT_BODY = (
     f'{MAIN_BACKUP_COMMAND} if (command === "") {{ root.backupTrigger = trigger '
     'root.finishBackupExport({ok: false, error: "no-applet"}) return } '
     'root.backupOp = "export" root.backupTrigger = trigger root.backupPendingFingerprint = fp '
-    "root.backupSourceName = command backupSource.connectSource(command) }"
+    "root.backupSourceName = command backupStaleTimer.restart() backupSource.connectSource(command) }"
 )
 FINISH_BACKUP_EXPORT_BODY = (
-    "{ var trigger = root.backupTrigger var fp = root.backupPendingFingerprint "
+    "{ var trigger = root.backupTrigger var fp = root.backupPendingFingerprint backupStaleTimer.stop() "
     'root.backupOp = "" root.backupSourceName = "" root.backupTrigger = "" root.backupPendingFingerprint = "" '
     'if (reply.ok) { root.backupFingerprint = fp root.backupAutoFailed = "" '
     'if (trigger === "menu") root.notifyBackup("saved", "") return } '
@@ -12255,7 +12276,8 @@ FINGERPRINT_MENTIONS = 8
 def _auto_backup_problems(main, library):
     problems = []
     for name, expected in (("autoBackup", AUTO_BACKUP_BODY), ("runBackupExport", RUN_BACKUP_EXPORT_BODY),
-                           ("finishBackupExport", FINISH_BACKUP_EXPORT_BODY)):
+                           ("finishBackupExport", FINISH_BACKUP_EXPORT_BODY),
+                           ("giveUpBackupExport", GIVE_UP_BACKUP_EXPORT_BODY)):
         body = _function_body(main, name)
         if body is None or _squashed(body) != expected:
             problems.append(f"main.qml {name} must be exactly `{expected}`")
@@ -12264,25 +12286,35 @@ def _auto_backup_problems(main, library):
     handlers = [inner for body in connections for _, inner in _blocks(body, VALUE_CHANGED_HANDLER)]
     if len(handlers) != 1 or _squashed(handlers[0]) != AUTO_BACKUP_HANDLER_BODY:
         problems.append(f"main.qml has one configuration onValueChanged, exactly `{AUTO_BACKUP_HANDLER_BODY}`")
-    timers = [body for _, body in _blocks(main, r"(?<![\w.])Timer\s*\{")
-              if re.search(r"(?:^|[\n;])\s*id\s*:\s*autoBackupTimer\s*(?=;|\n|$)", _top_level_raw(body))]
-    if len(timers) != 1 or _squashed(timers[0]) != AUTO_BACKUP_TIMER:
-        problems.append(f"autoBackupTimer must be exactly `Timer {AUTO_BACKUP_TIMER}`")
+    for timer, expected in (("autoBackupTimer", AUTO_BACKUP_TIMER), ("backupStaleTimer", BACKUP_STALE_TIMER)):
+        timers = [body for _, body in _blocks(main, r"(?<![\w.])Timer\s*\{")
+                  if re.search(rf"(?:^|[\n;])\s*id\s*:\s*{timer}\s*(?=;|\n|$)", _top_level_raw(body))]
+        if len(timers) != 1 or _squashed(timers[0]) != expected:
+            problems.append(f"{timer} must be exactly `Timer {expected}`")
     problems += _pin_problems(main, ("property int backupAutoWait: 3000", "property bool backupAutoForce: false",
-                                     MENU_BACKUP_ACTION), "main.qml")
+                                     "property bool backupAutoOn: false",
+                                     "property int backupStaleWait: RefreshGate.STALE_MS", MENU_BACKUP_ACTION),
+                              "main.qml")
+    stale = re.findall(r"\bbackupStaleTimer\s*\.\s*(\w+)", main)
+    if sorted(stale) != ["restart", "stop"]:
+        problems.append(f"backupStaleTimer starts with each export and stops when it ends, found {sorted(stale)}")
     uses = re.findall(r"\bautoBackupTimer\s*\.\s*(\w+)", main)
     if sorted(uses) != ["restart", "restart", "restart", "stop"]:
         problems.append(f"autoBackupTimer is only restarted (3 places) and stopped (1), found {sorted(uses)}")
     counts = {r"\bautoBackupTimer\b": 5, r"\bautoBackup\b": 2, r"\brunBackupExport\b": 3,
-              r"\bbackupAutoWait\b": 2, r"\bbackupAutoForce\b": 4,
+              r"\bbackupAutoWait\b": 2, r"\bbackupAutoForce\b": 5, r"\bbackupAutoOn\b": 5,
+              r"\bbackupStaleWait\b": 2, r"\bbackupStaleTimer\b": 3, r"\bgiveUpBackupExport\b": 2,
+              # Only to hold the automatic export back (manager, round 2).
+              r"\brestoreRequested\b": 1,
               r"\bbackup(?:Pending)?Fingerprint\b": FINGERPRINT_MENTIONS, r"\bfingerprint\s*\(": 3}
     for pattern, count in counts.items():
         found = len(_hits(pattern, main))
         if found != count:
             problems.append(f"main.qml: {pattern} {count} time(s) expected, found {found}")
     starts = [body for _, body in _blocks(main, r"\bComponent\s*\.\s*onCompleted\s*:\s*\{") if FINGERPRINT_BASELINE in body]
-    if len(starts) != 1 or not _squashed(starts[0]).endswith(f"{FINGERPRINT_BASELINE} }}"):
-        problems.append(f"Component.onCompleted must end with `{FINGERPRINT_BASELINE}`, after every start-up write")
+    if len(starts) != 1 or not _squashed(starts[0]).endswith(f"{AUTO_ON_BASELINE} {FINGERPRINT_BASELINE} }}"):
+        problems.append(f"Component.onCompleted must end with `{AUTO_ON_BASELINE}` and `{FINGERPRINT_BASELINE}`, "
+                        "after every start-up write")
     elif not all(word in starts[0] for word in ("root.migrateUsageMetrics()",
                                                  "Plasmoid.configuration.refreshInterval = root.refreshInterval")):
         problems.append("the fingerprint baseline belongs to the start-up that migrates and normalizes")
@@ -12310,21 +12342,59 @@ AUTO_BACKUP_MUTATIONS = {
     "switch check dropped": ("        if (Plasmoid.configuration.backupAutoExport !== true)\n            return\n", ""),
     "fingerprint compare dropped": ("        if (fp === root.backupFingerprint && !root.backupAutoForce)\n            return\n", ""),
     "force ignored": ("fp === root.backupFingerprint && !root.backupAutoForce", "fp === root.backupFingerprint"),
-    "busy export runs anyway": ('        if (root.backupOp !== "") {\n            autoBackupTimer.restart()\n            return\n        }\n', ""),
+    "busy export runs anyway": ('        if (root.backupOp !== ""\n                || SettingsBackup.restoreRequested(',
+                                '        if (SettingsBackup.restoreRequested('),
+    "busy and restore checks dropped": (
+        '        if (root.backupOp !== ""\n                || SettingsBackup.restoreRequested(Plasmoid.configuration.backupRestoreAt, Date.now())) {\n'
+        "            autoBackupTimer.restart()\n            return\n        }\n", ""),
     "baseline before the migration": (
         "        // Read before the first-run write below.\n",
         f"        {FINGERPRINT_BASELINE}\n        // Read before the first-run write below.\n"),
-    "baseline moved first": (f"        // Last, after every start-up write above: starting Plasma exports nothing.\n        {FINGERPRINT_BASELINE}\n",
-                             ""),
+    "baseline moved first": (f"        {FINGERPRINT_BASELINE}\n", ""),
     "fingerprint logged": ("        root.backupAutoForce = false\n",
                            "        console.log(root.backupFingerprint)\n        root.backupAutoForce = false\n"),
     "fingerprint stored": ("        root.backupAutoForce = false\n",
                            "        Plasmoid.configuration.chatSiteOrder = root.backupFingerprint\n        root.backupAutoForce = false\n"),
     "fingerprint in a notification": ('root.notifyBackup("saved", "")', 'root.notifyBackup("saved", root.backupFingerprint)'),
-    "restart on any key": ("Plasmoid.configuration.backupAutoExport === true && SettingsBackup.isBackupKey(key)",
-                           "Plasmoid.configuration.backupAutoExport === true"),
-    "restart with the switch off": ("Plasmoid.configuration.backupAutoExport === true && SettingsBackup.isBackupKey(key)",
-                                    "SettingsBackup.isBackupKey(key)"),
+    "restart on any key": ("root.backupAutoOn && SettingsBackup.isBackupKey(key)", "root.backupAutoOn"),
+    "restart with the switch off": ("root.backupAutoOn && SettingsBackup.isBackupKey(key)", "SettingsBackup.isBackupKey(key)"),
+    # Round 2 (H-1): only a real off -> on change forces; an unchanged re-emit can't.
+    "off-to-on check removed": ("                if (on && !root.backupAutoOn) {\n", "                if (on) {\n"),
+    "re-emit forces: switch state never kept": ("                root.backupAutoOn = on\n", ""),
+    "re-emit forces: no start-up switch state": (f"        {AUTO_ON_BASELINE}\n", ""),
+    "re-emit forces: start-up state after the baseline": (
+        f"        {AUTO_ON_BASELINE}\n        {FINGERPRINT_BASELINE}\n",
+        f"        {FINGERPRINT_BASELINE}\n        {AUTO_ON_BASELINE}\n"),
+    "re-emit forces: any backed-up key forces": (
+        "            } else if (root.backupAutoOn && SettingsBackup.isBackupKey(key)) {\n                autoBackupTimer.restart()\n",
+        "            } else if (root.backupAutoOn && SettingsBackup.isBackupKey(key)) {\n                root.backupAutoForce = true\n"
+        "                autoBackupTimer.restart()\n"),
+    "re-emit forces: off keeps the force": ("                    root.backupAutoForce = false\n                    autoBackupTimer.stop()\n",
+                                            "                    autoBackupTimer.stop()\n"),
+    "re-emit forces: switch read from the config": ("var on = value === true", "var on = Plasmoid.configuration.backupAutoExport === true"),
+    # Round 2: the restore hold-back.
+    "restore hold-back dropped": ('        if (root.backupOp !== ""\n                || SettingsBackup.restoreRequested(Plasmoid.configuration.backupRestoreAt, Date.now())) {\n',
+                                  '        if (root.backupOp !== "") {\n'),
+    "restore hold-back never fresh": ("SettingsBackup.restoreRequested(Plasmoid.configuration.backupRestoreAt, Date.now())",
+                                      "SettingsBackup.restoreRequested(Plasmoid.configuration.backupRestoreAt, 0)"),
+    "restore hold-back exports anyway": ("            autoBackupTimer.restart()\n            return\n        }\n        var fp",
+                                         "            autoBackupTimer.restart()\n        }\n        var fp"),
+    "hold-back starts the restore": ("            autoBackupTimer.restart()\n            return\n        }\n        var fp",
+                                     "            root.restoreSettings()\n            return\n        }\n        var fp"),
+    "a second restore read": ("    function chatNext() {",
+                              "    function x() { if (SettingsBackup.restoreRequested(Plasmoid.configuration.backupRestoreAt, Date.now())) "
+                              "Plasmoid.internalAction(\"configure\").trigger() }\n    function chatNext() {"),
+    # Round 2 (INFO-3): the stale gate.
+    "stale gate not started": ("        backupStaleTimer.restart()\n", ""),
+    "stale gate never stops": ("        var fp = root.backupPendingFingerprint\n        backupStaleTimer.stop()\n",
+                               "        var fp = root.backupPendingFingerprint\n"),
+    "stale timer removed": ("        onTriggered: root.giveUpBackupExport()\n", "        onTriggered: {}\n"),
+    "stale gate repeats": ("        interval: root.backupStaleWait\n        repeat: false\n", "        interval: root.backupStaleWait\n        repeat: true\n"),
+    "stale wait shortened": ("property int backupStaleWait: RefreshGate.STALE_MS", "property int backupStaleWait: 1000"),
+    "late reply still read": ("        backupSource.disconnectSource(root.backupSourceName)\n        root.finishBackupExport({ok: false",
+                              "        root.finishBackupExport({ok: false"),
+    "give-up counts as a success": ("root.finishBackupExport({ok: false, error: SettingsBackup.BAD_REPLY})",
+                                    "root.finishBackupExport({ok: true})"),
     "restart elsewhere": ("    onConfiguredUserSitesChanged: root.chatSyncUserSites()\n",
                           "    onConfiguredUserSitesChanged: { root.chatSyncUserSites(); autoBackupTimer.restart() }\n"),
     "timer started elsewhere": ("    onConfiguredUserSitesChanged: root.chatSyncUserSites()\n",
@@ -12376,14 +12446,19 @@ RESTORE_REQUESTED_BODY = (
     '{ if (typeof text !== "string" || !/^[0-9]{1,15}$/.test(text) || typeof now !== "number" || !isFinite(now)) '
     "return false var age = now - Number(text) return age >= 0 && age <= RESTORE_WINDOW_MS }"
 )
-START_RESTORE_BODY = "{ page.restorePending = false page.scrollToBackup() page.requestImport() }"
+START_RESTORE_BODY = ("{ page.restorePending = false page.restoreScroll = true page.scrollToBackup() "
+                      "page.requestImport() }")
 REQUEST_IMPORT_BODY = (
     '{ page.backupMessage = "" page.confirmingImport = false page.backupPlan = null '
     'page.backupAddressChanges = [] page.backupOrigin = "" page.runBackup("import") }'
 )
+# Round 2 (M-1): with the confirmation shown, far enough that the plan line
+# under the origin line is in view too. It only moves the view.
 SCROLL_TO_BACKUP_BODY = (
     "{ var flickable = page.flickable if (!flickable || !flickable.contentItem) return "
     "var top = backupSection.mapToItem(flickable.contentItem, 0, 0).y "
+    "if (page.confirmingImport) { var end = backupPlanLabel.mapToItem(flickable.contentItem, 0, backupPlanLabel.height).y "
+    "top = Math.max(top, end - flickable.height) } "
     "flickable.contentY = Math.max(0, Math.min(top, flickable.contentHeight - flickable.height)) }"
 )
 GENERAL_RESTORE_PINS = (
@@ -12392,14 +12467,40 @@ GENERAL_RESTORE_PINS = (
     'else if (key === "backupRestoreAt") { page.cfg_backupRestoreAt = value '
     "if (SettingsBackup.restoreRequested(value, Date.now())) { "
     'if (page.backupOp === "") page.startRestore() else page.restorePending = true } }',
-    'if (op === "import" && page.restorePending) { page.restorePending = false page.scrollToBackup() }',
+    'if (op === "import" && page.restorePending) { page.restorePending = false page.restoreScroll = true '
+    "page.scrollToBackup() }",
+    # Round 2: a pending Restore wins over an Export pressed meanwhile (L-1),
+    # and a Restore's confirmation is scrolled into view again (M-1).
+    "if (page.restorePending) { page.exportPending = false page.startRestore() } "
+    "else if (page.exportPending) { page.continueExport() }",
+    'var restoring = op === "import" && page.restoreScroll',
+    'if (op === "import") page.restoreScroll = false',
+    "if (restoring) { page.restoreFollow = true Qt.callLater(page.scrollToBackup) }",
+    "onConfirmingImportChanged: { if (!page.confirmingImport) page.restoreFollow = false }",
+)
+# Round 2 (L-1): Export reads the status again before its replace check.
+REQUEST_EXPORT_BODY = ('{ page.backupMessage = "" page.confirmingExport = false page.exportPending = true '
+                       'page.runBackup("status") if (page.backupOp === "") page.continueExport() }')
+CONTINUE_EXPORT_BODY = ('{ page.exportPending = false if (page.backupState === "absent") page.exportBackup() '
+                        "else page.confirmingExport = true }")
+RESTORE_FOLLOW_CONNECTIONS = ("{ target: page.flickable function onContentHeightChanged() { if (page.restoreFollow) "
+                              "page.scrollToBackup() } function onMovementStarted() { page.restoreFollow = false } }")
+RESTORE_SCROLL_FORMS = (
+    r"property\s+bool\s+restoreScroll\s*:\s*false\s*$",
+    r"page\s*\.\s*restoreScroll\s*=\s*(?:true|false)\s*$",
+    r'var\s+restoring\s*=\s*op\s*===\s*"import"\s*&&\s*page\s*\.\s*restoreScroll\s*$',
+)
+RESTORE_FOLLOW_FORMS = (
+    r"property\s+bool\s+restoreFollow\s*:\s*false\s*$",
+    r"page\s*\.\s*restoreFollow\s*=\s*(?:true|false)\s*$",
+    r"\bif\s*\(\s*page\s*\.\s*restoreFollow\s*\)\s*$",
 )
 RESTORE_PENDING_FORMS = (
     r"property\s+bool\s+restorePending\s*:\s*false\s*$",
     r"page\s*\.\s*restorePending\s*=\s*false\s*$",
     r"page\s*\.\s*restorePending\s*=\s*true\s*$",
     r"page\s*\.\s*restorePending\s*=\s*SettingsBackup\s*\.\s*restoreRequested\s*\(",
-    r"\bif\s*\(\s*page\s*\.\s*restorePending\s*\)\s*$",
+    r"\bif\s*\(\s*page\s*\.\s*restorePending\s*\)\s*\{?\s*$",
     r'\bif\s*\(\s*page\s*\.\s*restorePending\s*&&\s*page\s*\.\s*backupOp\s*===\s*""\s*\)\s*$',
     r'\bif\s*\(\s*op\s*===\s*"import"\s*&&\s*page\s*\.\s*restorePending\s*\)\s*\{\s*$',
 )
@@ -12415,7 +12516,8 @@ def _restore_problems(sources):
     general = sources.get(_rel(CONFIG_GENERAL), "")
     problems += _pin_problems(general, GENERAL_RESTORE_PINS, "configGeneral.qml")
     for name, expected in (("startRestore", START_RESTORE_BODY), ("requestImport", REQUEST_IMPORT_BODY),
-                           ("scrollToBackup", SCROLL_TO_BACKUP_BODY)):
+                           ("scrollToBackup", SCROLL_TO_BACKUP_BODY), ("requestExport", REQUEST_EXPORT_BODY),
+                           ("continueExport", CONTINUE_EXPORT_BODY)):
         found = _function_body(general, name)
         if found is None or _squashed(found) != expected:
             problems.append(f"configGeneral.qml {name} must be exactly `{expected}`")
@@ -12430,10 +12532,26 @@ def _restore_problems(sources):
         if len(_hits(pattern, general)) != count:
             problems.append(f"configGeneral.qml: {pattern} {count} time(s) expected, found {len(_hits(pattern, general))}")
     problems += _unknown_mentions(general, "restorePending", RESTORE_PENDING_FORMS)
-    for name, code in sources.items():
-        if _base(name) not in (SETTINGS_BACKUP_JS.name, CONFIG_GENERAL.name) and _hits(r"\brestoreRequested\b|\bstartRestore\b", code):
-            problems.append(f"{name}: only configGeneral.qml accepts a Restore request")
+    problems += _unknown_mentions(general, "restoreScroll", RESTORE_SCROLL_FORMS)
+    problems += _unknown_mentions(general, "restoreFollow", RESTORE_FOLLOW_FORMS)
+    follow = [body for _, body in _blocks(general, r"\bConnections\s*\{")
+              if re.search(r"(?:^|[\n;])\s*target\s*:\s*page\s*\.\s*flickable\s*(?=;|\n|$)", _top_level_raw(body))]
+    if len(follow) != 1 or _squashed(follow[0]) != RESTORE_FOLLOW_CONNECTIONS:
+        problems.append(f"the flickable Connections must be exactly `{RESTORE_FOLLOW_CONNECTIONS}` (scrolling only)")
     main = sources.get(_rel(MAIN_QML), "")
+    for name, code in sources.items():
+        base = _base(name)
+        if base in (SETTINGS_BACKUP_JS.name, CONFIG_GENERAL.name):
+            continue
+        # Manager, round 2: main.qml reads the request only to hold the
+        # automatic export back (autoBackup, pinned by rule 5); it never
+        # accepts it, so it never starts an import.
+        reads = len(_hits(r"\brestoreRequested\b", code))
+        held = base == MAIN_QML.name and reads == 1 and _squashed(_function_body(code, "autoBackup") or "") == AUTO_BACKUP_BODY
+        if (reads and not held) or _hits(r"\bstartRestore\b|\brequestImport\b|\brestorePending\b", code):
+            problems.append(f"{name}: only configGeneral.qml accepts a Restore request")
+    if len(_hits(r'\binternalAction\s*\(\s*"configure"\s*\)', main)) != 2:
+        problems.append("main.qml opens Settings only from restoreSettings and the first-run timer")
     problems += _pin_problems(main, ("onTriggered: root.restoreSettings()",), "main.qml")
     if len(_hits(r"\brestoreSettings\b", main)) != 2:
         problems.append("main.qml restoreSettings runs only from the menu's Restore settings… action")
@@ -12469,6 +12587,30 @@ RESTORE_MUTATIONS = [
      '            else if (key === "backupRestoreAt") {\n                page.cfg_backupRestoreAt = value\n'
      '                if (SettingsBackup.restoreRequested(value, Date.now())) page.applyBackup()\n            }\n'),
     (MAIN_QML, "    function chatNext() {", "    function x() { root.restoreSettings() }\n    function chatNext() {"),
+    # Round 2: main.qml reads the request only to hold back; it never starts an import from there.
+    (MAIN_QML, "            autoBackupTimer.restart()\n            return\n        }\n        var fp",
+     '            Plasmoid.internalAction("configure").trigger()\n            return\n        }\n        var fp'),
+    (MAIN_QML, "    function chatNext() {",
+     "    function x() { return SettingsBackup.restoreRequested(Plasmoid.configuration.backupRestoreAt, Date.now()) }\n"
+     "    function chatNext() {"),
+    (MAIN_QML, "    function chatNext() {", "    property bool restorePending: false\n    function chatNext() {"),
+    (CONFIG_USAGE, "    function setPanelRing(value) {\n",
+     "    function g() { return SettingsBackup.restoreRequested(page.cfg_backupRestoreAt, Date.now()) }\n"
+     "    function setPanelRing(value) {\n"),
+    # Round 2 (M-1, L-1): the scroll helpers only scroll; Export still asks first.
+    (CONFIG_GENERAL, "            if (page.restoreFollow)\n                page.scrollToBackup()\n",
+     "            if (page.restoreFollow)\n                page.applyBackup()\n"),
+    (CONFIG_GENERAL, "            Qt.callLater(page.scrollToBackup)\n", "            Qt.callLater(page.applyBackup)\n"),
+    (CONFIG_GENERAL, "            top = Math.max(top, end - flickable.height)\n",
+     "            top = Math.max(top, end - flickable.height)\n            page.cfg_backupRestoreAt = \"\"\n"),
+    (CONFIG_GENERAL, "            page.exportPending = false\n                page.startRestore()\n",
+     "                page.startRestore()\n"),
+    (CONFIG_GENERAL, '        if (page.backupState === "absent")\n            page.exportBackup()\n        else\n            page.confirmingExport = true\n',
+     "        page.exportBackup()\n"),
+    (CONFIG_GENERAL, '        page.runBackup("status")\n        // No step could start (no usable id): ask as before.\n',
+     "        // No step could start (no usable id): ask as before.\n"),
+    (CONFIG_GENERAL, "        if (!page.confirmingImport)\n            page.restoreFollow = false\n",
+     "        if (!page.confirmingImport)\n            page.requestImport()\n"),
 ]
 
 
@@ -12522,7 +12664,8 @@ def _origin_problems(sources):
         problems.append("configGeneral.qml reads origin once, into backupOrigin")
     finish = _squashed(_function_body(general, "finishBackup") or "")
     if not finish.endswith("page.backupExportedAt = reply.exportedAt page.backupOrigin = reply.origin "
-                           "page.confirmingImport = true }"):
+                           "page.confirmingImport = true "
+                           "if (restoring) { page.restoreFollow = true Qt.callLater(page.scrollToBackup) } }"):
         problems.append("the origin is set only after importPlan and addressChanges, just before the confirmation")
     for name, code in sources.items():
         for start, end in _call_spans(code, r"\b(?:importPlan|addressChanges)\s*\("):
@@ -12591,11 +12734,22 @@ def _widget_identity_problems(sources):
     mentions = [(name, line) for name, code in sources.items()
                 for line in _hits(r"backup[-_]key|\bbackupKey\b|\bkeyFile\b|key[-_]file", code)]
     general = sources.get(_rel(CONFIG_GENERAL), "")
-    text = _function_body(general, "backupText") or ""
-    if mentions != [(_rel(CONFIG_GENERAL), _line_of(general, general.find("~/.local/share/hearthwire/backup-key")))] \
-            or _case_returns(text, "key-unusable") != BACKUP_IDENTITY_TEXTS["key-unusable"]:
-        problems.append(f"backup-key is named only in backupText's fixed key-unusable text, found {mentions}")
+    main = sources.get(_rel(MAIN_QML), "")
+    allowed = []
+    for name, code, function, shown in ((_rel(CONFIG_GENERAL), general, "backupText", BACKUP_IDENTITY_TEXTS["key-unusable"]),
+                                        (_rel(MAIN_QML), main, "backupFailureText", MAIN_KEY_UNUSABLE_TEXT)):
+        body = _function_body(code, function) or ""
+        if _case_returns(body, "key-unusable") != shown:
+            problems.append(f"{name} {function} must map key-unusable to exactly {shown}")
+        allowed.append((name, _line_of(code, code.find(shown))))
+    if sorted(mentions) != sorted(allowed):
+        problems.append(f"backup-key is named only in the two fixed key-unusable texts {sorted(allowed)}, found {mentions}")
     return problems
+
+
+# Round 2 (L-2): the menu's key-unusable text names the file, without a path.
+MAIN_KEY_UNUSABLE_TEXT = ('i18n("The backup key can\'t be used. Delete the file backup-key in Hearthwire\'s data folder; '
+                          'the next backup makes a new one.")')
 
 
 def test_widget_never_hashes_or_names_the_key_file():
@@ -12613,6 +12767,8 @@ def test_widget_never_hashes_or_names_the_key_file():
     (MAIN_QML, '    readonly property string keyPath: "~/.local/share/hearthwire/backup-key"\n'),
     (CONFIG_USAGE, '    property string keyFile: ""\n'),
     (CONFIG_GENERAL, '    property string shownKey: i18n("Key: %1", "backup-key")\n'),
+    (SETTINGS_BACKUP_JS, 'var KEY_NAME = "backup-key"\n'),
+    (MAIN_QML, '    readonly property string keyCommand: "rm ~/.local/share/hearthwire/backup-key"\n'),
 ])
 def test_proof_widget_identity_rule_catches(path, snippet):
     sources = _all_text()
@@ -12620,6 +12776,23 @@ def test_proof_widget_identity_rule_catches(path, snippet):
     sources[_rel(path)] = _appended(path, snippet) if path.suffix == ".qml" else _strip_comments(raw + "\n" + snippet)
     assert _widget_identity_problems(sources)
 
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    # Round 2: the file name only, never a path, a command or another text.
+    (MAIN_QML, "Delete the file backup-key in Hearthwire's data folder; the next backup",
+     "Delete ~/.local/share/hearthwire/backup-key; the next backup"),
+    (CONFIG_GENERAL, "Delete the file backup-key in Hearthwire's data folder: the next export",
+     "Delete ~/.local/share/hearthwire/backup-key: the next export"),
+    (MAIN_QML, 'return i18n("Something went wrong. Nothing was changed.")',
+     'return i18n("Something went wrong. Check backup-key.")'),
+    (CONFIG_GENERAL, "Delete the file backup-key in Hearthwire's data folder: the next export",
+     "Delete the key file in Hearthwire's data folder: the next export"),
+])
+def test_proof_key_file_name_rule_catches(path, old, new):
+    sources = _all_text()
+    sources[_rel(path)] = _mutated(path, old, new)
+    assert _widget_identity_problems(sources)
 
 # Helper side: the key never leaves settingsbackup.py. No reply, error or
 # output carries it; nothing there starts a process (so no argv) or touches
@@ -12799,3 +12972,127 @@ def test_proof_helper_key_rule_catches(path, old, new):
     source = _python_mutated(path, old, new) if path == SETTINGS_BACKUP_PY else SETTINGS_BACKUP_PY.read_text(encoding="utf-8")
     cli = _python_mutated(path, old, new) if path == CLI_PY else CLI_PY.read_text(encoding="utf-8")
     assert _helper_key_problems(source, cli)
+
+
+# Round 2 (LOW-1, INFO-2): the folder locks. Export takes the backup folder,
+# then the key folder, both exclusive, before any cleanup or key read; import
+# takes only the key folder, shared; status takes none. flock is used only by
+# _lock_folder, never blocking: polled, then os-error.
+
+LOCK_FOLDER_PINS = (
+    "operation = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB",
+    "fcntl.flock(directory, operation)",
+    "if time.monotonic() >= deadline:\n        raise HelperError('os-error')",
+)
+# (function, the calls in source order that must appear in it, in this order)
+LOCK_ORDERS = {
+    "export": ("_backup_directory", "_lock_folder", "_signing_key", "_clear_stale_temporaries", "_write_file"),
+    "_signing_key": ("_key_directory", "_lock_folder", "_clear_stale_key_temporaries", "_read_key", "_create_key"),
+}
+LOCK_CALLS = {
+    "export": ("_lock_folder(directory, exclusive=True)", "_signing_key(environ, create=True)"),
+    "_signing_key": ("_lock_folder(directory, exclusive=create)",),
+    "_import_key": ("_signing_key(environ, create=False)",),
+}
+
+
+def _calls_in_order(function):
+    calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+    return sorted(calls, key=lambda node: (node.lineno, node.col_offset))
+
+
+def _call_closure(functions, start):
+    seen, todo = set(), [start]
+    while todo:
+        name = todo.pop()
+        if name in seen or name not in functions:
+            continue
+        seen.add(name)
+        todo += [_called_name(node) for node in ast.walk(functions[name]) if isinstance(node, ast.Call)]
+    return seen
+
+
+def _lock_problems(source):
+    tree = ast.parse(source)
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    problems = []
+    lock = functions.get("_lock_folder")
+    if lock is None:
+        return ["settingsbackup.py: _lock_folder() is missing"]
+    text = ast.unparse(lock)
+    problems += [f"_lock_folder must hold `{pin}`" for pin in LOCK_FOLDER_PINS if _squashed(pin) not in _squashed(text)]
+    if [arg.arg for arg in lock.args.kwonlyargs] != ["exclusive"] or [arg.arg for arg in lock.args.args] != ["directory"]:
+        problems.append("_lock_folder(directory, *, exclusive) takes nothing else")
+    for name, function in functions.items():
+        for node in ast.walk(function):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "fcntl" \
+                    and node.attr in {"flock", "lockf", "fcntl"} and name != "_lock_folder":
+                problems.append(f"{name}: fcntl.{node.attr} is used only by _lock_folder")
+    callers = {}
+    for name, function in functions.items():
+        for node in _calls_in_order(function):
+            if _called_name(node) in {"_lock_folder", "_clear_stale_temporaries", "_clear_stale_key_temporaries"}:
+                callers.setdefault(_called_name(node), []).append(name)
+    expected = {"_lock_folder": ["_signing_key", "export"], "_clear_stale_temporaries": ["export"],
+                "_clear_stale_key_temporaries": ["_signing_key"]}
+    for called, names in expected.items():
+        if sorted(callers.get(called, [])) != names:
+            problems.append(f"{called} is called once each from {names}, found {sorted(callers.get(called, []))}")
+    for name, order in LOCK_ORDERS.items():
+        function = functions.get(name)
+        found = [_called_name(node) for node in _calls_in_order(function)] if function else []
+        found = [called for called in found if called in order]
+        if found != list(order):
+            problems.append(f"{name}: {list(order)} in this order, found {found}")
+    for name, pins in LOCK_CALLS.items():
+        function = functions.get(name)
+        unparsed = [ast.unparse(node) for node in _calls_in_order(function)] if function else []
+        problems += [f"{name} must call {pin}" for pin in pins if unparsed.count(pin) != 1]
+    signing = functions.get("_signing_key")
+    if signing is not None and "if create: _clear_stale_key_temporaries(directory)" not in _squashed(ast.unparse(signing)):
+        problems.append("_signing_key cleans key temporaries only when it may create, i.e. under the exclusive lock")
+    for name in ("status", "_load", "parse_document"):
+        reached = _call_closure(functions, name) & {"_lock_folder", "_signing_key", "_import_key"}
+        if reached:
+            problems.append(f"{name} takes no lock and loads no key, but reaches {sorted(reached)}")
+    return problems
+
+
+def test_backup_folders_are_locked_as_planned():
+    problems = _lock_problems(SETTINGS_BACKUP_PY.read_text(encoding="utf-8"))
+    assert not problems, problems
+
+
+EXPORT_LOCK = "        _lock_folder(directory, exclusive=True)  # Released when the folder is closed.\n"
+SIGNING_LOCK = "        _lock_folder(directory, exclusive=create)\n"
+LOCK_MUTATIONS = {
+    "export takes no backup folder lock": (EXPORT_LOCK, ""),
+    "export takes the backup folder shared": (EXPORT_LOCK, EXPORT_LOCK.replace("exclusive=True", "exclusive=False")),
+    "export locks after loading the key": (EXPORT_LOCK + "        key = _signing_key(environ, create=True)\n",
+                                           "        key = _signing_key(environ, create=True)\n" + EXPORT_LOCK),
+    "no key folder lock": (SIGNING_LOCK, ""),
+    "import takes the key folder exclusively": (SIGNING_LOCK, "        _lock_folder(directory, exclusive=True)\n"),
+    "export takes the key folder shared": (SIGNING_LOCK, "        _lock_folder(directory, exclusive=False)\n"),
+    "key cleanup before the lock": (SIGNING_LOCK + "        if create:\n            _clear_stale_key_temporaries(directory)\n",
+                                    "        if create:\n            _clear_stale_key_temporaries(directory)\n" + SIGNING_LOCK),
+    "key cleanup on import too": ("        if create:\n            _clear_stale_key_temporaries(directory)\n",
+                                  "        _clear_stale_key_temporaries(directory)\n"),
+    "import loads the key to create": ("        return _signing_key(environ, create=False)\n",
+                                       "        return _signing_key(environ, create=True)\n"),
+    "status takes a lock": ('            raise HelperError("absent")\n        data = _read_file(directory)\n',
+                            '            raise HelperError("absent")\n        _lock_folder(directory, exclusive=False)\n'
+                            "        data = _read_file(directory)\n"),
+    "status reads the key": ("        exported_at, _, _, _ = _load(environ)\n",
+                             "        _import_key(environ)\n        exported_at, _, _, _ = _load(environ)\n"),
+    "blocking lock": ("| fcntl.LOCK_NB", ""),
+    "always exclusive": ("(fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)", "fcntl.LOCK_EX"),
+    "waits forever": ('        if time.monotonic() >= deadline:\n            raise HelperError("os-error")\n', ""),
+    "a second flock": ("        info = os.fstat(descriptor)\n        # One name only",
+                       "        fcntl.flock(descriptor, fcntl.LOCK_UN)\n        info = os.fstat(descriptor)\n        # One name only"),
+    "a lockf": ("        _lock_folder(directory, exclusive=True)  #", "        fcntl.lockf(directory, fcntl.LOCK_EX)  #"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(LOCK_MUTATIONS))
+def test_proof_lock_rule_catches(name):
+    assert _lock_problems(_python_mutated(SETTINGS_BACKUP_PY, *LOCK_MUTATIONS[name]))
