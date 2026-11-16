@@ -2587,8 +2587,10 @@ def test_the_module_imports_only_the_standard_library_and_no_network():
         elif isinstance(node, ast.ImportFrom) and not node.level:
             imported.add((node.module or "").split(".")[0])
         elif isinstance(node, ast.ImportFrom):
-            # legacy: only legacy-data; appletconfig: the applied settings; jsondepth: the depth limit.
-            assert node.module in ("appletconfig", "catalog", "jsondepth", "webdata", "legacy"), node.module
+            # legacy: only legacy-data; appletconfig: the applied settings; jsondepth: the depth limit;
+            # appconfig and frontend (task 011): the app's settings file in app mode.
+            assert node.module in ("appletconfig", "appconfig", "catalog", "frontend", "jsondepth", "webdata",
+                                   "legacy"), node.module
     assert imported <= {"__future__", "collections", "datetime", "errno", "json", "math", "os", "pathlib", "re",
                         "stat", "time", "typing", "bisect", "hashlib", "hmac", "secrets", "fcntl"}, imported
     for banned in ("socket", "http", "urllib", "ssl", "subprocess"):

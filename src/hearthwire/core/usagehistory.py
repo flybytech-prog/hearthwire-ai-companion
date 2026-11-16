@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from typing import Callable, Optional
 
 from .catalog import PROVIDER_CATALOG
+from .frontend import check_applet, is_app
 from .jsondepth import check_depth
 from .webdata import APP_DIR, HelperError, _close, _descriptors, data_base, open_base, open_child_dir, remove_entry
 
@@ -498,10 +499,20 @@ def run(
     """CLI entry: a reply that never carries a path or text.
 
     ``applet`` is required, except for ``clear`` with ``every_applet``
-    (``--all``), which takes none.
+    (``--all``), which takes none. Task 011, checked here too (not only in
+    cli.py): ``applet`` must be the current front end's, and app mode never
+    clears ``--all`` (every widget's); both are ``applet-not-found``.
     """
     if every_applet != (applet is None) or (every_applet and operation != "clear"):
         raise ValueError("Give an applet id, or --all for clear only.")
+    try:
+        if every_applet:
+            if is_app(environ):
+                raise HelperError("applet-not-found")
+        else:
+            check_applet(applet, environ)  # type: ignore[arg-type]
+    except HelperError as error:
+        return {"ok": False, "error": error.code}
     try:
         if operation == "read":
             return read(applet, environ)  # type: ignore[arg-type]

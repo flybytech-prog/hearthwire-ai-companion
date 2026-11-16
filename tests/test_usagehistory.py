@@ -658,8 +658,8 @@ def test_cli_round_trip_prints_one_json_line(home, capsys, tmp_path):
     assert cli_reply(capsys, "--usage-history", "read", "--applet", "8")["series"] == []
     assert cli_reply(capsys, "--usage-history", "clear", "--applet", "7") == {"ok": True}
     assert cli_reply(capsys, "--usage-history", "read", "--applet", "7")["series"] == []
-    cli_reply(capsys, "--usage-history", "record", "--applet", "2147483648", "--sample", "claude.session=1")
-    assert sorted(os.listdir(home)) == ["applet-2147483648.json", "history.lock"]
+    cli_reply(capsys, "--usage-history", "record", "--applet", "2147483647", "--sample", "claude.session=1")
+    assert sorted(os.listdir(home)) == ["applet-2147483647.json", "history.lock"]
     assert cli_reply(capsys, "--usage-history", "clear", "--all") == {"ok": True}
     assert not home.exists()
 
@@ -738,7 +738,8 @@ def test_the_module_imports_only_the_standard_library_and_no_network():
         elif isinstance(node, ast.ImportFrom) and not node.level:
             imported.add((node.module or "").split(".")[0])
         elif isinstance(node, ast.ImportFrom):
-            assert node.module in ("catalog", "jsondepth", "webdata", "legacy"), node.module  # legacy: only legacy-data
+            # legacy: only legacy-data; frontend: the task 011 applet rule.
+            assert node.module in ("catalog", "frontend", "jsondepth", "webdata", "legacy"), node.module
     assert imported <= {"__future__", "collections", "contextlib", "errno", "fcntl", "json", "os", "re",
                         "stat", "time", "typing"}, imported
     for banned in ("socket", "http", "urllib", "ssl", "subprocess"):

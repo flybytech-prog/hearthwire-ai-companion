@@ -44,6 +44,12 @@ here (origin ``this-computer``) from one made elsewhere or with another key
 informational: the same settings are kept whatever it is. Only export creates
 the key and never replaces one; status never reads it. The key never leaves
 the key file: not in argv, the environment, a reply, the backup or a log.
+
+Task 011: with ``HEARTHWIRE_FRONTEND=app`` (core/frontend.py) export reads
+the hearthwire-hyprland app's own settings.json (core/appconfig.py) instead
+of Plasma's rc files, for the app's reserved id only. The backup file, its
+format and the key are the same for both front ends, so a backup restores
+in either.
 """
 
 from __future__ import annotations
@@ -65,8 +71,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from .appconfig import applied_settings as app_settings
 from .appletconfig import applied_settings
 from .catalog import CATALOG_BY_ID, PROVIDER_CATALOG, PROVIDER_IDS
+from .frontend import check_applet, is_app
 from .jsondepth import check_depth
 from .webdata import (
     APP_DIR, PRIVATE_MODE, HelperError, _close, _descriptors, data_base, open_base, open_child_dir,
@@ -1449,11 +1457,19 @@ def export(
     """Replace the backup with widget ``applet``'s applied settings, checked and signed.
 
     Only what Plasma has saved counts (press Apply first); a key the rc file
-    lacks has its main.xml default. Read only on the rc file.
+    lacks has its main.xml default. Read only on the rc file. In app mode
+    (task 011, core/frontend.py) ``applet`` must be the app's reserved id and
+    the settings come from the app's settings.json (core/appconfig.py); in
+    Plasma mode that id is applet-not-found.
     """
     if type(applet) is not int or applet < 1:
         raise HelperError("applet-not-found")
-    settings, dropped = validate_settings(applied_settings(applet, BACKUP_KEYS, config_base(environ)))
+    check_applet(applet, environ)  # Task 011: the app's id in app mode only, never in Plasma mode.
+    if is_app(environ):
+        applied = app_settings(BACKUP_KEYS, config_base(environ))
+    else:
+        applied = applied_settings(applet, BACKUP_KEYS, config_base(environ))
+    settings, dropped = validate_settings(applied)
     if not settings:
         raise HelperError("bad-data")  # Never replace a backup with nothing.
     exported_at = time.strftime(_STAMP_FORMAT, time.gmtime(int(clock())))

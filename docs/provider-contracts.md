@@ -759,10 +759,13 @@ Argument rules (argparse exits 2 with a usage message on stderr otherwise):
   abbreviations (`--site a --site b`, `--gen 0 --generation 1`); a repeat is a
   usage error that names the option but never its value.
 - `--usage-history read|record|clear` need `--applet N` with N from 1 to
-  2147483648 (the widget's Plasma applet id); only `clear --all` takes no
-  `--applet`, and `--all` is refused anywhere else. `--settings-backup export`
-  needs `--applet N` (1 or more); `status` and `import` accept it and ignore
-  it. `--store`, `--generation` and `--keep` stay `--web-data` only.
+  2147483648 (the widget's Plasma applet id; 2147483648 is the
+  hearthwire-hyprland app's and refused for the widget, see App mode); only `clear --all` takes no
+  `--applet`, and `--all` is refused anywhere else (and in app mode, see App
+  mode). `--settings-backup export` needs `--applet N` (1 or more); `status`
+  and `import` accept it and ignore it, except that the other front end's id
+  is `applet-not-found` (App mode). `--store`, `--generation` and `--keep`
+  stay `--web-data` only.
 - `--data` is refused with every command (audit M1: settings must never be
   in argv, which every local user can read through `/proc`). The refusal
   names the option but never echoes its value.
@@ -782,7 +785,8 @@ are checked against an allow-list before it starts: gocryptfs gets only
 `-init`, `-passwd`, `-q`, `-nosyslog`, `-extpass`, and `-config` (each only in
 its phase, plus a lone `-version`) and absolute paths; `-config` only with the
 one slot path the helper computed (`wallet.conf` to mount, `wallet.conf.new`
-to re-key); the `-extpass` program is kdialog, the relay, or exactly
+to re-key); the `-extpass` program is kdialog (or, in app mode,
+`hearthwire-askpass` at its fixed path), the relay running one of those, or exactly
 `kwallet-query --folder Hearthwire --read-password encrypted-chat-folder
 <wallet>` (never the staging entry); `fusermount3` only `-u <mountpoint>`;
 kdialog only the new-passphrase dialog; `openssl` only `rand -hex 32`;
@@ -1158,7 +1162,8 @@ credentials.
 Export saves the **applied** settings: the helper reads them itself, read
 only, from Plasma's own config (`src/hearthwire/core/appletconfig.py`), so
 nothing the user typed is ever in argv (audit M1). Changes not yet applied
-are not in the backup.
+are not in the backup. In app mode it reads the hearthwire-hyprland app's
+settings file instead (App mode, below).
 
 - `$XDG_CONFIG_HOME` (when absolute, else `~/.config`)`/plasma-org.kde.plasma.desktop-appletsrc`,
   else `plasmawindowedrc` next to it. The second file is tried when the
@@ -1280,7 +1285,8 @@ are not in the backup.
 | `--settings-backup import [--applet N]` | `{"ok":true,"exported_at":"...","settings":{...},"dropped":M,"origin":"this-computer"\|"other"\|"unsigned"}` |
 
 `--applet N` (1 to 2147483648, the widget's Plasma applet id) is required
-with `export`; `status` and `import` accept it and ignore it. `--data` is
+with `export`; `status` and `import` accept it and ignore it, except that the
+other front end's id is `applet-not-found` (App mode). `--data` is
 refused everywhere; `--settings-backup` stands alone. `status` and `import`
 create nothing (no folder, no key) and check the whole file the same way,
 the checksum included; only `import` checks the signature. The argv is
@@ -1512,6 +1518,102 @@ hearthwire` only when `pip show` names exactly the Python user site
 (`site.getusersitepackages()`, the same check as `--remove-script-install`);
 a copy pip finds anywhere else, such as the system package, is left in place
 and the script says where it is.
+
+## App mode (hearthwire-hyprland)
+
+The helper also serves `hearthwire-hyprland`, the separate Hyprland/Omarchy
+app (task 008, slice 011; `src/hearthwire/core/frontend.py`). Nothing changes
+for the Plasma widget: without the variable below every command behaves
+exactly as in 1.1.0.
+
+- Environment, never argv: `HEARTHWIRE_FRONTEND` is unset, `plasma` or `app`.
+  Only the app's process runner sets it, in the child's environment; no
+  command-line option sets or changes it. Any other value (also the empty
+  string, other case or spaces) runs nothing: the reply is
+  `{"ok":false,"error":"bad-frontend"}` on stdout with exit status 2 (usage
+  errors stay argparse's, exit 2 with a message on stderr). The value is never
+  echoed.
+- App id: `APP_APPLET_ID = 2147483648` (2**31). In app mode every `--applet`
+  must be that id; in Plasma mode that id is refused. Both are
+  `{"ok":false,"error":"applet-not-found"}` (exit 0), for `--web-data`,
+  `--usage-history` and every `--settings-backup` operation, before anything
+  is read or created. So the app's chat profiles
+  (`web/applet-2147483648-g<G>/`) and history (`usage-history/applet-2147483648.json`)
+  never mix with a widget's. `usagehistory.run` and `webdata.run` check the
+  id again on their own. Shared on purpose: the encrypted folder, the
+  settings backup file and the backup key.
+- `--usage-history clear --all` (install.sh only) is unchanged in Plasma
+  mode. In app mode it would delete every widget's history, so it is refused
+  with `{"ok":false,"error":"applet-not-found"}` (exit 0, nothing deleted);
+  the app clears its own history with `clear --applet 2147483648`.
+- `--migrate …` rewrites Plasma's own files and moves the widget's wallet
+  entry, so app mode refuses every operation with
+  `{"ok":false,"error":"bad-frontend"}` and exit status 2, before anything
+  is read.
+- `--prompts add|replace` (app mode): the prompt library has no text box in
+  app mode yet (the app's own comes in a later slice), so they reply
+  `missing-tool` and kdialog is never looked up; `list`, `remove` and
+  `set-persona` work as in Plasma mode.
+- `--settings-backup export --applet 2147483648` (app mode) reads the app's
+  settings file below instead of Plasma's rc files. A missing folder or file,
+  or a file that is not exactly the format, is `bad-data`; a link, a
+  non-regular file or folder, someone else's, a folder whose permission bits
+  are more open than 0700 or a file more open than 0600 (any group or other
+  bit, read included), or a file over 1 MiB is `settings-unreadable`; other codes as
+  before. The backup file and its format are the same for both front ends, so
+  a backup made in one restores in the other (origin `this-computer`, the
+  key is shared).
+- `--vault …` (app mode): the passphrase dialog is `hearthwire-askpass`
+  instead of kdialog, with kdialog's arguments (`--title T --password P`,
+  `--title T --newpassword P`; it prints the passphrase and a newline, exit 0
+  OK, 1 cancelled). It is used only at exactly
+  `/usr/lib/hearthwire-hyprland/hearthwire-askpass`, never looked up on
+  `PATH` or taken from the environment, and only while that path is a
+  regular file (not a link) owned by root, executable, without set-id bits
+  and not writable by group or others, and `/usr/lib/hearthwire-hyprland`,
+  `/usr/lib`, `/usr` and `/` are real directories (not links) owned by root
+  and not writable by group or others. Otherwise `status` replies
+  `{"ok":true,"state":"unavailable","missing":["hearthwire-askpass"]}` (in
+  `TOOLS` order, so `["gocryptfs","hearthwire-askpass","fusermount3"]` when
+  all three are missing) and the dialog operations reply `missing-tool`;
+  kdialog is never used in app mode, even when it is installed. The child
+  allow-list (Replies and errors, above) takes `hearthwire-askpass` only at
+  that path, as an `-extpass` program, as the dialog the `-passwd` relay
+  runs, and as the new-passphrase dialog. Each mode takes only its own
+  dialog in all three places: app mode only that path (never kdialog),
+  Plasma mode only an absolute kdialog (never `hearthwire-askpass`).
+- KDE Wallet (app mode, until the app's own keyring unlock, slice 014): the
+  wallet slot belongs to the Plasma widget and is never used or changed.
+  `status` replies `"wallet":"unavailable"` with no wallet `missing` list and
+  runs no wallet tool; `add-key`, `remove-key`, `auto-unlock` and `unlock
+  --method wallet` reply `{"ok":false,"error":"wallet-disabled"}` before
+  anything is touched. `destroy` and `--web-data purge` still delete the
+  shared folder and its key slots, but run no wallet tool in app mode, so a
+  wallet entry the widget made stays there (useless without the slot) until
+  the widget's remove or uninstall; purge's reply then has no
+  `wallet-entry`.
+
+### App settings file
+
+Written only by the app (0700 folder, 0600 file, replaced atomically, at most
+1 MiB; the reader refuses anything more open as `settings-unreadable`, so the
+app's writer must create exactly those modes); the helper only reads it, for a backup
+(`src/hearthwire/core/appconfig.py`):
+
+- `$XDG_CONFIG_HOME` (when absolute, else `~/.config`)`/hearthwire-hyprland/settings.json`
+- `{"format":"hearthwire-app-settings","version":1,"settings":{"<main.xml key>":<value>,...},"app":{"background":false,"agentsPanel":false,"tray":false}}`
+- Exactly `format`, `version` and `settings`, plus `app` (optional); any
+  other top-level key, another `format`, a `version` other than the integer
+  1, a non-object `settings` or `app`, or JSON that `strict_loads` refuses
+  (duplicate keys, NaN, Infinity, nesting deeper than 4) is `bad-data`.
+- `settings` holds the group General keys of `main.xml`
+  (`appletconfig.CONFIG_ENTRIES`, kept equal by
+  `tests/test_applet_config_sync.py`; `tests/test_app_config_sync.py` checks
+  the reader against it). A missing key is its `main.xml` default; an
+  unknown key is ignored; a value of the wrong JSON type (Bool: `true` or
+  `false`; Int: an integer from -2147483648 to 2147483647, not a boolean;
+  String: a string) is dropped and counted by the backup, as an unreadable
+  rc value is. `app.*` is never read into a backup.
 
 ## Upgrading from Hearthside
 

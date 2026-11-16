@@ -40,3 +40,10 @@ def _no_session_bus(_private_runtime_dir, monkeypatch):
     kwallet-query were found on PATH (the wallet tests use stubs)."""
     for name in HOST_SESSION_VARIABLES:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _plasma_frontend(monkeypatch):
+    """Task 011: every test starts as the Plasma widget, whatever the shell running pytest set.
+    App-mode tests set HEARTHWIRE_FRONTEND=app themselves."""
+    monkeypatch.delenv("HEARTHWIRE_FRONTEND", raising=False)

@@ -1191,6 +1191,51 @@ It does not protect against:
   system services expect to see every process, so check your distribution's
   notes first.
 
+## The hearthwire-hyprland app
+
+The separate Hyprland/Omarchy app uses the same helper. It tells the helper
+so with one environment variable it sets for its own commands
+(`HEARTHWIRE_FRONTEND=app`); nothing on a command line can switch it, and the
+Plasma widget never sets it. For the widget nothing changes.
+
+- **Its own settings file.** The app keeps its settings in
+  `~/.config/hearthwire-hyprland/settings.json` (folder `0700`, file `0600`),
+  not in Plasma's config. It holds the same settings as the widget (tracked
+  providers, chat sites with your custom and added addresses, alerts, and so
+  on) plus the app's own switches (keep running in the background, Agents
+  panel, tray). No sign-ins, passphrases, keys or chat text are in it. The
+  helper only reads it, for a settings backup, and refuses it when it is a
+  link, someone else's, over 1 MiB, or when other users could read or change
+  it: the folder must be `0700` or stricter and the file `0600` or stricter.
+- **Separate from the widget.** The app uses one fixed id of its own
+  (2147483648), so its chat profiles inside the encrypted folder and its
+  usage history are kept apart from every widget's. Shared on purpose: the
+  encrypted folder itself (one passphrase), the settings backup file and its
+  key, so a backup made in the app restores in the widget and the other way
+  round. The app's own switches are never in a backup. The app can't clear
+  the widgets' usage history ("clear all" is refused there; it clears only
+  its own) and never runs the move from the former name, which changes
+  Plasma's own files.
+- **Passphrase window.** Instead of KDE's kdialog the app's own small
+  passphrase window, `hearthwire-askpass`, asks for the passphrase, and
+  gocryptfs reads it from there directly, as with kdialog; it never passes
+  through the helper or the app. The helper runs only the copy at
+  `/usr/lib/hearthwire-hyprland/hearthwire-askpass`, and only while that file
+  and every folder above it belong to root and nobody else can change them,
+  so another program of yours (or another user) can't put a look-alike in
+  its place there. A look-alike window opened by a program already running
+  as you is not something the helper can tell apart.
+- **No KDE Wallet in the app.** The KDE Wallet unlock belongs to the widget.
+  The app never uses it, never changes the widget's wallet key and runs no
+  wallet tool; the app unlocks with the passphrase. Deleting the encrypted
+  folder from the app removes the folder and its key slots but leaves the
+  widget's wallet entry; it is useless without the slot, and the widget's own remove
+  or uninstall deletes it.
+- **Saved prompts.** The app has no text window for the prompt library yet,
+  so adding or replacing a saved prompt or persona there is not available
+  (the helper reports a missing tool and never opens KDE's kdialog); saved
+  ones can still be listed and removed.
+
 ## Upgrading from Hearthside
 
 The move from the former name is done once, by `scripts/install.sh` only; the

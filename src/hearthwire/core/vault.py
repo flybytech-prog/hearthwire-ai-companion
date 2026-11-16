@@ -22,6 +22,15 @@ the folder may have a KDE Wallet key slot, ``vault-keys/wallet.conf``: a copy
 of ``gocryptfs.conf`` re-keyed with ``gocryptfs -passwd -config`` to a random
 key kept in the wallet (``walletkey.py``). That key, too, only ever moves
 between children through pipes this process never reads.
+
+Task 011: in app mode (``HEARTHWIRE_FRONTEND=app``, ``frontend.py``) the
+dialog is ``hearthwire-askpass`` instead of kdialog, with the same arguments.
+It is used only at ``frontend.ASKPASS_PATH`` and only while it and every
+folder above it are root's and nobody else may change them; otherwise status
+lists ``hearthwire-askpass`` as missing. kdialog is never used in app mode,
+and the KDE Wallet slot is neither used nor changed there (wallet
+``unavailable``, wallet operations ``wallet-disabled``) until the app's own
+keyring unlock exists.
 """
 
 from __future__ import annotations
@@ -40,7 +49,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from . import walletkey
+from . import frontend, walletkey
 from .webdata import (
     APP_DIR,
     PRIVATE_MODE,
@@ -86,6 +95,9 @@ _WOULD_BLOCK = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES}
 # Tools that must all be found on PATH. "gocryptfs-v2" is reported when gocryptfs
 # exists but `gocryptfs -version` does not say v2 or later.
 TOOLS = ("gocryptfs", "kdialog", "fusermount3")
+# The tools key of the passphrase dialog: kdialog on PATH in Plasma mode, the
+# fixed, root-owned hearthwire-askpass in app mode (reported missing by that name).
+DIALOG = "kdialog"
 VERSION_ARGS = ("-version",)
 VERSION_PREFIX = b"gocryptfs v"
 MINIMUM_MAJOR = 2
@@ -254,6 +266,8 @@ class Context:
     # kwallet-query, qdbus6 and openssl when found; the missing walletkey.TOOLS.
     wallet_tools: dict[str, str] = field(default_factory=dict)
     wallet_missing: tuple[str, ...] = ()
+    # frontend.PLASMA or frontend.APP (task 011).
+    mode: str = frontend.PLASMA
 
     @property
     def slot(self) -> str:
@@ -284,22 +298,31 @@ def _gocryptfs_phase(arguments: Sequence[str]) -> str:
     return "mount"
 
 
-def _check_extpass(values: Sequence[str]) -> None:
-    """The extpass program is kdialog, the relay, or exactly ``kwallet-query -r``."""
+def _is_dialog(program: str, mode: str) -> bool:
+    """The front end's dialog (task 011): in Plasma mode an absolute kdialog only, in app
+    mode hearthwire-askpass at exactly its fixed path only."""
+    name = os.path.basename(program)
+    if mode == frontend.APP:
+        return name == frontend.ASKPASS_NAME and program == frontend.ASKPASS_PATH
+    return name == "kdialog" and os.path.isabs(program)
+
+
+def _check_extpass(values: Sequence[str], mode: str) -> None:
+    """The extpass program is a dialog, the relay running a dialog, or exactly ``kwallet-query -r``."""
     if not values:
         return
     program = os.path.basename(values[0])
     if program == "kwallet-query":
         if not walletkey.is_read_argv(values):
             raise HelperError("os-error")
-    elif program == "kdialog":
-        if not os.path.isabs(values[0]):
+    elif program in ("kdialog", frontend.ASKPASS_NAME):
+        if not _is_dialog(values[0], mode):
             raise HelperError("os-error")
-    elif not (len(values) > 1 and values[1] == RELAY and os.path.isabs(values[0])):
+    elif not (len(values) > 3 and values[1] == RELAY and os.path.isabs(values[0]) and _is_dialog(values[3], mode)):
         raise HelperError("os-error")
 
 
-def _check_gocryptfs_argv(arguments: Sequence[str], config: Optional[str]) -> None:
+def _check_gocryptfs_argv(arguments: Sequence[str], config: Optional[str], mode: str) -> None:
     if list(arguments) == list(VERSION_ARGS):
         return
     phase = _gocryptfs_phase(arguments)
@@ -334,16 +357,17 @@ def _check_gocryptfs_argv(arguments: Sequence[str], config: Optional[str]) -> No
         positionals += 1
     if positionals != PHASE_POSITIONALS[phase] or configs > 1:
         raise HelperError("os-error")
-    _check_extpass(extpass)
+    _check_extpass(extpass, mode)
 
 
-def _check_argv(argv: Sequence[str], *, config: Optional[str] = None) -> None:
+def _check_argv(argv: Sequence[str], *, config: Optional[str] = None, mode: str = frontend.PLASMA) -> None:
     """Refuse any child argv that is not one of the contract's shapes (defence in depth).
 
     gocryptfs gets only its phase's allow-listed flags; fusermount3 only ``-u
     <mountpoint>``; kdialog only the new-passphrase dialog (the other dialogs run
     as ``-extpass`` values). No argument outside an ``-extpass`` value may
-    contain ``allow_``, wherever it sits.
+    contain ``allow_``, wherever it sits. The dialog is ``mode``'s only (task
+    011): kdialog in Plasma mode, the fixed hearthwire-askpass in app mode.
     """
     if not argv or not os.path.isabs(argv[0]):
         raise HelperError("os-error")
@@ -360,12 +384,12 @@ def _check_argv(argv: Sequence[str], *, config: Optional[str] = None) -> None:
     if any("allow_" in argument for argument in plain):
         raise HelperError("os-error")
     if tool == "gocryptfs":
-        _check_gocryptfs_argv(arguments, config)
+        _check_gocryptfs_argv(arguments, config, mode)
     elif tool == "fusermount3":
         if len(arguments) != 2 or arguments[0] != "-u" or not os.path.isabs(arguments[1]):
             raise HelperError("os-error")
-    elif tool == "kdialog":
-        if arguments != new_passphrase_argv(argv[0])[1:]:
+    elif tool in ("kdialog", frontend.ASKPASS_NAME):
+        if not _is_dialog(argv[0], mode) or arguments != new_passphrase_argv(argv[0])[1:]:
             raise HelperError("os-error")
     elif tool in ("kwallet-query", *walletkey.QDBUS_NAMES, "openssl"):
         walletkey.check_argv(argv)
@@ -375,9 +399,9 @@ def _check_argv(argv: Sequence[str], *, config: Optional[str] = None) -> None:
 
 def _run(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
          timeout: Optional[float] = None, config: Optional[str] = None,
-         timeout_error: str = "os-error") -> int:
+         timeout_error: str = "os-error", mode: str = frontend.PLASMA) -> int:
     """Run one child: argv list, no shell, stderr always on /dev/null."""
-    _check_argv(argv, config=config)
+    _check_argv(argv, config=config, mode=mode)
     try:
         completed = subprocess.run(
             list(argv),
@@ -396,9 +420,9 @@ def _run(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.DEV
 
 
 def _spawn(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-           env: Optional[Mapping[str, str]] = None) -> subprocess.Popen:
+           env: Optional[Mapping[str, str]] = None, mode: str = frontend.PLASMA) -> subprocess.Popen:
     """Start one child without waiting: argv list, no shell, stderr on /dev/null."""
-    _check_argv(argv)
+    _check_argv(argv, mode=mode)
     try:
         return subprocess.Popen(
             list(argv),
@@ -468,10 +492,18 @@ def _gocryptfs_major(gocryptfs: str) -> int:
     return int(digits) if digits.isdigit() else 0
 
 
-def _find_tools() -> tuple[dict[str, str], tuple[str, ...]]:
+def _find_tools(mode: str = frontend.PLASMA) -> tuple[dict[str, str], tuple[str, ...]]:
     found: dict[str, str] = {}
     missing: list[str] = []
     for name in TOOLS:
+        if name == DIALOG and mode == frontend.APP:
+            # Never PATH, never kdialog: only the fixed, root-owned prompt.
+            path = frontend.askpass_path()
+            if path is None:
+                missing.append(frontend.ASKPASS_NAME)
+            else:
+                found[name] = path
+            continue
         path = shutil.which(name)
         if path and os.path.isabs(path):
             found[name] = path
@@ -506,8 +538,13 @@ def runtime_dir(environ: Optional[Mapping[str, str]] = None) -> str:
 
 
 def context(environ: Optional[Mapping[str, str]] = None, *, find_tools: bool = True) -> Context:
-    tools, missing = _find_tools() if find_tools else ({}, ())
-    wallet_tools, wallet_missing = walletkey.find_tools() if find_tools else ({}, ())
+    mode = frontend.mode(environ)
+    tools, missing = _find_tools(mode) if find_tools else ({}, ())
+    if mode == frontend.APP:
+        # No KDE Wallet in app mode: nothing of it is looked up or run.
+        wallet_tools, wallet_missing = {}, walletkey.TOOLS
+    else:
+        wallet_tools, wallet_missing = walletkey.find_tools() if find_tools else ({}, ())
     runtime = runtime_dir(environ)
     base = os.path.realpath(data_base(environ))
     return Context(
@@ -519,6 +556,7 @@ def context(environ: Optional[Mapping[str, str]] = None, *, find_tools: bool = T
         mountpoint=os.path.join(runtime, APP_DIR, VAULT_DIR),
         wallet_tools=wallet_tools,
         wallet_missing=wallet_missing,
+        mode=mode,
     )
 
 
@@ -729,7 +767,7 @@ def _unmount(ctx: Context) -> int:
     fusermount = ctx.tools.get("fusermount3")
     if fusermount is None:
         raise HelperError("missing-tool")
-    return _run(unmount_argv(fusermount, ctx.mountpoint), timeout=_TOOL_TIMEOUT)
+    return _run(unmount_argv(fusermount, ctx.mountpoint), timeout=_TOOL_TIMEOUT, mode=ctx.mode)
 
 
 def _seal_mountpoint(ctx: Context, app: int) -> None:
@@ -829,7 +867,9 @@ def status(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
         state = settle(ctx, app)
         slot = _slot_present(ctx) if state in ("locked", "unlocked") else False
     reply: dict[str, object] = {"ok": True, "state": state}
-    if state in ("locked", "unlocked"):
+    if state in ("locked", "unlocked") and ctx.mode == frontend.APP:
+        reply["wallet"] = "unavailable"  # No KDE Wallet in app mode (task 011).
+    elif state in ("locked", "unlocked"):
         # Outside the lock: a qdbus6 query may take up to its timeout.
         if ctx.wallet_missing:
             reply["wallet"] = "unavailable"
@@ -1042,6 +1082,12 @@ def _commit_slot(ctx: Context, keys: int, wallet: str) -> None:
         pass
 
 
+def _no_app_wallet(ctx: Context) -> None:
+    """``wallet-disabled`` in app mode: its KDE Wallet slot is the Plasma widget's, never changed there."""
+    if ctx.mode != frontend.PLASMA:
+        raise HelperError("wallet-disabled")
+
+
 def _wallet_tools(ctx: Context, *, keygen: bool) -> None:
     if ctx.wallet_missing or (keygen and walletkey.KEYGEN_TOOL not in ctx.wallet_tools):
         raise HelperError("missing-tool")
@@ -1072,6 +1118,7 @@ def add_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     5. The staging entry is overwritten and deleted, on success and failure.
     """
     ctx = context(environ)
+    _no_app_wallet(ctx)
     _require_tools(ctx, "gocryptfs", "kdialog")
     _wallet_tools(ctx, keygen=True)
     _refuse_legacy_data(environ)
@@ -1098,7 +1145,7 @@ def add_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
                                                       entry=walletkey.ENTRY_NEW)
                 try:
                     argv = wallet_passwd_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.new_slot, ctx.cipher)
-                    code = _run(argv, stdin=reader, config=ctx.new_slot)
+                    code = _run(argv, stdin=reader, config=ctx.new_slot, mode=ctx.mode)
                 finally:
                     _close(reader)
                 if code != 0:
@@ -1124,6 +1171,7 @@ def remove_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]
     wallet-failed). openssl is not needed: without it the overwrite is skipped.
     """
     ctx = context(environ)
+    _no_app_wallet(ctx)
     with vault_lock(ctx, wait=True):
         with _keys_dir(ctx, create=False) as keys:
             if keys is not None:
@@ -1158,6 +1206,7 @@ def _unlock_with_wallet(ctx: Context, app: int, *, automatic: bool) -> None:
 
 def auto_unlock(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     ctx = context(environ)
+    _no_app_wallet(ctx)
     _require_tools(ctx, "gocryptfs", "fusermount3")
     _wallet_tools(ctx, keygen=False)
     _refuse_legacy_data(environ)
@@ -1286,14 +1335,16 @@ def _mount(ctx: Context, app: int, wallet: Optional[str] = None) -> None:
     _prepare_mountpoint(app)
     if wallet is None:
         phase = "mount"
-        code = _run(mount_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.cipher, ctx.mountpoint))
+        code = _run(mount_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.cipher, ctx.mountpoint),
+                    mode=ctx.mode)
     else:
         phase = "wallet-mount"
         argv = wallet_mount_argv(ctx.tools["gocryptfs"], ctx.wallet_tools["kwallet-query"], wallet,
                                  ctx.slot, ctx.cipher, ctx.mountpoint)
         try:
             # kwallet-query may wait for KWallet's own password prompt.
-            code = _run(argv, timeout=walletkey.PROMPT_TIMEOUT, config=ctx.slot, timeout_error="wallet-failed")
+            code = _run(argv, timeout=walletkey.PROMPT_TIMEOUT, config=ctx.slot, timeout_error="wallet-failed",
+                        mode=ctx.mode)
         except HelperError:
             _drop_mount(ctx, app)
             raise
@@ -1369,7 +1420,7 @@ def create(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
         # A wallet slot left from an older folder could never open the new one.
         _remove_keys_dir(ctx)
         created = _make_cipher_dir(ctx)
-        code = _run(init_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.cipher))
+        code = _run(init_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.cipher), mode=ctx.mode)
         if code != 0:
             if created:
                 _forget_cipher_dir(ctx)
@@ -1383,6 +1434,7 @@ def unlock(environ: Optional[Mapping[str, str]] = None, method: str = "passphras
         raise ValueError("Unsupported unlock method.")
     ctx = context(environ)
     if method == "wallet":
+        _no_app_wallet(ctx)
         _require_tools(ctx, "gocryptfs", "fusermount3")
         _wallet_tools(ctx, keygen=False)
     else:
@@ -1492,18 +1544,18 @@ def _passwd(ctx: Context, app: int) -> int:
         raise HelperError("missing-tool")
     marker = os.path.join(ctx.runtime, APP_DIR, PASSWD_MARKER)
     argv = passwd_argv(ctx.tools["gocryptfs"], python, marker, ctx.tools["kdialog"], ctx.cipher)
-    _check_argv(argv)
+    _check_argv(argv, mode=ctx.mode)
     _clear_marker(app)
     reader, writer = os.pipe()
     child: Optional[subprocess.Popen] = None
     dialog: Optional[subprocess.Popen] = None
     try:
-        child = _spawn(argv, stdin=reader, env=relay_environment())
+        child = _spawn(argv, stdin=reader, env=relay_environment(), mode=ctx.mode)
         os.close(reader)
         reader = -1
         status = _first_dialog_status(app, child)
         if status == 0 and not _exited_within(child, PASSWD_GRACE):
-            dialog = _spawn(new_passphrase_argv(ctx.tools["kdialog"]), stdout=writer)
+            dialog = _spawn(new_passphrase_argv(ctx.tools["kdialog"]), stdout=writer, mode=ctx.mode)
         os.close(writer)
         writer = -1
         code = child.wait()
@@ -1660,6 +1712,8 @@ def _vault_mounted(cipher_paths: set[str], mountpoints: set[str]) -> bool:
 
 
 def _purge_tree(environ: Optional[Mapping[str, str]], runtimes: list[str]) -> list[str]:
+    # Task 011: asked before anything is deleted (a bad value deletes nothing).
+    app_mode = frontend.mode(environ) == frontend.APP
     base_path = data_base(environ)
     cipher_paths = {
         os.path.join(base, APP_DIR, VAULT_DIR) for base in (base_path, os.path.realpath(base_path))
@@ -1696,6 +1750,10 @@ def _purge_tree(environ: Optional[Mapping[str, str]], runtimes: list[str]) -> li
     # had a wallet slot owns the entry: without one the wallet is not touched.
     if not had_slot:
         return present
+    if app_mode:
+        # Task 011: no wallet tool runs in app mode; the entry is the Plasma
+        # widget's and stays (as with destroy), so the reply has no wallet-entry.
+        return present
     tools, _missing = walletkey.find_tools()
     if walletkey.forget(tools):
         present.append(PURGE_WALLET_ENTRY)
@@ -1708,8 +1766,8 @@ def purge(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     Refuses while anything is mounted at the vault mountpoint or from the
     cipher dir. Runs no tool except, when this folder had a wallet slot,
     kwallet-query and qdbus6 are there and the wallet holds our entry, the ones
-    that overwrite and delete it. The
-    reply names only the deleted categories.
+    that overwrite and delete it; in app mode (task 011) not even those: the
+    wallet entry is left alone. The reply names only the deleted categories.
     """
     try:
         _require_safe_rmtree()

@@ -726,8 +726,15 @@ def run(
     known: Optional[tuple[str, ...]] = None,
     site: Optional[str] = None,
 ) -> dict[str, object]:
-    """CLI entry: a reply object that never contains a path or name."""
+    """CLI entry: a reply object that never contains a path or name.
+
+    Task 011, checked here too (not only in cli.py): ``applet`` must be the
+    current front end's, else ``applet-not-found`` before anything is touched.
+    """
+    from .frontend import check_applet  # Imported here: frontend builds on this module.
+
     try:
+        check_applet(applet, environ)
         if operation == "remove":
             remove(store, applet, keep, environ)
         elif operation not in OPERATIONS:

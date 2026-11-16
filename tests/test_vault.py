@@ -53,8 +53,9 @@ record = {{"tool": tool, "argv": args, "fds": [fd_target(0), fd_target(1), fd_ta
           "start_ns": time.monotonic_ns(),
           "python_env": {{key: value for key, value in env.items() if key.startswith("PYTHON")}}}}
 
-if tool == "kdialog":
+if tool in ("kdialog", "hearthwire-askpass"):
     # Logged at start: a dialog killed while open never logs "kdialog-end".
+    # hearthwire-askpass (task 011, app mode) takes kdialog's arguments and answers alike.
     log(record)
     new = args[2:3] == ["--newpassword"]
     code = int(env.get("STUB_KDIALOG_EXIT", "0"))
@@ -65,7 +66,7 @@ if tool == "kdialog":
     if code == 0:
         sys.stdout.write("\n" if new and env.get("STUB_KDIALOG_NEW_EMPTY") else "stub-passphrase\n")
         sys.stdout.flush()
-    log({{"tool": "kdialog-end", "argv": args, "end_ns": time.monotonic_ns()}})
+    log({{"tool": tool + "-end", "argv": args, "end_ns": time.monotonic_ns()}})
     sys.exit(code)
 elif tool == "fusermount3":
     code = int(env.get("STUB_FUSERMOUNT_EXIT", "0"))

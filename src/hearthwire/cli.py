@@ -6,9 +6,12 @@ import re
 from collections.abc import Sequence
 
 from . import __version__
-from .core import droppedfile, installinfo, legacy, portowner, promptstore, settingsbackup, usagehistory, vault, webdata
+from .core import (
+    droppedfile, frontend, installinfo, legacy, portowner, promptstore, settingsbackup, usagehistory, vault, webdata,
+)
 from .core.catalog import PROVIDER_IDS
 from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
+from .core.webdata import HelperError
 
 # Largest applet id or profile generation the plasmoid may pass.
 MAX_INT_ARGUMENT = 2**31
@@ -154,7 +157,8 @@ def parser() -> argparse.ArgumentParser:
         "--applet",
         type=_bounded_int,
         metavar="N",
-        help="Applet id (1 or more) for --web-data, --usage-history and --settings-backup.",
+        help="Applet id (1 or more) for --web-data, --usage-history and --settings-backup; "
+        "2147483648 is the hearthwire-hyprland app's, and the only one it may use.",
     )
     result.add_argument(
         "--generation", type=_bounded_int, metavar="G", help="Generation for --web-data prepare/prune/remove-site.",
@@ -223,7 +227,7 @@ def parser() -> argparse.ArgumentParser:
         "--all",
         action="store_true",
         dest="all_applets",
-        help="Every widget's history, for --usage-history clear (instead of --applet).",
+        help="Every widget's history, for --usage-history clear (instead of --applet; not in app mode).",
     )
     result.add_argument(
         "--sample",
@@ -234,7 +238,8 @@ def parser() -> argparse.ArgumentParser:
         "--settings-backup",
         choices=settingsbackup.OPERATIONS,
         help="Settings backup file: status, export (the applied settings of widget --applet N, read "
-        "from Plasma's own config) or import (no network, no credentials).",
+        "from Plasma's own config, or from the app's settings file in app mode) or import "
+        "(no network, no credentials).",
     )
     # Settings once came in argv, readable by every local user (audit M1). The
     # option stays only to be refused by name, without echoing its value.
@@ -243,7 +248,7 @@ def parser() -> argparse.ArgumentParser:
         "--migrate",
         choices=legacy.OPERATIONS,
         help="One-time move of the former release's data, wallet key and widgets "
-        "(run by scripts/install.sh only; no network, no credentials).",
+        "(run by scripts/install.sh only, never in app mode; no network, no credentials).",
     )
     result.add_argument("--version", action="version", version=__version__)
     return result
@@ -405,11 +410,30 @@ def _provider_ids(value: str | None, argument_parser: argparse.ArgumentParser):
     return list(dict.fromkeys(ids))
 
 
+def _frontend() -> str | None:
+    """The front end from HEARTHWIRE_FRONTEND (never from argv); None for a bad value (task 011)."""
+    try:
+        return frontend.mode()
+    except HelperError:
+        return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argument_parser = parser()
     args = argument_parser.parse_args(argv)
     _check_helper_arguments(args, argument_parser)
-    if args.port_owner is not None:
+    current = _frontend()
+    # Task 011: --migrate rewrites Plasma's own files, so the app may never run it.
+    refused = current is None or (current == frontend.APP and args.migrate is not None)
+    if refused:
+        payload = {"ok": False, "error": "bad-frontend"}
+    elif args.applet is not None and not frontend.applet_allowed(args.applet, current):
+        # Task 011: the app's reserved id in app mode only, never in Plasma mode.
+        payload = {"ok": False, "error": "applet-not-found"}
+    elif current == frontend.APP and args.all_applets:
+        # Task 011: --all would clear the widgets' history too; the app clears its own with --applet.
+        payload = {"ok": False, "error": "applet-not-found"}
+    elif args.port_owner is not None:
         payload = _port_owner_reply(args.port_owner, args.address)
     elif args.install_info:
         payload = _helper_reply(installinfo.run)
@@ -445,6 +469,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             provider_ids=_provider_ids(args.providers, argument_parser),
         )
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    if refused:
+        return 2
     return 0
 
 

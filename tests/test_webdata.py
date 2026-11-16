@@ -675,9 +675,12 @@ def test_unexpected_exception_is_a_bare_code(data, capsys, monkeypatch):
     assert prepare(capsys) == {"ok": False, "error": "os-error"}
 
 
-@pytest.mark.parametrize("value", ["0", "1", "2147483648"])
-def test_integer_arguments_accept_zero_to_two_pow_31(data, capsys, mounted, value):
-    # The applet id starts at 1 (below); the generation may be 0.
+@pytest.mark.parametrize("value", ["0", "1", "2147483647", "2147483648"])
+def test_integer_arguments_accept_zero_to_two_pow_31(data, capsys, mounted, value, monkeypatch):
+    # The applet id starts at 1 (below); the generation may be 0. 2**31 is the
+    # hearthwire-hyprland app's id (task 011): only app mode may use it.
+    if value == "2147483648":
+        monkeypatch.setenv("HEARTHWIRE_FRONTEND", "app")
     assert prepare(capsys, value if value != "0" else "1", value) == {"ok": True}
 
 
@@ -2092,8 +2095,12 @@ def test_the_applet_bound_message_matches_the_accepted_range(data, capsys, argv)
     assert "2147483647" not in err
 
 
-def test_the_largest_applet_id_is_accepted_everywhere(data, capsys, mounted):
+def test_the_largest_applet_id_is_accepted_everywhere(data, capsys, mounted, monkeypatch):
+    """The largest id the parser takes, 2**31, is the app's own (task 011): app mode only."""
     top = str(cli.MAX_INT_ARGUMENT)
+    assert prepare(capsys, top, 0) == {"ok": False, "error": "applet-not-found"}
+    assert prepare(capsys, str(cli.MAX_INT_ARGUMENT - 1), 0) == {"ok": True}
+    monkeypatch.setenv("HEARTHWIRE_FRONTEND", "app")
     assert prepare(capsys, top, 0) == {"ok": True}
     with pytest.raises(SystemExit):
         cli.main(["--usage-history", "read", "--applet", str(cli.MAX_INT_ARGUMENT + 1)])

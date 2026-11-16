@@ -15,6 +15,8 @@ on a new ``O_EXCL`` file inside ``library/``, so the text never passes through
 argv or the plasmoid's config. There is no initial text (that would be argv):
 editing is Replace. The vault lock is not held while the dialog is open, only
 before and after; the open file keeps the mount busy until the dialog ends.
+In app mode (task 011, ``HEARTHWIRE_FRONTEND=app``) there is no text box yet:
+add and replace are ``missing-tool`` and kdialog is never looked up.
 
 ``list`` returns the saved text to the plasmoid on stdout. This is the one
 place where library text passes through the helper (plan D53); it is never
@@ -34,7 +36,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Optional
 
-from . import vault
+from . import frontend, vault
 from .webdata import HelperError, _close, _descriptors, open_child_dir
 
 OPERATIONS = ("list", "add", "replace", "remove", "set-persona")
@@ -255,7 +257,10 @@ def _clear_stale_pending(library: int) -> None:
 # --- the dialog --------------------------------------------------------------------------------------
 
 
-def _kdialog() -> str:
+def _kdialog(environ: Optional[Mapping[str, str]]) -> str:
+    if frontend.is_app(environ):
+        # Task 011: kdialog is Plasma's only; the app's own text box comes later.
+        raise HelperError("missing-tool")
     path = shutil.which("kdialog")
     if not path or not os.path.isabs(path):
         raise HelperError("missing-tool")
@@ -290,7 +295,7 @@ def _ask(environ: Optional[Mapping[str, str]], kind: str, target: Optional[int])
     Returns the item id. The dialog runs without the vault lock; afterwards,
     under the lock again, the library must still be the same directory.
     """
-    kdialog = _kdialog()
+    kdialog = _kdialog(environ)
     pending = f"pending-{os.getpid()}-{os.urandom(8).hex()}.tmp"
     with _descriptors() as opened:
         with _library(environ, create=True) as library:

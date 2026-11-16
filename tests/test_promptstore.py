@@ -260,6 +260,58 @@ def test_missing_kdialog(mounted, capsys):
     assert prompts(capsys, "add", "--kind", "prompt") == {"ok": False, "error": "missing-tool"}
 
 
+# --- app mode (task 011, fix round 1): no text box yet, kdialog never looked up --------------------------
+
+
+def app_dialog_problems(module, lib, monkeypatch):
+    """In app mode add and replace are missing-tool, the kdialog stub on PATH never runs and
+    kdialog is not even looked up; list still works. In Plasma mode the stub still runs."""
+    from hearthwire.core import webdata
+
+    problems = []
+    lib.mount()
+    lib.folder.mkdir(mode=0o700, exist_ok=True)
+    (lib.folder / "prompt-1.txt").write_text("kept")
+    looked_up = []
+    real_which = module.shutil.which
+    monkeypatch.setattr(module.shutil, "which", lambda name, *a, **k: looked_up.append(name) or real_which(name, *a, **k))
+    monkeypatch.setenv("HEARTHWIRE_FRONTEND", "app")
+    lib.answer("typed")
+    for argv in (("add", {"kind": "prompt"}), ("add", {"kind": "persona"}), ("replace", {"item": 1})):
+        try:
+            result = module.run(argv[0], **argv[1])
+        except webdata.HelperError as error:
+            result = error.code
+        if result != {"ok": False, "error": "missing-tool"}:
+            problems.append(f"app {argv[0]}: {result}")
+    if lib.dialogs():
+        problems.append("the kdialog stub ran in app mode")
+    if "kdialog" in looked_up:
+        problems.append("kdialog was looked up in app mode")
+    if (lib.folder / "prompt-1.txt").read_text() != "kept" or sorted(os.listdir(lib.folder)) != ["prompt-1.txt"]:
+        problems.append("the library changed in app mode")
+    if module.run("list").get("ok") is not True:
+        problems.append("app list does not work")
+    monkeypatch.delenv("HEARTHWIRE_FRONTEND")
+    if module.run("add", kind="prompt") != {"ok": True, "id": 2} or len(lib.dialogs()) != 1:
+        problems.append("plasma add does not use kdialog")
+    return problems
+
+
+def test_app_mode_has_no_text_box_and_never_runs_kdialog(lib, monkeypatch):
+    assert app_dialog_problems(promptstore, lib, monkeypatch) == []
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ('    if frontend.is_app(environ):\n        # Task 011', '    if False:\n        # Task 011'),
+    ("    kdialog = _kdialog(environ)\n", "    kdialog = _kdialog({})\n"),
+])
+def test_proof_the_app_dialog_rule_catches(lib, monkeypatch, old, new):
+    from test_frontend import mutant
+
+    assert app_dialog_problems(mutant(promptstore, old, new), lib, monkeypatch)
+
+
 # --- what list trusts ------------------------------------------------------------------------------
 
 
