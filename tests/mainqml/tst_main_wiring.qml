@@ -1708,6 +1708,10 @@ TestCase {
         compare(label.text, expected)
         compare(label.textFormat, Text.PlainText)
         compare(page.confirmingImport, false)
+        // One General page at a time, as in Plasma: another one would take
+        // this page's import hold for a menu Restore.
+        page.destroy()
+        wait(0)
     }
 
     function test_backupErrorsAreFixedText() {
@@ -2180,6 +2184,124 @@ TestCase {
         checkRestoreInView(page)
     }
 
+    // --- Round 3: the hold while an import's confirmation is open (LOW-C) --
+
+    function freshHold() {
+        var text = Plasmoid.configuration.backupRestoreAt
+        var age = Date.now() - Number(text)
+        return /^[0-9]{13}$/.test(text) && age >= 0 && age < 1000
+    }
+
+    // main.qml with the General page open beside it, as in Plasma.
+    function mainAndGeneral(holdWait) {
+        var main = backupMain({backupAutoExport: true}, 300)
+        var component = Qt.createComponent(testCase.generalPageFile)
+        compare(component.status, Component.Ready, component.errorString())
+        var page = createTemporaryObject(component, testCase)
+        page.restoreHoldWait = holdWait === undefined ? 50 : holdWait
+        answerBackup(page, JSON.stringify({ok: true, exists: true, exported_at: backupStamp}))
+        return {main: main, page: page}
+    }
+
+    function openPreview(page) {
+        importing(page, {popupSize: "large"}, 0, "other")
+        compare(page.confirmingImport, true)
+        wait(0)
+        verify(freshHold(), "held")
+    }
+
+    // A backed-up change while the preview stays open past the 60 s window
+    // never exports; after Cancel the export follows.
+    function test_autoHeldWhileTheImportConfirmationIsOpen() {
+        var both = mainAndGeneral()
+        openPreview(both.page)
+        Plasmoid.configuration.usageMode = "used"
+        // As if more than a minute had passed: the page's next refresh
+        // makes the hold fresh again before main.qml looks.
+        Plasmoid.configuration.backupRestoreAt = String(Date.now() - 61000)
+        tryVerify(freshHold, 1000, "refreshed by the page")
+        for (var round = 0; round < 4; round++) {
+            settle(both.main)
+            Plasmoid.configuration.backupRestoreAt = String(Date.now() - 61000)
+        }
+        tryVerify(freshHold, 1000, "still held")
+        settle(both.main)
+        compare(mainExports(both.main), 0, "held while the confirmation is open")
+        compare(backupOps(both.page), ["status", "import"], "its own refreshes start no import")
+        compare(both.page.confirmingImport, true)
+        generalPart(both.page, "backupImportConfirm").actions[1].trigger()
+        tryCompare(Plasmoid.configuration, "backupRestoreAt", "", 1000)
+        settle(both.main)
+        compare(mainExports(both.main), 1, "after Cancel the export follows")
+    }
+
+    function test_autoFollowsAReplace() {
+        var both = mainAndGeneral()
+        openPreview(both.page)
+        Plasmoid.configuration.usageMode = "used"
+        settle(both.main)
+        compare(mainExports(both.main), 0)
+        generalPart(both.page, "backupImportConfirm").actions[0].trigger()
+        tryCompare(Plasmoid.configuration, "backupRestoreAt", "", 1000)
+        settle(both.main)
+        compare(mainExports(both.main), 1)
+    }
+
+    // The import read itself is held too, and a new import right after a
+    // Cancel keeps the hold without a gap.
+    function test_holdCoversTheReadAndANewImport() {
+        var both = mainAndGeneral(100000)
+        generalPart(both.page, "backupImport").clicked()
+        wait(0)
+        verify(freshHold(), "held while the import is read")
+        answerBackup(both.page, JSON.stringify({ok: true, exported_at: backupStamp, settings: {popupSize: "large"},
+                                                dropped: 0, origin: "this-computer"}))
+        var stamp = Plasmoid.configuration.backupRestoreAt
+        generalPart(both.page, "backupImportConfirm").actions[1].trigger()
+        generalPart(both.page, "backupImport").clicked()
+        wait(0)
+        compare(Plasmoid.configuration.backupRestoreAt, stamp, "no gap between the two")
+        answerBackup(both.page, JSON.stringify({ok: false, error: "absent"}))
+        tryCompare(Plasmoid.configuration, "backupRestoreAt", "", 1000)
+    }
+
+    // Plasma re-sends every key on Apply: a request already handled (or
+    // the page's own hold) never runs the import again.
+    function test_backupRestoreReemitDoesNotImportAgain() {
+        var page = generalOpenedWith(String(Date.now()))
+        wait(50)
+        answerBackup(page, JSON.stringify({ok: true, exists: true, exported_at: backupStamp}))
+        answerBackup(page, JSON.stringify({ok: true, exported_at: backupStamp, settings: {popupSize: "large"},
+                                           dropped: 0, origin: "this-computer"}))
+        Plasmoid.reemitAll()
+        wait(0)
+        compare(backupOps(page), ["status", "import"])
+        compare(page.confirmingImport, true)
+        generalPart(page, "backupImportConfirm").actions[0].trigger()
+        Plasmoid.reemitAll()
+        wait(50)
+        compare(backupOps(page), ["status", "import"], "Replace, then the Apply's re-send")
+        compare(page.confirmingImport, false)
+    }
+
+    // A newer menu request during a preview runs its own import, and the
+    // hold goes on.
+    function test_newerMenuRequestDuringAPreview() {
+        var both = mainAndGeneral(100000)
+        openPreview(both.page)
+        Plasmoid.configuration.backupRestoreAt = String(Date.now() + 0)
+        wait(0)
+        compare(backupOps(both.page), ["status", "import", "import"])
+        verify(freshHold(), "held while the new import is read")
+    }
+
+    function test_settingsClosedEndsTheHold() {
+        var both = mainAndGeneral(100000)
+        openPreview(both.page)
+        both.page.destroy()
+        tryCompare(Plasmoid.configuration, "backupRestoreAt", "", 1000)
+    }
+
     // --- Settings → General: the switch, the restore request, the origin ---
 
     function test_backupAutoSwitchWritesOnlyItsCfg() {
@@ -2188,7 +2310,7 @@ TestCase {
         compare(box.checked, false)
         compare(box.text, "Back up automatically when settings are applied")
         compare(generalPart(page, "backupAutoHelp").toolTipText,
-                "Saved about 3 seconds after you press Apply when a backed-up setting changed, and once when you turn this on. It replaces the previous backup without asking. With several Hearthwire widgets, the last one to apply wins. The backup never holds sign-ins, the encrypted folder, zoom or the usage history setting.")
+                "Saved about 3 seconds after you press Apply when a backed-up setting changed, and once when you turn this on. It replaces the previous backup without asking. With several Hearthwire widgets, the last one to apply wins. It waits while an import's Replace question is open, and up to a minute after Restore settings… in the panel menu, so the backup being restored isn't replaced. The backup never holds sign-ins, the encrypted folder, zoom or the usage history setting.")
         box.toggle()
         box.toggled()
         compare(page.cfg_backupAutoExport, true)
@@ -2239,12 +2361,13 @@ TestCase {
         compare(generalPart(page, "backupOrigin").text, originHere)
         // M-1: scrolled again once the confirmation was shown.
         checkRestoreInView(page)
-        compare(Plasmoid.configuration.backupRestoreAt, stamp, "never written by the page")
-        compare(page.cfg_backupRestoreAt, "", "nor its cfg_ (only the mirror sets it)")
-        // Cancel leaves everything as it was.
+        // The page holds Automatic backup with a fresh request (LOW-C).
+        verify(freshHold(), "held: " + Plasmoid.configuration.backupRestoreAt)
+        // Cancel leaves everything as it was, and ends the hold.
         generalPart(page, "backupImportConfirm").actions[1].trigger()
         compare(page.cfg_popupSize, "normal")
         compare(backupOps(page), ["status", "import"])
+        tryCompare(Plasmoid.configuration, "backupRestoreAt", "", 1000)
     }
 
     function test_backupRestoreStaleDoesNothing_data() {

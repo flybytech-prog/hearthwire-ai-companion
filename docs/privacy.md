@@ -226,7 +226,9 @@ one fixed file; there is no file dialog.
   A success is silent; a failure shows one notification with a fixed reason
   (once per reason, until an export works again). There is one file per
   user and no older copies: with several Hearthwire widgets that have it on,
-  the last one to apply wins.
+  the last one to apply wins. After **Restore settings…** it waits up to a
+  minute, so the backup you are restoring from is never replaced while you
+  look at it.
 - **Back up settings** in the panel menu exports at once and shows a
   notification ("Settings backed up" or a fixed reason). **Restore
   settings…** opens Settings on General at the Backup section and starts an
@@ -295,9 +297,14 @@ reads them (whitespace and key order don't count).
 - **After you restore another computer's backup, the next backup signs it
   as this computer's.** Once you press Replace and Apply, those settings are
   this widget's own, so the next export (the button, the menu or Automatic
-  backup, which runs about 3 seconds after that Apply) writes them signed
+  backup, which runs about 3 seconds after that Apply, or up to a minute
+  after a menu Restore, see above) writes them signed
   with this install's key, and a later import says "Made by Hearthwire on
   this computer." The warning you saw before Replace is not kept anywhere.
+- If the computer crashes or loses power at the moment the first export
+  makes the key, the key may be left with a second file name next to it.
+  Until the next export cleans that up, Import shows the warning even for
+  this computer's backups (the key is then not used); nothing else changes.
 - Deleting the key makes every earlier backup show the warning. Hearthwire
   1.0.1 can't read a version 2 file ("made by a different version") and
   ignores the key.

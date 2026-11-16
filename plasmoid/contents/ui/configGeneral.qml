@@ -411,6 +411,16 @@ KCM.SimpleKCM {
     // That confirmation is shown: scrolled again while the layout grows to
     // hold it, until it closes or the user scrolls.
     property bool restoreFollow: false
+    // The last restore request this page acted on or wrote itself, so a
+    // re-sent value (Plasma re-sends every key on Apply) starts nothing.
+    property string restoreSeen: ""
+    // The hold this page keeps on Automatic backup ("" for none): while an
+    // import is read or its confirmation is open, backupRestoreAt is kept
+    // fresh, so main.qml never overwrites the file being restored.
+    property string restoreHold: ""
+    readonly property bool holdingAutoBackup: page.confirmingImport || page.backupOp === "import"
+    // Well inside SettingsBackup.RESTORE_WINDOW_MS.
+    property int restoreHoldWait: 20000
     // Export pressed: the status is read again first (the panel menu or
     // Automatic backup may have written a backup meanwhile).
     property bool exportPending: false
@@ -799,6 +809,44 @@ KCM.SimpleKCM {
             page.restoreFollow = false
     }
 
+    // Later, so closing a confirmation and starting the next import in one
+    // go keeps the hold without a gap.
+    onHoldingAutoBackupChanged: Qt.callLater(page.syncAutoBackupHold)
+
+    function syncAutoBackupHold() {
+        if (page.holdingAutoBackup && page.restoreHold === "")
+            page.holdAutoBackup()
+        else if (!page.holdingAutoBackup)
+            page.releaseAutoBackup()
+    }
+
+    function holdAutoBackup() {
+        var stamp = String(Date.now())
+        page.restoreSeen = stamp
+        page.restoreHold = stamp
+        Plasmoid.configuration.backupRestoreAt = stamp
+    }
+
+    // Ends the hold, and with it the menu request it came from; a newer
+    // request from the menu stays.
+    function releaseAutoBackup() {
+        if (page.restoreHold === "")
+            return
+        page.restoreHold = ""
+        if (Plasmoid.configuration.backupRestoreAt === page.restoreSeen)
+            Plasmoid.configuration.backupRestoreAt = ""
+    }
+
+    Timer {
+        interval: page.restoreHoldWait
+        repeat: true
+        running: page.restoreHold !== ""
+        onTriggered: page.holdAutoBackup()
+    }
+
+    // Settings closed with a confirmation still open: no hold stays behind.
+    Component.onDestruction: page.releaseAutoBackup()
+
     Connections {
         target: page.flickable
         function onContentHeightChanged() {
@@ -823,6 +871,8 @@ KCM.SimpleKCM {
         page.runBackup("status")
         // Opened by panel menu → Restore settings…: the import follows the status.
         page.restorePending = SettingsBackup.restoreRequested(Plasmoid.configuration.backupRestoreAt, Date.now())
+        if (page.restorePending)
+            page.restoreSeen = Plasmoid.configuration.backupRestoreAt
         if (page.restorePending && page.backupOp === "")
             page.startRestore()
         page.runVault("status")
@@ -846,8 +896,10 @@ KCM.SimpleKCM {
                 page.cfg_usageHistoryClearOwed = value
             else if (key === "backupRestoreAt") {
                 page.cfg_backupRestoreAt = value
-                // Restore from the menu while Settings is already open.
-                if (SettingsBackup.restoreRequested(value, Date.now())) {
+                // Restore from the menu while Settings is already open; a
+                // value seen before (a re-send or this page's hold) starts nothing.
+                if (value !== page.restoreSeen && SettingsBackup.restoreRequested(value, Date.now())) {
+                    page.restoreSeen = value
                     if (page.backupOp === "")
                         page.startRestore()
                     else
@@ -1558,7 +1610,7 @@ KCM.SimpleKCM {
             }
             Kirigami.ContextualHelpButton {
                 objectName: "backupAutoHelp"
-                toolTipText: i18n("Saved about 3 seconds after you press Apply when a backed-up setting changed, and once when you turn this on. It replaces the previous backup without asking. With several Hearthwire widgets, the last one to apply wins. The backup never holds sign-ins, the encrypted folder, zoom or the usage history setting.")
+                toolTipText: i18n("Saved about 3 seconds after you press Apply when a backed-up setting changed, and once when you turn this on. It replaces the previous backup without asking. With several Hearthwire widgets, the last one to apply wins. It waits while an import's Replace question is open, and up to a minute after Restore settings… in the panel menu, so the backup being restored isn't replaced. The backup never holds sign-ins, the encrypted folder, zoom or the usage history setting.")
             }
         }
         RowLayout {

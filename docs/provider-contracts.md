@@ -1238,24 +1238,35 @@ are not in the backup.
   `secrets.token_bytes(32)`, raw, mode `0600`. The folder is opened with
   `webdata.open_base` / `open_child_dir` (no symlink, ours) and must not be
   group- or other-writable; only `export` makes it (`0700`), after
-  `refuse_legacy_data`, and an existing one is never changed. Only `export`
+  `refuse_legacy_data`, and tightens a safe existing one to `0700` with
+  `fchmod` on the opened descriptor (round 3, LOW-B: no other user can then
+  open it and hold its lock; a failed `fchmod` is `key-unusable`). `import`
+  and `status` never change a mode. Only `export`
   makes the key: an `O_CREAT|O_EXCL|O_NOFOLLOW` temporary
   `backup-key.<16 hex>.tmp` at `0600`, fsynced, then `link()`ed to
   `backup-key` (never replaces; on `EEXIST` the existing key is read and
   used, so two exports at once share one key), the temporary unlinked and
   the folder fsynced. Export first deletes stale `backup-key.<16 hex>.tmp`
   files (a symlink is unlinked, never followed). Export holds an exclusive
-  `flock` on the backup folder's descriptor and then on the key folder's
-  (round 2, LOW-1) for its whole write, so a concurrent export never deletes
-  another's live temporary or sees a key mid-link; import takes the key
-  folder's lock shared, `status` none. No lock file is made; a wait over
+  `flock` on the backup folder's descriptor for its whole write, and on the
+  key folder's while it reads or makes the key (round 2, LOW-1; the key
+  folder's descriptor, and so its lock, is closed before the backup is
+  written, when the key is already final), so a concurrent export never
+  deletes another's live temporary or sees a key mid-link. When both are the
+  same folder (`XDG_DATA_HOME` equal to `XDG_CONFIG_HOME`; compared by
+  `(st_dev, st_ino)` of the opened descriptors), the lock is taken once
+  (round 3, LOW-A). Import takes the key folder's lock shared, `status`
+  none. No lock file is made; a wait over
   10 s (`LOCK_WAIT_SECONDS`) is `os-error`, and a file system without flock
   runs unlocked (still fail-closed). Read (`export` and
   `import`; `status` never reads it, and `import` only after the checksum
   passed) with `O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC|O_NOCTTY`; it must be
   a regular file, ours, with no group or other bits, exactly 32 bytes and one
   name (`st_nlink == 1`); an open refused with `ELOOP`, `EACCES`, `ENXIO` or
-  `EISDIR` counts as unusable too.
+  `EISDIR` counts as unusable too. A crash between `link()` and the unlink
+  of the temporary leaves the key with two names (`st_nlink` 2), so import
+  gives `other` until the next export, whose stale cleanup removes the
+  temporary first, so that export uses the key as before (INFO-A).
   Otherwise `export` is `key-unusable` and `import` gives `other`; the key
   is never replaced or repaired (M-5). No rotation. The key is never in
   argv, the environment, stdout, stderr, a reply, the backup or a log.

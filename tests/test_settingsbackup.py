@@ -1927,8 +1927,13 @@ print(dict(codes))
 """
 
 
-def test_four_concurrent_exporters_never_fail(config, tmp_path):
-    """The auditor's race: 4 processes x 150 exports from a fresh folder, the key made in the race."""
+@pytest.mark.parametrize("shared", [False, True], ids=["two-folders", "one-folder"])
+def test_four_concurrent_exporters_never_fail(config, tmp_path, monkeypatch, shared):
+    """The auditor's race: 4 processes x 150 exports from a fresh folder, the key made in the race.
+
+    one-folder: XDG_DATA_HOME == XDG_CONFIG_HOME, so the backup and the key share a folder (LOW-A)."""
+    if shared:
+        monkeypatch.setenv("XDG_DATA_HOME", os.environ["XDG_CONFIG_HOME"])
     write_rc(GOOD)
     go = tmp_path / "go"
     env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"], "XDG_CONFIG_HOME": os.environ["XDG_CONFIG_HOME"],
@@ -1939,9 +1944,102 @@ def test_four_concurrent_exporters_never_fail(config, tmp_path):
     go.touch()
     results = [worker.communicate(timeout=300) for worker in workers]
     assert [(out.strip(), err) for out, err in results] == [("{'ok': 150}", "")] * 4
-    assert os.listdir(data_folder()) == ["backup-key"]
-    assert os.listdir(config) == ["settings-backup.json"]
+    if shared:
+        assert sorted(os.listdir(config)) == ["backup-key", "settings-backup.json"]
+    else:
+        assert os.listdir(data_folder()) == ["backup-key"]
+        assert os.listdir(config) == ["settings-backup.json"]
     assert run("import")["origin"] == "this-computer"
+
+
+def test_one_folder_for_the_backup_and_the_key_is_locked_once(config, monkeypatch):
+    """Round 3, LOW-A: a second flock on the same folder would wait on our own lock."""
+    monkeypatch.setenv("XDG_DATA_HOME", os.environ["XDG_CONFIG_HOME"])
+    monkeypatch.setattr(backup, "LOCK_WAIT_SECONDS", 0.2)  # A self-conflict would show as os-error.
+    taken = []
+    real_flock = fcntl.flock
+
+    def watching_flock(descriptor, operation):
+        taken.append(operation & ~fcntl.LOCK_NB)
+        return real_flock(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", watching_flock)
+    assert exported(GOOD)["ok"] is True
+    assert taken == [fcntl.LOCK_EX]
+    assert sorted(os.listdir(config)) == ["backup-key", "settings-backup.json"]
+    assert stat.S_IMODE((config / "backup-key").stat().st_mode) == 0o600
+    taken.clear()
+    assert run("import") == {"ok": True, "exported_at": STAMP, "settings": GOOD_KEPT, "dropped": 0,
+                             "origin": "this-computer"}
+    assert taken == [fcntl.LOCK_SH]
+    assert exported(GOOD, now=NOW + 60)["ok"] is True  # Again, with the key already there.
+
+
+def test_a_different_key_folder_is_still_locked(config, monkeypatch):
+    """The skip compares the opened folders, not the paths: two folders still take two locks."""
+    exported(GOOD)
+    monkeypatch.setattr(backup, "LOCK_WAIT_SECONDS", 0.2)
+    descriptor = hold_lock(data_folder())
+    try:
+        assert exported(GOOD) == {"ok": False, "error": "os-error"}
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o750, 0o711, 0o500])
+def test_export_tightens_a_safe_key_folder_and_import_never_does(config, mode):
+    """Round 3, LOW-B: a folder others may open could have its lock held by them."""
+    install_key(folder_mode=mode if mode & 0o200 else 0o700)
+    exported(GOOD)
+    data_folder().chmod(mode)
+    for operation in ("status", "import"):
+        assert run(operation)["ok"] is True
+        assert stat.S_IMODE(data_folder().stat().st_mode) == mode
+    assert run("import")["origin"] == "this-computer"
+    assert exported(GOOD, now=NOW + 60)["ok"] is True
+    assert stat.S_IMODE(data_folder().stat().st_mode) == 0o700
+    assert key_path().read_bytes() == KEY
+
+
+def test_a_new_key_folder_is_made_0700_even_in_a_0755_data_base(config):
+    base = Path(os.environ["XDG_DATA_HOME"])
+    base.mkdir(mode=0o755)
+    base.chmod(0o755)
+    assert exported(GOOD)["ok"] is True
+    assert stat.S_IMODE(data_folder().stat().st_mode) == 0o700
+    assert stat.S_IMODE(base.stat().st_mode) == 0o755  # Only our own folder is changed.
+
+
+def test_a_crash_between_link_and_unlink_heals_at_the_next_export(config):
+    """INFO-A: the key keeps a second name; import says other, the next export cleans up and uses it."""
+    install_key()
+    exported(GOOD)
+    os.link(key_path(), data_folder() / "backup-key.0123456789abcdef.tmp")
+    assert run("import")["origin"] == "other"
+    assert exported(GOOD, now=NOW + 60)["ok"] is True
+    assert os.listdir(data_folder()) == ["backup-key"] and key_path().stat().st_nlink == 1
+    assert key_path().read_bytes() == KEY
+    assert run("import")["origin"] == "this-computer"
+
+
+def test_a_key_folder_that_cant_be_tightened_is_unusable(config, monkeypatch):
+    install_key(folder_mode=0o700)
+    exported(GOOD)
+    data_folder().chmod(0o755)
+    before = (config / "settings-backup.json").read_bytes()
+    real_fchmod = os.fchmod
+    key_folder = os.stat(data_folder())
+
+    def failing_fchmod(descriptor, mode):
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (key_folder.st_dev, key_folder.st_ino):
+            raise OSError(errno.EPERM, "Operation not permitted")
+        return real_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(os, "fchmod", failing_fchmod)
+    assert exported(GOOD, now=NOW + 60) == {"ok": False, "error": "key-unusable"}
+    assert (config / "settings-backup.json").read_bytes() == before
+    assert stat.S_IMODE(data_folder().stat().st_mode) == 0o755
 
 
 def hold_lock(path):

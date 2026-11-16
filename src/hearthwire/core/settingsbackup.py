@@ -1166,9 +1166,12 @@ def _valid_stamp(value: object) -> bool:
 def _key_directory(environ: Optional[Mapping[str, str]], opened: list[int], *, create: bool) -> Optional[int]:
     """``<data>/hearthwire``: never a symlink, ours, not group- or other-writable.
 
-    Only ``create`` (export, after refuse_legacy_data) makes it (0700); an
-    existing folder is never changed. Its faults raise their own codes, which
-    the caller turns into key-unusable.
+    Only ``create`` (export, after refuse_legacy_data) makes it (0700) or
+    tightens a safe existing one to 0700, on the opened descriptor, so no
+    other user can open it and hold its lock (round 3, LOW-B); a folder that
+    can't be tightened is key-unusable. Import and status never change a
+    mode. Its faults raise their own codes, which the caller turns into
+    key-unusable.
     """
     base = open_base(data_base(environ), create=create)
     if base is None:
@@ -1188,6 +1191,11 @@ def _key_directory(environ: Optional[Mapping[str, str]], opened: list[int], *, c
         raise HelperError("os-error") from None
     if _unsafe(info.st_mode):
         raise HelperError("unsafe-mode")
+    if create and stat.S_IMODE(info.st_mode) != PRIVATE_MODE:
+        try:
+            os.fchmod(directory, PRIVATE_MODE)
+        except OSError:
+            raise HelperError("key-unusable") from None
     return directory
 
 
@@ -1273,11 +1281,29 @@ def _create_key(directory: int) -> bytes:
     return existing
 
 
-def _signing_key(environ: Optional[Mapping[str, str]], *, create: bool) -> Optional[bytes]:
+def _folder_identity(directory: int) -> tuple[int, int]:
+    try:
+        info = os.fstat(directory)
+    except OSError:
+        raise HelperError("os-error") from None
+    return info.st_dev, info.st_ino
+
+
+def _signing_key(
+    environ: Optional[Mapping[str, str]],
+    *,
+    create: bool,
+    locked: Optional[tuple[int, int]] = None,
+) -> Optional[bytes]:
     """This install's key. Without ``create`` a missing key is None and nothing is made.
 
     Any unsafe key or folder is key-unusable; nothing is ever replaced or
     repaired (M-5), so a planted file never becomes this computer's key.
+    ``locked`` is the (st_dev, st_ino) of a folder the caller already holds
+    exclusively: when the key folder is that same folder (XDG_DATA_HOME ==
+    XDG_CONFIG_HOME), a second flock on another descriptor would wait on
+    our own lock, so it is skipped (round 3, LOW-A). The lock is held while
+    the key is read or made, until this returns.
     """
     with _descriptors() as opened:
         try:
@@ -1288,7 +1314,8 @@ def _signing_key(environ: Optional[Mapping[str, str]], *, create: bool) -> Optio
             raise HelperError("key-unusable") from None
         if directory is None:
             return None
-        _lock_folder(directory, exclusive=create)
+        if locked is None or _folder_identity(directory) != locked:
+            _lock_folder(directory, exclusive=create)
         if create:
             _clear_stale_key_temporaries(directory)
         key = _read_key(directory)
@@ -1439,7 +1466,7 @@ def export(
         if directory is None:
             raise HelperError("os-error")
         _lock_folder(directory, exclusive=True)  # Released when the folder is closed.
-        key = _signing_key(environ, create=True)
+        key = _signing_key(environ, create=True, locked=_folder_identity(directory))
         if key is None:
             raise HelperError("os-error")
         encoded = encode_document(settings, exported_at, key)
