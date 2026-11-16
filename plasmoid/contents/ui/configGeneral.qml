@@ -418,7 +418,10 @@ KCM.SimpleKCM {
     // import is read or its confirmation is open, backupRestoreAt is kept
     // fresh, so main.qml never overwrites the file being restored.
     property string restoreHold: ""
-    readonly property bool holdingAutoBackup: page.confirmingImport || page.backupOp === "import"
+    // Replace pressed, not yet applied: the page holds the backup's values,
+    // so the file is still the one being restored (L-5).
+    property bool replacedPending: false
+    readonly property bool holdingAutoBackup: page.confirmingImport || page.backupOp === "import" || page.replacedPending
     // Well inside SettingsBackup.RESTORE_WINDOW_MS.
     property int restoreHoldWait: 20000
     // Export pressed: the status is read again first (the panel menu or
@@ -685,13 +688,19 @@ KCM.SimpleKCM {
         if (values.chatUserSites !== undefined) page.cfg_chatUserSites = values.chatUserSites
         if (values.chatSiteOrder !== undefined) page.cfg_chatSiteOrder = values.chatSiteOrder
         page.backupMessage = "applied"
+        page.replacedPending = true
     }
 
     // Plasma calls this on Apply and OK, before it saves the cfg_ values.
     // A loaded backup is saved then; other results stay true.
+    // Plasma 6 (AppletConfiguration.qml) calls it on Apply, OK and the
+    // unsaved-changes dialog's Apply, and then writes the cfg_ values back
+    // in the same call; the hold ends after that (syncAutoBackupHold runs
+    // later), so Automatic backup exports the restored settings.
     function saveConfig() {
         if (page.backupMessage === "applied")
             page.backupMessage = ""
+        page.replacedPending = false
     }
 
     function backupStatusText() {

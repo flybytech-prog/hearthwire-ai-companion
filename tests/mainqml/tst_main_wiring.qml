@@ -8,6 +8,7 @@ import org.kde.plasma.plasma5support as Plasma5Support
 import org.kde.notification
 import "../../plasmoid/contents/ui/ChatSites.js" as ChatSites
 import "../../plasmoid/contents/ui/ProviderCatalog.js" as Catalog
+import "../../plasmoid/contents/ui/SettingsBackup.js" as SettingsBackup
 
 // The real main.qml with a stubbed Plasmoid: its colors, levels and tooltip,
 // read through the same properties the bars, numbers and dots use. Run by
@@ -2199,8 +2200,24 @@ TestCase {
         compare(component.status, Component.Ready, component.errorString())
         var page = createTemporaryObject(component, testCase)
         page.restoreHoldWait = holdWait === undefined ? 50 : holdWait
+        // As Plasma opens a page: each cfg_ from the applied value.
+        Plasmoid.configuration.keys().forEach(function (key) {
+            if (("cfg_" + key) in page)
+                page["cfg_" + key] = Plasmoid.configuration[key]
+        })
         answerBackup(page, JSON.stringify({ok: true, exists: true, exported_at: backupStamp}))
         return {main: main, page: page}
+    }
+
+    // Apply or OK as Plasma 6.8 does it (AppletConfiguration.qml
+    // saveConfig): the page's saveConfig(), then every cfg_ written back.
+    function applyPage(page) {
+        if (page.saveConfig)
+            page.saveConfig()
+        Plasmoid.configuration.keys().forEach(function (key) {
+            if (("cfg_" + key) in page)
+                Plasmoid.configuration[key] = page["cfg_" + key]
+        })
     }
 
     function openPreview(page) {
@@ -2235,16 +2252,55 @@ TestCase {
         compare(mainExports(both.main), 1, "after Cancel the export follows")
     }
 
-    function test_autoFollowsAReplace() {
+    // L-5: Replace keeps the hold until Apply; then exactly one export, of
+    // the restored settings.
+    function test_autoWaitsForTheApplyAfterReplace() {
         var both = mainAndGeneral()
         openPreview(both.page)
+        generalPart(both.page, "backupImportConfirm").actions[0].trigger()
+        compare(both.page.cfg_popupSize, "large", "replaced on the page")
+        // A popup change between Replace and Apply (main.qml's own write).
         Plasmoid.configuration.usageMode = "used"
         settle(both.main)
-        compare(mainExports(both.main), 0)
-        generalPart(both.page, "backupImportConfirm").actions[0].trigger()
+        settle(both.main)
+        verify(freshHold(), "still held after Replace")
+        compare(mainExports(both.main), 0, "nothing before Apply")
+        applyPage(both.page)
+        compare(Plasmoid.configuration.popupSize, "large", "applied")
         tryCompare(Plasmoid.configuration, "backupRestoreAt", "", 1000)
         settle(both.main)
-        compare(mainExports(both.main), 1)
+        compare(mainExports(both.main), 1, "one export after Apply")
+        var values = JSON.parse(both.main.backupPendingFingerprint)
+        compare(values[SettingsBackup.BACKUP_KEYS.indexOf("popupSize")], "large", "of the restored settings")
+        answerBackup(both.main, exportOk())
+        settle(both.main)
+        compare(mainExports(both.main), 1, "and only one")
+    }
+
+    // Replace, then Settings closed without Apply: held until the page goes.
+    function test_replaceThenCloseWithoutApply() {
+        var both = mainAndGeneral()
+        openPreview(both.page)
+        generalPart(both.page, "backupImportConfirm").actions[0].trigger()
+        Plasmoid.configuration.usageMode = "used"
+        settle(both.main)
+        compare(mainExports(both.main), 0, "never while the hold is set")
+        verify(freshHold())
+        both.page.destroy()
+        tryCompare(Plasmoid.configuration, "backupRestoreAt", "", 1000)
+        compare(mainExports(both.main), 0, "nothing ran before the hold ended")
+        settle(both.main)
+        compare(mainExports(both.main), 1, "the applied settings, as after a Cancel")
+        compare(Plasmoid.configuration.popupSize, "normal", "the replaced values were never applied")
+    }
+
+    // An Apply without a Replace leaves no hold behind and starts none.
+    function test_applyWithoutReplaceHoldsNothing() {
+        var both = mainAndGeneral()
+        applyPage(both.page)
+        wait(0)
+        compare(Plasmoid.configuration.backupRestoreAt, "")
+        compare(both.page.restoreHold, "")
     }
 
     // The import read itself is held too, and a new import right after a
