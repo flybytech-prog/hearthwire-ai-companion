@@ -2087,6 +2087,52 @@ def test_proof_main_chat_config_write_is_caught():
     assert _main_config_write_offenders(code)
 
 
+def _page_live_writes(code, base):
+    """Lines where a settings page writes Plasmoid.configuration itself.
+
+    Task 007 round 3 (LOW-C, manager decision): configGeneral alone may keep
+    Automatic backup on hold while an import is read or confirming, so main.qml
+    sees it before any Apply: exactly HOLD_WRITE inside holdAutoBackup and
+    RELEASE_WRITE inside releaseAutoBackup, once each. Nothing else."""
+    found = []
+    for match in re.finditer(r"\bPlasmoid\s*\.\s*configuration\s*(?:\.\s*\w+|\[[^\]]*\])\s*=(?!=)", code):
+        line = _line_at(code, match.start())
+        if base == "configGeneral.qml":
+            allowed = [(function, write) for function, write in (("holdAutoBackup", HOLD_WRITE), ("releaseAutoBackup", RELEASE_WRITE))
+                       if line == write and any(lo <= match.start() < hi for lo, hi in
+                                                _block_spans(code, rf"\bfunction\s+{function}\s*\([^)]*\)\s*\{{"))]
+            if allowed:
+                continue
+        found.append(_line_of(code, match.start()))
+    if base == "configGeneral.qml":
+        for write in (HOLD_WRITE, RELEASE_WRITE):
+            if len(_hits(_code_pattern(write), code)) > 1:
+                found.append(f"{write!r} more than once")
+    return found
+
+
+HOLD_WRITE = "Plasmoid.configuration.backupRestoreAt = stamp"
+RELEASE_WRITE = 'Plasmoid.configuration.backupRestoreAt = ""'
+
+
+@pytest.mark.parametrize(("path", "old", "new"), [
+    # Round 3: the exception is the two lines, in their own functions, in configGeneral only.
+    (UI / "configGeneral.qml", "        Plasmoid.configuration.backupRestoreAt = stamp\n",
+     "        Plasmoid.configuration.backupRestoreAt = stamp\n        Plasmoid.configuration.chatSites = \"\"\n"),
+    (UI / "configGeneral.qml", "    function startRestore() {\n",
+     "    function g() { var stamp = \"1\"; Plasmoid.configuration.backupRestoreAt = stamp }\n    function startRestore() {\n"),
+    (UI / "configGeneral.qml", "    function startRestore() {\n",
+     "    function g() { Plasmoid.configuration.backupRestoreAt = \"\" }\n    function startRestore() {\n"),
+    (UI / "configGeneral.qml", "            Plasmoid.configuration.backupRestoreAt = \"\"\n",
+     "            Plasmoid.configuration.backupAutoExport = false\n"),
+    (UI / "configChat.qml", "            else if (key === \"backupRestoreAt\")\n                page.cfg_backupRestoreAt = value\n",
+     "            else if (key === \"backupRestoreAt\") {\n                var stamp = value\n"
+     "                Plasmoid.configuration.backupRestoreAt = stamp\n            }\n"),
+])
+def test_proof_page_live_write_exception_is_narrow(path, old, new):
+    assert _page_live_writes(_mutated(path, old, new), path.name)
+
+
 @pytest.mark.parametrize("page", CONFIG_PAGES, ids=lambda path: path.name)
 def test_config_pages_declare_every_chat_key_and_never_write_config(page):
     code = _read_code(page)
@@ -2107,7 +2153,7 @@ def test_config_pages_declare_every_chat_key_and_never_write_config(page):
         for name in (f"cfg_{key}", f"cfg_{key}Default"):
             value = re.findall(rf"(?m)^\s*property\s+\w+\s+{name}\s*:\s*(.+?)\s*$", code)
             assert value == [literal], f"{_rel(page)}: {name} must default to {literal}, got {value}"
-    writes = _hits(r"\bPlasmoid\s*\.\s*configuration\s*(?:\.\s*\w+|\[[^\]]*\])\s*=(?!=)", code)
+    writes = _page_live_writes(code, page.name)
     assert not writes, f"{_rel(page)} must write cfg_ properties, never Plasmoid.configuration; lines {writes}"
     gen_writes = [
         line for line in _hits(r"\bcfg_chatProfileGeneration\s*=(?!=)", code)
@@ -12137,6 +12183,9 @@ def _backup_key_writer_problems(sources):
                 continue
             if key == "backupRestoreAt" and base in RESTORE_MIRRORS and line == RESTORE_MIRROR:
                 continue
+            if key == "backupRestoreAt" and base == CONFIG_GENERAL.name and line in (HOLD_WRITE, RELEASE_WRITE) \
+                    and not _page_live_writes(code, base):
+                continue
             if key == "backupAutoExport" and base == CONFIG_GENERAL.name and line == AUTO_SWITCH_WRITE:
                 continue
             problems.append(f"{name}:{_line_of(code, at)}: may not write {key} ({line!r})")
@@ -12144,7 +12193,7 @@ def _backup_key_writer_problems(sources):
             problems.append(f"{name}: the backup keys are never written by a computed name")
         if base in RESTORE_MIRRORS:
             problems += _pin_problems(code, (RESTORE_MIRRORS[base],), name)
-            if len(_key_writes(code, ("backupRestoreAt",))) != 1:
+            if len(_hits(r"\bcfg_backupRestoreAt" + WRITE_OPERATOR, code)) != 1:
                 problems.append(f"{name}: cfg_backupRestoreAt is assigned only by its mirror")
     main = sources.get(_rel(MAIN_QML), "")
     body = _function_body(main, "restoreSettings")
@@ -12158,6 +12207,53 @@ def _backup_key_writer_problems(sources):
         problems.append(f"the backupAutoExport CheckBox must show cfg_backupAutoExport and write it only by `{AUTO_SWITCH_WRITE}`")
     if len(_key_writes(general, ("backupAutoExport",))) != 1:
         problems.append("configGeneral.qml writes cfg_backupAutoExport once, in its switch")
+    problems += _restore_hold_problems(general)
+    return problems
+
+
+# Round 3 (LOW-C): while an import is read or its confirmation is open,
+# configGeneral keeps backupRestoreAt fresh (at once, then every 20 s, inside
+# the 60 s window), so main.qml's hold-back never exports during an open
+# preview. The hold ends only when that is over (Replace, Cancel, a failed
+# read) or the page goes away, and the release clears only the page's own
+# stamp, never a newer menu request.
+HOLDING_AUTO_BACKUP = 'readonly property bool holdingAutoBackup: page.confirmingImport || page.backupOp === "import"'
+HOLD_CHANGED = "onHoldingAutoBackupChanged: Qt.callLater(page.syncAutoBackupHold)"
+SYNC_HOLD_BODY = ('{ if (page.holdingAutoBackup && page.restoreHold === "") page.holdAutoBackup() '
+                  "else if (!page.holdingAutoBackup) page.releaseAutoBackup() }")
+HOLD_BODY = ("{ var stamp = String(Date.now()) page.restoreSeen = stamp page.restoreHold = stamp "
+             f"{HOLD_WRITE} }}")
+RELEASE_BODY = ('{ if (page.restoreHold === "") return page.restoreHold = "" '
+                f"if (Plasmoid.configuration.backupRestoreAt === page.restoreSeen) {RELEASE_WRITE} }}")
+HOLD_TIMER = ('{ interval: page.restoreHoldWait repeat: true running: page.restoreHold !== "" '
+              "onTriggered: page.holdAutoBackup() }")
+HOLD_PINS = (HOLDING_AUTO_BACKUP, HOLD_CHANGED, "property int restoreHoldWait: 20000",
+             'property string restoreHold: ""', "Component.onDestruction: page.releaseAutoBackup()")
+RESTORE_HOLD_FORMS = (
+    r'property\s+string\s+restoreHold\s*:\s*""\s*$',
+    r"page\s*\.\s*restoreHold\s*=\s*stamp\s*$",
+    r'page\s*\.\s*restoreHold\s*=\s*""\s*$',
+    r'page\s*\.\s*restoreHold\s*===\s*""',
+    r'running\s*:\s*page\s*\.\s*restoreHold\s*!==\s*""\s*$',
+)
+
+
+def _restore_hold_problems(general):
+    problems = _pin_problems(general, HOLD_PINS, "configGeneral.qml")
+    for name, expected in (("syncAutoBackupHold", SYNC_HOLD_BODY), ("holdAutoBackup", HOLD_BODY),
+                           ("releaseAutoBackup", RELEASE_BODY)):
+        body = _function_body(general, name)
+        if body is None or _squashed(body) != expected:
+            problems.append(f"configGeneral.qml {name} must be exactly `{expected}`")
+    timers = [body for _, body in _blocks(general, r"(?<![\w.])Timer\s*\{") if "holdAutoBackup" in body]
+    if len(timers) != 1 or _squashed(timers[0]) != HOLD_TIMER:
+        problems.append(f"the hold refresh must be exactly `Timer {HOLD_TIMER}`")
+    counts = {r"\bholdAutoBackup\b": 3, r"\breleaseAutoBackup\b": 3, r"\bsyncAutoBackupHold\b": 2,
+              r"\bholdingAutoBackup\b": 3, r"\brestoreHoldWait\b": 2}
+    for pattern, count in counts.items():
+        if len(_hits(pattern, general)) != count:
+            problems.append(f"configGeneral.qml: {pattern} {count} time(s) expected, found {len(_hits(pattern, general))}")
+    problems += _unknown_mentions(general, "restoreHold", RESTORE_HOLD_FORMS)
     return problems
 
 
@@ -12167,6 +12263,37 @@ def test_backup_keys_are_written_only_where_planned():
 
 
 BACKUP_KEY_WRITER_MUTATIONS = [
+    # Round 3 (LOW-C): the hold ends only on close.
+    (CONFIG_GENERAL, "        else if (!page.holdingAutoBackup)\n            page.releaseAutoBackup()\n",
+     "        else\n            page.releaseAutoBackup()\n"),
+    (CONFIG_GENERAL, HOLDING_AUTO_BACKUP, 'readonly property bool holdingAutoBackup: page.backupOp === "import"'),
+    (CONFIG_GENERAL, HOLDING_AUTO_BACKUP, "readonly property bool holdingAutoBackup: page.confirmingImport"),
+    (CONFIG_GENERAL, HOLD_CHANGED, "onHoldingAutoBackupChanged: page.releaseAutoBackup()"),
+    (CONFIG_GENERAL, '        running: page.restoreHold !== ""\n', "        running: false\n"),
+    (CONFIG_GENERAL, "        repeat: true\n        running: page.restoreHold", "        repeat: false\n        running: page.restoreHold"),
+    (CONFIG_GENERAL, "property int restoreHoldWait: 20000", "property int restoreHoldWait: 70000"),
+    (CONFIG_GENERAL, "        page.restoreFollow = false\n    }\n\n    // Later,",
+     "        page.restoreFollow = false\n        page.releaseAutoBackup()\n    }\n\n    // Later,"),
+    (CONFIG_GENERAL, "    Component.onDestruction: page.releaseAutoBackup()\n", ""),
+    # Only configGeneral refreshes the hold, and only in holdAutoBackup.
+    (CONFIG_CHAT, "            else if (key === \"backupRestoreAt\")\n                page.cfg_backupRestoreAt = value\n",
+     "            else if (key === \"backupRestoreAt\")\n                Plasmoid.configuration.backupRestoreAt = String(Date.now())\n"),
+    (CONFIG_USAGE, "    function setPanelRing(value) {\n",
+     "    function g() { Plasmoid.configuration.backupRestoreAt = String(Date.now()) }\n    function setPanelRing(value) {\n"),
+    (CONFIG_GENERAL, "        page.restorePending = false\n        page.restoreScroll = true\n",
+     "        page.restorePending = false\n        Plasmoid.configuration.backupRestoreAt = String(Date.now())\n        page.restoreScroll = true\n"),
+    (CONFIG_GENERAL, "    function startRestore() {\n",
+     "    function g() { var stamp = \"\"; Plasmoid.configuration.backupRestoreAt = stamp }\n    function startRestore() {\n"),
+    (CONFIG_GENERAL, "        Plasmoid.configuration.backupRestoreAt = stamp\n",
+     "        Plasmoid.configuration.backupRestoreAt = stamp\n        Plasmoid.configuration.chatSites = \"\"\n"),
+    (CONFIG_GENERAL, "        var stamp = String(Date.now())\n", "        var stamp = String(Date.now() + 600000)\n"),
+    # The release clears only its own stamp, never a newer request.
+    (CONFIG_GENERAL, "        if (Plasmoid.configuration.backupRestoreAt === page.restoreSeen)\n            Plasmoid.configuration.backupRestoreAt = \"\"\n",
+     "        Plasmoid.configuration.backupRestoreAt = \"\"\n"),
+    (CONFIG_GENERAL, "Plasmoid.configuration.backupRestoreAt === page.restoreSeen", "Plasmoid.configuration.backupRestoreAt !== page.restoreSeen"),
+    (CONFIG_GENERAL, "Plasmoid.configuration.backupRestoreAt === page.restoreSeen", "Plasmoid.configuration.backupRestoreAt !== \"\""),
+    (CONFIG_GENERAL, '        if (page.restoreHold === "")\n            return\n        page.restoreHold = ""\n',
+     '        page.restoreHold = ""\n'),
     (MAIN_QML, "    function chatNext() {",
      "    function x() { Plasmoid.configuration.backupAutoExport = true }\n    function chatNext() {"),
     (MAIN_QML, "    function chatNext() {",
@@ -12464,9 +12591,12 @@ SCROLL_TO_BACKUP_BODY = (
 GENERAL_RESTORE_PINS = (
     "page.restorePending = SettingsBackup.restoreRequested(Plasmoid.configuration.backupRestoreAt, Date.now())",
     'if (page.restorePending && page.backupOp === "") page.startRestore()',
+    # Round 3: a value seen before (a re-send, or this page's own hold) starts
+    # nothing; the check only prevents a second import.
     'else if (key === "backupRestoreAt") { page.cfg_backupRestoreAt = value '
-    "if (SettingsBackup.restoreRequested(value, Date.now())) { "
+    "if (value !== page.restoreSeen && SettingsBackup.restoreRequested(value, Date.now())) { page.restoreSeen = value "
     'if (page.backupOp === "") page.startRestore() else page.restorePending = true } }',
+    "if (page.restorePending) page.restoreSeen = Plasmoid.configuration.backupRestoreAt",
     'if (op === "import" && page.restorePending) { page.restorePending = false page.restoreScroll = true '
     "page.scrollToBackup() }",
     # Round 2: a pending Restore wins over an Export pressed meanwhile (L-1),
@@ -12494,6 +12624,12 @@ RESTORE_FOLLOW_FORMS = (
     r"property\s+bool\s+restoreFollow\s*:\s*false\s*$",
     r"page\s*\.\s*restoreFollow\s*=\s*(?:true|false)\s*$",
     r"\bif\s*\(\s*page\s*\.\s*restoreFollow\s*\)\s*$",
+)
+RESTORE_SEEN_FORMS = (
+    r'property\s+string\s+restoreSeen\s*:\s*""\s*$',
+    r"page\s*\.\s*restoreSeen\s*=\s*(?:stamp|value|Plasmoid\s*\.\s*configuration\s*\.\s*backupRestoreAt)\s*$",
+    r"\bif\s*\(\s*value\s*!==\s*page\s*\.\s*restoreSeen\s*&&\s*SettingsBackup\s*\.\s*restoreRequested\s*\(",
+    r"\bif\s*\(\s*Plasmoid\s*\.\s*configuration\s*\.\s*backupRestoreAt\s*===\s*page\s*\.\s*restoreSeen\s*\)\s*$",
 )
 RESTORE_PENDING_FORMS = (
     r"property\s+bool\s+restorePending\s*:\s*false\s*$",
@@ -12527,13 +12663,16 @@ def _restore_problems(sources):
         problems.append("finishBackup (the restore path) never calls applyBackup or writes a setting")
     if len(_hits(r"\bpage\s*\.\s*startRestore\s*\(\s*\)", finish)) != 2:
         problems.append("finishBackup starts a waiting Restore only after a status or a failed step")
-    counts = {r"\brestoreRequested\b": 2, r"\bstartRestore\b": 5, r"\bbackupRestoreAt\b": 2}
+    # backupRestoreAt: the open check, the seen stamp, the key name, the hold
+    # write and the release's compare and write (round 3).
+    counts = {r"\brestoreRequested\b": 2, r"\bstartRestore\b": 5, r"\bbackupRestoreAt\b": 6}
     for pattern, count in counts.items():
         if len(_hits(pattern, general)) != count:
             problems.append(f"configGeneral.qml: {pattern} {count} time(s) expected, found {len(_hits(pattern, general))}")
     problems += _unknown_mentions(general, "restorePending", RESTORE_PENDING_FORMS)
     problems += _unknown_mentions(general, "restoreScroll", RESTORE_SCROLL_FORMS)
     problems += _unknown_mentions(general, "restoreFollow", RESTORE_FOLLOW_FORMS)
+    problems += _unknown_mentions(general, "restoreSeen", RESTORE_SEEN_FORMS)
     follow = [body for _, body in _blocks(general, r"\bConnections\s*\{")
               if re.search(r"(?:^|[\n;])\s*target\s*:\s*page\s*\.\s*flickable\s*(?=;|\n|$)", _top_level_raw(body))]
     if len(follow) != 1 or _squashed(follow[0]) != RESTORE_FOLLOW_CONNECTIONS:
@@ -12564,6 +12703,16 @@ def test_restore_goes_through_the_existing_import_preview():
 
 
 RESTORE_MUTATIONS = [
+    # Round 3: the seen check only prevents a second import, never starts one.
+    (CONFIG_GENERAL, "if (value !== page.restoreSeen && SettingsBackup.restoreRequested(value, Date.now()))",
+     "if (value === page.restoreSeen || SettingsBackup.restoreRequested(value, Date.now()))"),
+    (CONFIG_GENERAL, "if (value !== page.restoreSeen && SettingsBackup.restoreRequested(value, Date.now()))",
+     "if (value !== page.restoreSeen)"),
+    (CONFIG_GENERAL, "                    page.restoreSeen = value\n", ""),
+    (CONFIG_GENERAL, "        if (page.restorePending)\n            page.restoreSeen = Plasmoid.configuration.backupRestoreAt\n",
+     "        if (page.restoreSeen !== \"\")\n            page.startRestore()\n"),
+    (CONFIG_GENERAL, "    function startRestore() {\n",
+     "    function g() { if (page.restoreSeen !== \"\") page.requestImport() }\n    function startRestore() {\n"),
     (SETTINGS_BACKUP_JS, RESTORE_WINDOW_PIN, "var RESTORE_WINDOW_MS = 600000"),
     (SETTINGS_BACKUP_JS, "    return age >= 0 && age <= RESTORE_WINDOW_MS\n", "    return age <= RESTORE_WINDOW_MS\n"),
     (SETTINGS_BACKUP_JS, "!/^[0-9]{1,15}$/.test(text)", "!/^[0-9]+$/.test(text)"),
@@ -12990,7 +13139,9 @@ LOCK_ORDERS = {
     "_signing_key": ("_key_directory", "_lock_folder", "_clear_stale_key_temporaries", "_read_key", "_create_key"),
 }
 LOCK_CALLS = {
-    "export": ("_lock_folder(directory, exclusive=True)", "_signing_key(environ, create=True)"),
+    # Round 3 (LOW-A): the backup folder's identity, so the same folder is locked once.
+    "export": ("_lock_folder(directory, exclusive=True)",
+               "_signing_key(environ, create=True, locked=_folder_identity(directory))"),
     "_signing_key": ("_lock_folder(directory, exclusive=create)",),
     "_import_key": ("_signing_key(environ, create=False)",),
 }
@@ -13048,6 +13199,8 @@ def _lock_problems(source):
         function = functions.get(name)
         unparsed = [ast.unparse(node) for node in _calls_in_order(function)] if function else []
         problems += [f"{name} must call {pin}" for pin in pins if unparsed.count(pin) != 1]
+    problems += _same_folder_lock_problems(functions)
+    problems += _fchmod_problems(tree, functions)
     signing = functions.get("_signing_key")
     if signing is not None and "if create: _clear_stale_key_temporaries(directory)" not in _squashed(ast.unparse(signing)):
         problems.append("_signing_key cleans key temporaries only when it may create, i.e. under the exclusive lock")
@@ -13058,21 +13211,112 @@ def _lock_problems(source):
     return problems
 
 
+SAME_FOLDER_LOCK = "if locked is None or _folder_identity(directory) != locked: _lock_folder(directory, exclusive=create)"
+FOLDER_IDENTITY_BODY = ("try: info = os.fstat(directory) except OSError: raise HelperError('os-error') from None "
+                        "return (info.st_dev, info.st_ino)")
+
+
+def _same_folder_lock_problems(functions):
+    """Round 3 (LOW-A): the key folder's lock is skipped only when it is the
+    folder export already holds, compared by (st_dev, st_ino); only export
+    passes ``locked``."""
+    problems = []
+    signing = functions.get("_signing_key")
+    if signing is None or SAME_FOLDER_LOCK not in _squashed(ast.unparse(signing)):
+        problems.append(f"_signing_key locks the key folder unless it is the one held: `{SAME_FOLDER_LOCK}`")
+    elif [(arg.arg, ast.unparse(default) if default else None) for arg, default in
+          zip(signing.args.kwonlyargs, signing.args.kw_defaults)] != [("create", None), ("locked", "None")]:
+        problems.append("_signing_key(environ, *, create, locked=None)")
+    identity = functions.get("_folder_identity")
+    if identity is None or _squashed("\n".join(ast.unparse(node) for node in identity.body)) != FOLDER_IDENTITY_BODY:
+        problems.append(f"_folder_identity must be exactly `{FOLDER_IDENTITY_BODY}`")
+    for name, function in functions.items():
+        for node in ast.walk(function):
+            if isinstance(node, ast.Call) and _called_name(node) == "_signing_key" \
+                    and any(keyword.arg == "locked" for keyword in node.keywords) and name != "export":
+                problems.append(f"{name}: only export passes locked (the folder it holds)")
+    return problems
+
+
+# Round 3 (LOW-B): modes change only on export's path. The two folder
+# tightenings run only under `create`, the file modes only in functions that
+# status and import never reach, and a key folder that can't be tightened is
+# key-unusable.
+FCHMOD_OWNERS = {"_backup_directory", "_key_directory", "_write_file", "_create_key"}
+FCHMOD_GUARDED = {"_backup_directory", "_key_directory"}
+# Reached from import only behind `create` (False there): the new key file.
+CREATE_ONLY = {"_create_key"}
+KEY_TIGHTEN = ("if create and stat.S_IMODE(info.st_mode) != PRIVATE_MODE: try: os.fchmod(directory, PRIVATE_MODE) "
+               "except OSError: raise HelperError('key-unusable') from None")
+NO_EXPORT_ROOTS = ("status", "import_settings", "_import_key", "_load")
+
+
+def _fchmod_problems(tree, functions):
+    problems = []
+    owners = []
+    for name, function in functions.items():
+        for node in ast.walk(function):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in {
+                    "chmod", "lchmod", "fchmod", "chown", "lchown", "fchown", "umask"}:
+                if node.func.attr != "fchmod":
+                    problems.append(f"{name}: os.{node.func.attr} is never used (fchmod on an opened descriptor only)")
+                owners.append(name)
+    if sorted(owners) != sorted(FCHMOD_OWNERS):
+        problems.append(f"fchmod appears once each in {sorted(FCHMOD_OWNERS)}, found {sorted(owners)}")
+    for name in FCHMOD_GUARDED:
+        function = functions.get(name)
+        if function is None:
+            continue
+        for node in ast.walk(function):
+            if isinstance(node, ast.If) and any(isinstance(inner, ast.Attribute) and inner.attr == "fchmod"
+                                                for inner in ast.walk(node)):
+                if not ast.unparse(node.test).startswith("create and stat.S_IMODE("):
+                    problems.append(f"{name}: a mode changes only under `create` (export)")
+    key_directory = functions.get("_key_directory")
+    if key_directory is None or KEY_TIGHTEN not in _squashed(ast.unparse(key_directory)):
+        problems.append(f"_key_directory tightens the key folder only as `{KEY_TIGHTEN}`")
+    for root in NO_EXPORT_ROOTS:
+        reached = _call_closure(functions, root) & (FCHMOD_OWNERS - FCHMOD_GUARDED - CREATE_ONLY)
+        if reached:
+            problems.append(f"{root} never changes a mode, but reaches {sorted(reached)}")
+    pins = (("_load", "_backup_directory(environ, opened, create=False)"),
+            ("_signing_key", "_key_directory(environ, opened, create=create)"),
+            ("_import_key", "_signing_key(environ, create=False)"),
+            ("_signing_key", "if key is None and create: key = _create_key(directory)"))
+    for name, pin in pins:
+        function = functions.get(name)
+        if function is None or pin not in _squashed(ast.unparse(function)):
+            problems.append(f"{name} must call {pin}")
+    return problems
+
+
 def test_backup_folders_are_locked_as_planned():
     problems = _lock_problems(SETTINGS_BACKUP_PY.read_text(encoding="utf-8"))
     assert not problems, problems
 
 
 EXPORT_LOCK = "        _lock_folder(directory, exclusive=True)  # Released when the folder is closed.\n"
-SIGNING_LOCK = "        _lock_folder(directory, exclusive=create)\n"
+EXPORT_KEY = "        key = _signing_key(environ, create=True, locked=_folder_identity(directory))\n"
+SIGNING_LOCK = ("        if locked is None or _folder_identity(directory) != locked:\n"
+                "            _lock_folder(directory, exclusive=create)\n")
 LOCK_MUTATIONS = {
     "export takes no backup folder lock": (EXPORT_LOCK, ""),
     "export takes the backup folder shared": (EXPORT_LOCK, EXPORT_LOCK.replace("exclusive=True", "exclusive=False")),
-    "export locks after loading the key": (EXPORT_LOCK + "        key = _signing_key(environ, create=True)\n",
-                                           "        key = _signing_key(environ, create=True)\n" + EXPORT_LOCK),
+    "export locks after loading the key": (EXPORT_LOCK + EXPORT_KEY, EXPORT_KEY + EXPORT_LOCK),
     "no key folder lock": (SIGNING_LOCK, ""),
-    "import takes the key folder exclusively": (SIGNING_LOCK, "        _lock_folder(directory, exclusive=True)\n"),
-    "export takes the key folder shared": (SIGNING_LOCK, "        _lock_folder(directory, exclusive=False)\n"),
+    "import takes the key folder exclusively": (SIGNING_LOCK, SIGNING_LOCK.replace("exclusive=create", "exclusive=True")),
+    "export takes the key folder shared": (SIGNING_LOCK, SIGNING_LOCK.replace("exclusive=create", "exclusive=False")),
+    # Round 3 (LOW-A): one lock only when the folder is the very one export holds.
+    "export passes no identity": (EXPORT_KEY, "        key = _signing_key(environ, create=True, locked=None)\n"),
+    "export passes nothing": (EXPORT_KEY, "        key = _signing_key(environ, create=True)\n"),
+    "skipped when the folders differ": ("_folder_identity(directory) != locked:", "_folder_identity(directory) == locked:"),
+    "skipped whenever an identity is given": ("if locked is None or _folder_identity(directory) != locked:",
+                                              "if locked is None:"),
+    "import passes an identity": ("        return _signing_key(environ, create=False)\n",
+                                  "        return _signing_key(environ, create=False, locked=(0, 0))\n"),
+    "identity of nothing": ("    return info.st_dev, info.st_ino\n", "    return 0, 0\n"),
+    "identity by inode only": ("    return info.st_dev, info.st_ino\n", "    return 0, info.st_ino\n"),
+    "locked defaults to a folder": ("    locked: Optional[tuple[int, int]] = None,\n", "    locked: Optional[tuple[int, int]] = (0, 0),\n"),
     "key cleanup before the lock": (SIGNING_LOCK + "        if create:\n            _clear_stale_key_temporaries(directory)\n",
                                     "        if create:\n            _clear_stale_key_temporaries(directory)\n" + SIGNING_LOCK),
     "key cleanup on import too": ("        if create:\n            _clear_stale_key_temporaries(directory)\n",
@@ -13090,6 +13334,23 @@ LOCK_MUTATIONS = {
     "a second flock": ("        info = os.fstat(descriptor)\n        # One name only",
                        "        fcntl.flock(descriptor, fcntl.LOCK_UN)\n        info = os.fstat(descriptor)\n        # One name only"),
     "a lockf": ("        _lock_folder(directory, exclusive=True)  #", "        fcntl.lockf(directory, fcntl.LOCK_EX)  #"),
+    # Round 3 (LOW-B): fchmod outside export.
+    "key folder tightened on import": ("    if create and stat.S_IMODE(info.st_mode) != PRIVATE_MODE:\n        try:\n            os.fchmod(directory, PRIVATE_MODE)",
+                                       "    if stat.S_IMODE(info.st_mode) != PRIVATE_MODE:\n        try:\n            os.fchmod(directory, PRIVATE_MODE)"),
+    "backup folder tightened on status": ("        if create and stat.S_IMODE(info.st_mode) != PRIVATE_MODE:\n            os.fchmod(directory, PRIVATE_MODE)",
+                                          "        if stat.S_IMODE(info.st_mode) != PRIVATE_MODE:\n            os.fchmod(directory, PRIVATE_MODE)"),
+    "fchmod while reading the key": ("        info = os.fstat(descriptor)\n        # One name only",
+                                     "        os.fchmod(descriptor, FILE_MODE)\n        info = os.fstat(descriptor)\n        # One name only"),
+    "status opens the folder to create": ("_backup_directory(environ, opened, create=False)", "_backup_directory(environ, opened, create=True)"),
+    "import opens the key folder to create": ("_key_directory(environ, opened, create=create)", "_key_directory(environ, opened, create=True)"),
+    "a chmod by path": ("            os.fchmod(directory, PRIVATE_MODE)\n        except OSError:\n            raise HelperError(\"key-unusable\")",
+                        "            os.chmod(\"hearthwire\", PRIVATE_MODE)\n        except OSError:\n            raise HelperError(\"key-unusable\")"),
+    "a failed tightening is ignored": ("            os.fchmod(directory, PRIVATE_MODE)\n        except OSError:\n            raise HelperError(\"key-unusable\") from None\n",
+                                       "            os.fchmod(directory, PRIVATE_MODE)\n        except OSError:\n            pass\n"),
+    "key made on import": ("        if key is None and create:\n            key = _create_key(directory)\n",
+                           "        if key is None:\n            key = _create_key(directory)\n"),
+    "status writes the backup": ("        exported_at, _, _, _ = _load(environ)\n",
+                                 "        _write_file(0, b\"\")\n        exported_at, _, _, _ = _load(environ)\n"),
 }
 
 
