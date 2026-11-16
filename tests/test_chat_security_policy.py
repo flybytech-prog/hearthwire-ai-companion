@@ -9895,9 +9895,10 @@ def _install_info_caller_problems(name, code, owner, applet):
     # Once per start: checkInstall from Component.onCompleted only; the first
     # run from checkInstall, the one retry from finishInstallInfo.
     for word, count in (("checkInstall", 2), ("runInstallInfo", 3), ("finishInstallInfo", 2)):
-        if len(_hits(rf"\b{word}\s*\(", code)) != count:
+        found = len(_hits(rf"\b{word}\s*\(", code))
+        if found != count:
             problems.append(f"{name}: {word}( expected {count} times (definition and calls), "
-                            f"found {len(_hits(rf'\b{word}\s*\(', code))}")
+                            f"found {found}")
     for argument in ("false", "true"):
         if len(_hits(rf"\brunInstallInfo\s*\(\s*{argument}\s*\)", code)) != 1:
             problems.append(f"{name}: runInstallInfo({argument}) once")
