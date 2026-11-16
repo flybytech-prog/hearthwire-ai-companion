@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import bisect
 import errno
+import fcntl
 import hashlib
 import hmac
 import json
@@ -1082,8 +1083,41 @@ def _unlink(directory: int, name: str) -> None:
         pass
 
 
+# How long an export waits for another one to finish with the same folder
+# (round 2, LOW-1); then os-error, never a guess.
+LOCK_WAIT_SECONDS = 10.0
+_LOCK_POLL_SECONDS = 0.02
+_WOULD_BLOCK = frozenset({errno.EAGAIN, errno.EWOULDBLOCK})
+
+
+def _lock_folder(directory: int, *, exclusive: bool) -> None:
+    """flock the folder's own descriptor, released when it is closed.
+
+    Exports take it exclusively on both folders (backup folder first, then
+    the key folder; import takes only the key folder, shared), so one
+    export's live temporary or half-linked key is never seen or deleted by
+    another (round 2, LOW-1, INFO-2). No lock file is made. A file system
+    without flock gives no lock; the checks below still fail closed.
+    """
+    operation = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(directory, operation)
+            return
+        except OSError as error:
+            if error.errno not in _WOULD_BLOCK:
+                return
+        if time.monotonic() >= deadline:
+            raise HelperError("os-error")
+        time.sleep(_LOCK_POLL_SECONDS)
+
+
 def _clear_stale_temporaries(directory: int) -> None:
-    """Delete temporaries a crashed export left (audit I1); never follows a link."""
+    """Delete temporaries a crashed export left (audit I1); never follows a link.
+
+    Called only under the folder's exclusive lock, so every temporary left is
+    a dead export's."""
     try:
         names = os.listdir(directory)
     except OSError:
@@ -1157,6 +1191,9 @@ def _key_directory(environ: Optional[Mapping[str, str]], opened: list[int], *, c
     return directory
 
 
+_UNUSABLE_KEY_ERRNOS = frozenset({errno.ELOOP, errno.EACCES, errno.ENXIO, errno.EISDIR})
+
+
 def _read_key(directory: int) -> Optional[bytes]:
     """The key's 32 bytes, None when there is no key; key-unusable when it is unsafe."""
     try:
@@ -1164,11 +1201,13 @@ def _read_key(directory: int) -> Optional[bytes]:
     except FileNotFoundError:
         return None
     except OSError as error:
-        raise HelperError("key-unusable" if error.errno == errno.ELOOP else "os-error") from None
+        # A link, a mode-0000 file, a socket or a directory (INFO-1).
+        raise HelperError("key-unusable" if error.errno in _UNUSABLE_KEY_ERRNOS else "os-error") from None
     try:
         info = os.fstat(descriptor)
+        # One name only (INFO-2): a hard link elsewhere could carry the key out of this folder.
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077
-                or info.st_size != KEY_BYTES):
+                or info.st_size != KEY_BYTES or info.st_nlink != 1):
             raise HelperError("key-unusable")
         key = os.pread(descriptor, KEY_BYTES + 1, 0)
     except OSError:
@@ -1181,7 +1220,7 @@ def _read_key(directory: int) -> Optional[bytes]:
 
 
 def _clear_stale_key_temporaries(directory: int) -> None:
-    """Delete key temporaries a crashed export left; never follows a link."""
+    """Delete key temporaries a crashed export left; never follows a link (under the exclusive lock)."""
     try:
         names = os.listdir(directory)
     except OSError:
@@ -1249,6 +1288,7 @@ def _signing_key(environ: Optional[Mapping[str, str]], *, create: bool) -> Optio
             raise HelperError("key-unusable") from None
         if directory is None:
             return None
+        _lock_folder(directory, exclusive=create)
         if create:
             _clear_stale_key_temporaries(directory)
         key = _read_key(directory)
@@ -1398,6 +1438,7 @@ def export(
         directory = _backup_directory(environ, opened, create=True)  # refuse_legacy_data first
         if directory is None:
             raise HelperError("os-error")
+        _lock_folder(directory, exclusive=True)  # Released when the folder is closed.
         key = _signing_key(environ, create=True)
         if key is None:
             raise HelperError("os-error")

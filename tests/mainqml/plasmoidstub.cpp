@@ -111,6 +111,22 @@ public:
         return new ActionStub(this, name);
     }
 
+    // What real Plasma 6 does on each Apply and after the widget's own
+    // writes: valueChanged for every key, changed or not (a plain
+    // QQmlPropertyMap is silent for an unchanged write). backupAutoExport
+    // comes last, as in the lab's log.
+    Q_INVOKABLE void reemitAll()
+    {
+        const QString last = QStringLiteral("backupAutoExport");
+        const QStringList keys = m_configuration->keys();
+        for (const QString &key : keys) {
+            if (key != last)
+                Q_EMIT m_configuration->valueChanged(key, m_configuration->value(key));
+        }
+        if (m_configuration->contains(last))
+            Q_EMIT m_configuration->valueChanged(last, m_configuration->value(last));
+    }
+
     void recordTrigger(const QString &name)
     {
         m_triggered.append(name);

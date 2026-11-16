@@ -2,14 +2,18 @@
 
 import ast
 import base64
+import errno
+import fcntl
 import ipaddress
 import json
 import os
 import random
 import re
 import shutil
+import socket
 import stat
 import subprocess
+import sys
 import unicodedata
 from pathlib import Path
 
@@ -1908,6 +1912,94 @@ def test_stale_key_temporaries_are_removed_and_a_symlinked_one_is_unlinked(confi
     assert key_path().read_bytes() == KEY
 
 
+# Round 2, LOW-1: exports lock both folders, so one never deletes another's live temporary.
+CONCURRENT_EXPORTER = """
+import collections, os, sys, time
+from hearthwire.core import settingsbackup
+go = sys.argv[2]
+while not os.path.exists(go):
+    time.sleep(0.001)
+codes = collections.Counter()
+for _ in range(int(sys.argv[1])):
+    reply = settingsbackup.run("export", applet=7)
+    codes["ok" if reply.get("ok") is True else reply.get("error")] += 1
+print(dict(codes))
+"""
+
+
+def test_four_concurrent_exporters_never_fail(config, tmp_path):
+    """The auditor's race: 4 processes x 150 exports from a fresh folder, the key made in the race."""
+    write_rc(GOOD)
+    go = tmp_path / "go"
+    env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"], "XDG_CONFIG_HOME": os.environ["XDG_CONFIG_HOME"],
+           "XDG_DATA_HOME": os.environ["XDG_DATA_HOME"], "TMPDIR": str(tmp_path),
+           "PYTHONPATH": str(ROOT / "src"), "PYTHONDONTWRITEBYTECODE": "1"}
+    workers = [subprocess.Popen([sys.executable, "-c", CONCURRENT_EXPORTER, "150", str(go)], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(4)]
+    go.touch()
+    results = [worker.communicate(timeout=300) for worker in workers]
+    assert [(out.strip(), err) for out, err in results] == [("{'ok': 150}", "")] * 4
+    assert os.listdir(data_folder()) == ["backup-key"]
+    assert os.listdir(config) == ["settings-backup.json"]
+    assert run("import")["origin"] == "this-computer"
+
+
+def hold_lock(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    return descriptor
+
+
+@pytest.mark.parametrize("folder", ["backup", "key"])
+def test_a_live_export_temporary_is_never_deleted(config, monkeypatch, folder):
+    exported(GOOD)
+    before = (config / "settings-backup.json").read_bytes()
+    where = config if folder == "backup" else data_folder()
+    live = where / ("settings-backup.json.0123456789abcdef.tmp" if folder == "backup"
+                    else "backup-key.0123456789abcdef.tmp")
+    live.write_bytes(b"another export, still writing")
+    monkeypatch.setattr(backup, "LOCK_WAIT_SECONDS", 0.2)
+    descriptor = hold_lock(where)  # That export holds the folder.
+    try:
+        assert exported(GOOD, now=NOW + 60) == {"ok": False, "error": "os-error"}
+        assert live.read_bytes() == b"another export, still writing"
+        assert (config / "settings-backup.json").read_bytes() == before
+    finally:
+        os.close(descriptor)
+    # Once no export holds the folder, what is left is a dead export's and goes.
+    assert exported(GOOD, now=NOW + 60)["ok"] is True
+    assert not live.exists()
+
+
+def test_import_waits_for_a_key_being_made_then_says_other(config, monkeypatch):
+    exported(GOOD)
+    monkeypatch.setattr(backup, "LOCK_WAIT_SECONDS", 0.2)
+    descriptor = hold_lock(data_folder())
+    try:
+        assert run("import")["origin"] == "other"
+        assert run("status")["ok"] is True  # status never touches the key or its lock.
+    finally:
+        os.close(descriptor)
+    assert run("import")["origin"] == "this-computer"
+
+
+def test_import_takes_the_key_lock_shared(config, monkeypatch):
+    exported(GOOD)
+    taken = []
+    real_flock = fcntl.flock
+
+    def watching_flock(descriptor, operation):
+        taken.append(operation & ~fcntl.LOCK_NB)
+        return real_flock(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", watching_flock)
+    assert run("import")["origin"] == "this-computer"
+    assert taken == [fcntl.LOCK_SH]
+    taken.clear()
+    assert exported(GOOD)["ok"] is True
+    assert taken == [fcntl.LOCK_EX, fcntl.LOCK_EX]  # The backup folder, then the key folder.
+
+
 def test_key_material_never_reaches_the_file_a_reply_or_the_cli(config, capsys):
     write_rc(GOOD)
     outputs = []
@@ -2029,6 +2121,21 @@ def make_unusable(kind, tmp_path):
         (real / "backup-key").chmod(0o600)
         data_folder().parent.mkdir(parents=True)
         data_folder().symlink_to(real)
+    elif kind == "socket":
+        data_folder().mkdir(parents=True, mode=0o700)
+        here = os.getcwd()
+        os.chdir(data_folder())  # A relative name: tmp_path may be longer than sun_path.
+        try:
+            try:
+                with socket.socket(socket.AF_UNIX) as listener:
+                    listener.bind("backup-key")
+            except PermissionError:
+                pytest.skip("this sandbox refuses unix sockets; ENXIO is also covered by the errno test")
+        finally:
+            os.chdir(here)
+    elif kind == "hardlink":
+        install_key()
+        os.link(key_path(), tmp_path / "copied-key")  # INFO-2: a second name outside the folder.
     elif kind.startswith("folder-"):
         install_key(folder_mode=int(kind[len("folder-"):], 8))
     elif kind.startswith("mode-"):
@@ -2039,16 +2146,19 @@ def make_unusable(kind, tmp_path):
 
 def snapshot(path):
     info = os.lstat(path)
-    content = path.read_bytes() if stat.S_ISREG(info.st_mode) else None
-    return info.st_mode, info.st_ino, content
+    content = path.read_bytes() if stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) & 0o400 else None
+    return info.st_mode, info.st_ino, info.st_nlink, content
 
 
 UNUSABLE = ["symlink", "directory", "fifo", "short", "long", "mode-644", "mode-640", "mode-604", "mode-620",
-            "folder-770", "folder-702", "folder-777", "folder-symlink"]
+            "folder-770", "folder-702", "folder-777", "folder-symlink",
+            "mode-000", "socket", "hardlink"]  # round 2: INFO-1 (EACCES, ENXIO) and INFO-2
 
 
 @pytest.mark.parametrize("kind", UNUSABLE)
 def test_an_unusable_key_is_other_on_import_and_refused_by_export(config, tmp_path, kind):
+    if kind == "mode-000" and os.geteuid() == 0:
+        pytest.skip("root reads a mode-0000 file")
     make_unusable(kind, tmp_path)
     write_backup(config, signed())
     before_key, before_folder = snapshot(key_path()), snapshot(data_folder())
@@ -2059,6 +2169,26 @@ def test_an_unusable_key_is_other_on_import_and_refused_by_export(config, tmp_pa
     assert snapshot(key_path()) == before_key and snapshot(data_folder()) == before_folder
     assert (config / "settings-backup.json").read_bytes() == before_file
     assert sorted(os.listdir(data_folder())) == ["backup-key"]
+
+
+@pytest.mark.parametrize(("number", "code"), [
+    (errno.EACCES, "key-unusable"), (errno.ENXIO, "key-unusable"), (errno.EISDIR, "key-unusable"),
+    (errno.ELOOP, "key-unusable"), (errno.EIO, "os-error"), (errno.EMFILE, "os-error"),
+])
+def test_key_open_errors_are_classified(config, monkeypatch, number, code):
+    install_key()
+    write_rc(GOOD)
+    real_open = os.open
+
+    def failing_open(name, flags, *args, **kwargs):
+        if name == "backup-key":
+            raise OSError(number, os.strerror(number))
+        return real_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_open)
+    assert run("export") == {"ok": False, "error": code}
+    write_backup(config, signed())
+    assert run("import")["origin"] == "other"
 
 
 def test_someone_elses_key_is_unusable(config, monkeypatch):
@@ -2362,7 +2492,7 @@ def test_the_module_imports_only_the_standard_library_and_no_network():
             # legacy: only legacy-data; appletconfig: the applied settings; jsondepth: the depth limit.
             assert node.module in ("appletconfig", "catalog", "jsondepth", "webdata", "legacy"), node.module
     assert imported <= {"__future__", "collections", "datetime", "errno", "json", "math", "os", "pathlib", "re",
-                        "stat", "time", "typing", "bisect", "hashlib", "hmac", "secrets"}, imported
+                        "stat", "time", "typing", "bisect", "hashlib", "hmac", "secrets", "fcntl"}, imported
     for banned in ("socket", "http", "urllib", "ssl", "subprocess"):
         assert banned not in imported
 

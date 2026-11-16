@@ -1508,33 +1508,51 @@ TestCase {
         compare(help.toolTipText, "One file on this computer, in the hearthwire folder of your configuration folder (usually ~/.config). It holds these settings, including your custom chat addresses. Sign-ins, the encrypted folder, zoom and the usage history setting are not part of it. Each backup is signed with a key kept only on this computer (in ~/.local/share/hearthwire), so Import can tell a backup made here from one made elsewhere.")
     }
 
+    // Export reads the status again first (L-1), then goes on as before.
+    function pressExport(page, status) {
+        generalPart(page, "backupExport").clicked()
+        compare(backupOps(page).slice(-1), ["status"], "the status is read again first")
+        answerBackup(page, JSON.stringify(status === undefined ? {ok: true, exists: false} : status))
+    }
+
     function test_backupExportWithoutABackupRunsAtOnce() {
         var page = backupPage({ok: true, exists: false})
-        generalPart(page, "backupExport").clicked()
-        compare(backupOps(page), ["status", "export"])
+        pressExport(page, {ok: true, exists: false})
+        compare(backupOps(page), ["status", "status", "export"])
         compare(page.confirmingExport, false)
     }
 
     function test_backupExportOverABackupAsksFirst() {
         var page = backupPage({ok: true, exists: true, exported_at: backupStamp})
-        generalPart(page, "backupExport").clicked()
-        compare(backupOps(page), ["status"], "nothing yet")
+        pressExport(page, {ok: true, exists: true, exported_at: backupStamp})
+        compare(backupOps(page), ["status", "status"], "nothing yet")
         var box = generalPart(page, "backupExportConfirm")
         compare(box.visible, true)
         box.actions[1].trigger()
         compare(page.confirmingExport, false)
-        compare(backupOps(page), ["status"], "Cancel")
-        generalPart(page, "backupExport").clicked()
+        compare(backupOps(page), ["status", "status"], "Cancel")
+        pressExport(page, {ok: true, exists: true, exported_at: backupStamp})
         box.actions[0].trigger()
-        compare(backupOps(page), ["status", "export"], "Replace")
+        compare(backupOps(page), ["status", "status", "status", "export"], "Replace")
+    }
+
+    // L-1: the line said "No backup yet." but the panel menu or Automatic
+    // backup wrote one meanwhile: Export still asks before replacing it.
+    function test_backupExportRechecksTheStatus() {
+        var page = backupPage({ok: true, exists: false})
+        compare(generalPart(page, "backupStatus").text, "No backup yet.")
+        pressExport(page, {ok: true, exists: true, exported_at: backupStamp})
+        compare(generalPart(page, "backupStatus").text, "Last backup: 2026-11-06 00:10:29 UTC")
+        compare(page.confirmingExport, true)
+        compare(backupOps(page), ["status", "status"], "nothing exported without asking")
     }
 
     // Unknown state: it may exist, so it is not replaced without asking.
     function test_backupExportAsksWhenStatusFailed() {
         var page = backupPage({ok: false, error: "os-error"})
-        generalPart(page, "backupExport").clicked()
+        pressExport(page, {ok: false, error: "os-error"})
         compare(page.confirmingExport, true)
-        compare(backupOps(page), ["status"])
+        compare(backupOps(page), ["status", "status"])
     }
 
     // M1: the helper reads the applied settings itself; the page's values,
@@ -1545,7 +1563,7 @@ TestCase {
         page.cfg_chatSignInStorage = "encrypted"
         page.cfg_chatCustomUrls = JSON.stringify({claude: "https://private.example.org/secret-path"})
         page.cfg_chatOllamaUrl = "http://127.0.0.1:12345"
-        generalPart(page, "backupExport").clicked()
+        pressExport(page)
         lastExport(page)
         everyCommand(page).forEach(function (command) {
             verify(command.indexOf("private.example.org") < 0 && command.indexOf("12345") < 0
@@ -1557,18 +1575,18 @@ TestCase {
     function test_backupExportSaysApplied() {
         var page = backupPage({ok: true, exists: true, exported_at: backupStamp})
         compare(generalPart(page, "backupExplanation").text, "Export saves the applied settings: press Apply first.")
-        generalPart(page, "backupExport").clicked()
+        pressExport(page, {ok: true, exists: true, exported_at: backupStamp})
         compare(generalPart(page, "backupExportConfirm").text,
                 "Replace the existing backup with the applied settings? Changes not yet applied are not exported.")
     }
 
     function test_backupExportResultAndNewStatus() {
         var page = backupPage()
-        generalPart(page, "backupExport").clicked()
+        pressExport(page)
         answerBackup(page, JSON.stringify({ok: true, saved: 27, dropped: 1}))
         compare(generalPart(page, "backupMessage").text, "Backup saved.")
         compare(generalPart(page, "backupDroppedCount").text, "Settings left out: 1")
-        compare(backupOps(page), ["status", "export", "status"])
+        compare(backupOps(page), ["status", "status", "export", "status"])
     }
 
     function test_backupButtonsWaitWhileRunning() {
@@ -1635,7 +1653,7 @@ TestCase {
         // The page shows what it took over.
         compare(generalPart(page, "middleClickChoice").currentValue, "mscopilot")
         // Out again is the helper's part (it reads the applied settings).
-        generalPart(page, "backupExport").clicked()
+        pressExport(page, {ok: true, exists: true, exported_at: backupStamp})
         generalPart(page, "backupExportConfirm").actions[0].trigger()
         lastExport(page)
     }
@@ -1722,7 +1740,7 @@ TestCase {
     // --- Task 007: Automatic backup, the panel menu, the origin line ---------
 
     readonly property string backupDamagedText: "The backup file is damaged: its checksum doesn't match, so it wasn't used. Nothing was changed."
-    readonly property string backupKeyText: "The backup key (~/.local/share/hearthwire/backup-key) isn't safe to use, so nothing was exported. Delete it to make a new one; backups made with the old key then show a warning on import."
+    readonly property string backupKeyText: "The backup key isn't safe to use, so nothing was exported. Delete the file backup-key in Hearthwire's data folder: the next export makes a new one, and older backups then show as not made by this Hearthwire."
     readonly property string originHere: "Made by Hearthwire on this computer."
     readonly property string originWarning: "Not made by this Hearthwire: check every change below before you press Replace."
 
@@ -1792,7 +1810,7 @@ TestCase {
         compare(sent.iconName, "hearthwire")
         compare(sent.autoDelete, true)
         compare(sent.title, "Settings backed up")
-        compare(sent.text, "The earlier backup was replaced.")
+        compare(sent.text, "Any earlier backup was replaced.")
         compare(sent.urgency, Notification.LowUrgency)
         compare(sent.hasActions, false)
     }
@@ -1808,7 +1826,7 @@ TestCase {
             {tag: "not-owned", reply: {ok: false, error: "not-owned"}, text: folder},
             {tag: "unsafe-mode", reply: {ok: false, error: "unsafe-mode"}, text: folder},
             {tag: "key-unusable", reply: {ok: false, error: "key-unusable"},
-             text: "The backup key can't be used. See Settings → General → Backup."},
+             text: "The backup key can't be used. Delete the file backup-key in Hearthwire's data folder; the next backup makes a new one."},
             {tag: "legacy-data", reply: {ok: false, error: "legacy-data"},
              text: "Run the installer again with --restart-plasma first."},
             {tag: "applet-not-found", reply: {ok: false, error: "applet-not-found"}, text: read},
@@ -2013,6 +2031,155 @@ TestCase {
         compare(mainExports(main), 2)
     }
 
+    // --- Round 2: Plasma re-sends every key (H-1), hung exports (INFO-3) --
+
+    // Real Plasma: valueChanged for every key, unchanged ones too, on each
+    // Apply and after the widget's own writes. None of these may export.
+    function test_autoApplyReemitWithNoChangeExportsNothing() {
+        var main = backupMain({backupAutoExport: true})
+        Plasmoid.reemitAll()
+        settle(main)
+        Plasmoid.reemitAll()
+        settle(main)
+        compare(mainExports(main), 0)
+        compare(main.backupAutoForce, false)
+    }
+
+    function test_autoChangeAndReversalWithReemitsExportsNothing() {
+        var main = backupMain({backupAutoExport: true}, 300)
+        Plasmoid.configuration.popupSize = "large"
+        Plasmoid.reemitAll()
+        wait(100)
+        Plasmoid.configuration.popupSize = "normal"
+        Plasmoid.reemitAll()
+        settle(main)
+        compare(mainExports(main), 0, "M-7: back to the same value")
+    }
+
+    function test_autoStartupReemitExportsNothing() {
+        var main = load(testCase.mainFile, {backupAutoExport: true, refreshInterval: 123, configSchemaVersion: 2,
+                                            tooltipMetrics: ""})
+        main.backupAutoWait = 50
+        compare(main.backupAutoOn, true, "seen at start")
+        Plasmoid.reemitAll()
+        settle(main)
+        wait(3100)
+        compare(mainExports(main), 0)
+    }
+
+    function test_autoZoomChangeReemitExportsNothing() {
+        var main = backupMain({backupAutoExport: true})
+        Plasmoid.configuration.chatSiteZoom = "{\"claude\":1.5}"
+        Plasmoid.reemitAll()
+        Plasmoid.configuration.usageHistoryEnabled = true
+        Plasmoid.reemitAll()
+        settle(main)
+        compare(mainExports(main), 0)
+    }
+
+    // The restore must never overwrite the file it reads.
+    function test_autoRestoreThenReemitExportsNothing() {
+        var main = backupMain({backupAutoExport: true})
+        Plasmoid.actionsAvailable = true
+        menuActions()[2].trigger()
+        Plasmoid.reemitAll()
+        settle(main)
+        compare(mainExports(main), 0)
+        compare(Plasmoid.triggered, ["configure"])
+    }
+
+    // A real change waits while the Restore is in its window, then goes.
+    function test_autoWaitsOutARestore() {
+        var main = backupMain({backupAutoExport: true})
+        Plasmoid.actionsAvailable = true
+        Plasmoid.configuration.popupSize = "large"
+        menuActions()[2].trigger()
+        Plasmoid.reemitAll()
+        settle(main)
+        settle(main)
+        compare(mainExports(main), 0, "not while the Restore is in its window")
+        Plasmoid.configuration.backupRestoreAt = String(Date.now() - 61000)
+        settle(main)
+        compare(mainExports(main), 1, "after it")
+    }
+
+    // Turning it on still exports once, also with Plasma's re-sends.
+    function test_autoSwitchOnWithReemitsExportsOnce() {
+        var main = backupMain()
+        Plasmoid.configuration.backupAutoExport = true
+        Plasmoid.reemitAll()
+        settle(main)
+        compare(mainExports(main), 1)
+        answerBackup(main, exportOk())
+        Plasmoid.reemitAll()
+        settle(main)
+        compare(mainExports(main), 1, "the next Apply re-sends true: no second export")
+        Plasmoid.configuration.backupAutoExport = false
+        Plasmoid.reemitAll()
+        Plasmoid.configuration.backupAutoExport = true
+        settle(main)
+        compare(mainExports(main), 2, "off and on again is a new switch-on")
+    }
+
+    function test_backupExportGivesUpWhenHung() {
+        var main = backupMain()
+        main.backupStaleWait = 100
+        var action = menuActions()[1]
+        action.trigger()
+        var running = runningOn(main, "--settings-backup")
+        verify(running, "running")
+        compare(action.enabled, false)
+        tryCompare(main, "backupOp", "", 2000)
+        compare(action.enabled, true, "the menu works again")
+        compare(SentNotifications.sent.length, 1)
+        compare(SentNotifications.sent[0].title, "Settings backup failed")
+        compare(SentNotifications.sent[0].text, "Something went wrong. Nothing was changed.")
+        // Its late reply changes nothing.
+        var fingerprint = main.backupFingerprint
+        running.source.newData(running.command, {"exit code": 0, "stdout": exportOk()})
+        wait(0)
+        compare(SentNotifications.sent.length, 1)
+        compare(main.backupFingerprint, fingerprint)
+    }
+
+    function test_backupStaleWaitDefault() {
+        compare(backupMain().backupStaleWait, 180000, "RefreshGate.STALE_MS")
+    }
+
+    // M-1: the confirmation, the origin line and the plan line are in view.
+    function checkRestoreInView(page) {
+        var flickable = page.flickable
+        wait(50)
+        var origin = generalPart(page, "backupOrigin")
+        var plan = generalPart(page, "backupPlanLabel")
+        var confirm = generalPart(page, "backupImportConfirm")
+        var originTop = origin.mapToItem(flickable.contentItem, 0, 0).y
+        var planEnd = plan.mapToItem(flickable.contentItem, 0, plan.height).y
+        var confirmTop = confirm.mapToItem(flickable.contentItem, 0, 0).y
+        verify(flickable.contentY > 0, "scrolled: " + flickable.contentY)
+        verify(planEnd <= flickable.contentY + flickable.height + 1,
+               "the plan line ends in view: " + planEnd + " > " + (flickable.contentY + flickable.height))
+        verify(originTop >= flickable.contentY - 1, "the origin line is in view")
+        verify(confirmTop >= flickable.contentY - 1, "the confirmation is in view: " + confirmTop + " < " + flickable.contentY)
+    }
+
+    function test_backupRestoreShowsTheConfirmation_data() {
+        return [{tag: "fresh", fresh: true}, {tag: "already open", fresh: false}]
+    }
+
+    function test_backupRestoreShowsTheConfirmation(data) {
+        var page = data.fresh ? generalOpenedWith(String(Date.now())) : generalOpenedWith("")
+        wait(50)
+        answerBackup(page, JSON.stringify({ok: true, exists: true, exported_at: backupStamp}))
+        if (!data.fresh)
+            Plasmoid.configuration.backupRestoreAt = String(Date.now())
+        compare(backupOps(page), ["status", "import"])
+        answerBackup(page, JSON.stringify({ok: true, exported_at: backupStamp, settings: goodBackup,
+                                           dropped: 0, origin: "other"}))
+        compare(page.confirmingImport, true)
+        checkRestoreInView(page)
+    }
+
     // --- Settings → General: the switch, the restore request, the origin ---
 
     function test_backupAutoSwitchWritesOnlyItsCfg() {
@@ -2070,13 +2237,8 @@ TestCase {
         compare(generalPart(page, "backupImportConfirm").visible, true)
         compare(page.cfg_popupSize, "normal", "nothing applied before Replace")
         compare(generalPart(page, "backupOrigin").text, originHere)
-        // Scrolled before the confirmation grew the page: the section's top
-        // or the page's end, whichever came first.
-        var flickable = page.flickable
-        var top = backupSectionTop(page)
-        verify(flickable.contentY > 0, "scrolled: " + flickable.contentY)
-        verify(top >= flickable.contentY - 1 && top < flickable.contentY + flickable.height,
-               "the Backup section is in view: " + top + " at " + flickable.contentY)
+        // M-1: scrolled again once the confirmation was shown.
+        checkRestoreInView(page)
         compare(Plasmoid.configuration.backupRestoreAt, stamp, "never written by the page")
         compare(page.cfg_backupRestoreAt, "", "nor its cfg_ (only the mirror sets it)")
         // Cancel leaves everything as it was.
@@ -2138,10 +2300,10 @@ TestCase {
 
     function test_backupRestoreDuringAFailedExport() {
         var page = backupPage()
-        generalPart(page, "backupExport").clicked()
+        pressExport(page)
         Plasmoid.configuration.backupRestoreAt = String(Date.now())
         answerBackup(page, JSON.stringify({ok: false, error: "key-unusable"}))
-        compare(backupOps(page), ["status", "export", "import"])
+        compare(backupOps(page), ["status", "status", "export", "import"])
         compare(page.restorePending, false)
     }
 
@@ -2401,7 +2563,7 @@ TestCase {
 
     function test_settingsApplyKeepsOtherBackupResults() {
         var page = backupPage()
-        generalPart(page, "backupExport").clicked()
+        pressExport(page)
         answerBackup(page, JSON.stringify({ok: true, saved: 27, dropped: 1}))
         answerBackup(page, JSON.stringify({ok: true, exists: true, exported_at: backupStamp}))
         page.saveConfig()

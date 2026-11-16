@@ -420,11 +420,18 @@ PlasmoidItem {
     property string backupPendingFingerprint: ""
     // Turning Automatic backup on exports once even with nothing changed.
     property bool backupAutoForce: false
+    // The switch as last seen. Plasma sends valueChanged for every key on
+    // each Apply and after the widget's own writes, changed or not: only a
+    // real off → on change may force an export.
+    property bool backupAutoOn: false
     // The failure code an automatic export last told; "" after a success.
     property string backupAutoFailed: ""
     // How long Automatic backup waits after the last backed-up change, so
     // one Apply (many keys) or quick toggles export once.
     property int backupAutoWait: 3000
+    // An export that never answers is given up after this long, so a hung
+    // helper can't keep "Back up settings" disabled.
+    property int backupStaleWait: RefreshGate.STALE_MS
 
     // AI Provider Settings → Usage ring. Same reading rules and colors as
     // the hover popup and the bars.
@@ -1785,7 +1792,16 @@ PlasmoidItem {
         root.backupTrigger = trigger
         root.backupPendingFingerprint = fp
         root.backupSourceName = command
+        backupStaleTimer.restart()
         backupSource.connectSource(command)
+    }
+
+    // Its late reply is ignored (the source name no longer matches).
+    function giveUpBackupExport() {
+        if (root.backupOp === "")
+            return
+        backupSource.disconnectSource(root.backupSourceName)
+        root.finishBackupExport({ok: false, error: SettingsBackup.BAD_REPLY})
     }
 
     // A change made while the export ran is still noticed: the fingerprint
@@ -1793,6 +1809,7 @@ PlasmoidItem {
     function finishBackupExport(reply) {
         var trigger = root.backupTrigger
         var fp = root.backupPendingFingerprint
+        backupStaleTimer.stop()
         root.backupOp = ""
         root.backupSourceName = ""
         root.backupTrigger = ""
@@ -1825,7 +1842,7 @@ PlasmoidItem {
         case "unsafe-mode":
             return i18n("The backup folder isn't safe to use. Check its owner and permissions.")
         case "key-unusable":
-            return i18n("The backup key can't be used. See Settings → General → Backup.")
+            return i18n("The backup key can't be used. Delete the file backup-key in Hearthwire's data folder; the next backup makes a new one.")
         case "legacy-data":
             return i18n("Run the installer again with --restart-plasma first.")
         case "applet-not-found":
@@ -1845,11 +1862,15 @@ PlasmoidItem {
     }
 
     // Automatic backup, about 3 s after a backed-up setting changed (one
-    // Apply writes many keys) and once after the switch is turned on.
+    // Apply writes many keys) and once after the switch is turned on. Only
+    // a changed fingerprint (or that one forced run) exports.
     function autoBackup() {
         if (Plasmoid.configuration.backupAutoExport !== true)
             return
-        if (root.backupOp !== "") {
+        // An export running, or a menu Restore still in its window: the
+        // restore must never overwrite the file it reads. Tried again later.
+        if (root.backupOp !== ""
+                || SettingsBackup.restoreRequested(Plasmoid.configuration.backupRestoreAt, Date.now())) {
             autoBackupTimer.restart()
             return
         }
@@ -1989,6 +2010,13 @@ PlasmoidItem {
         onTriggered: root.autoBackup()
     }
 
+    Timer {
+        id: backupStaleTimer
+        interval: root.backupStaleWait
+        repeat: false
+        onTriggered: root.giveUpBackupExport()
+    }
+
     Plasma5Support.DataSource {
         id: storageSource
         engine: "executable"
@@ -2104,7 +2132,7 @@ PlasmoidItem {
             autoDelete: true
             title: outcome === "saved" ? i18n("Settings backed up")
                 : outcome === "auto-failed" ? i18n("Automatic settings backup failed") : i18n("Settings backup failed")
-            text: outcome === "saved" ? i18n("The earlier backup was replaced.") : root.backupFailureText(failure)
+            text: outcome === "saved" ? i18n("Any earlier backup was replaced.") : root.backupFailureText(failure)
         }
     }
 
@@ -2167,6 +2195,7 @@ PlasmoidItem {
             root.chatEnqueue(["status", "auto-unlock"])
         root.backupRun = ChatStorage.firstRun(Date.now(), Math.random())
         // Last, after every start-up write above: starting Plasma exports nothing.
+        root.backupAutoOn = Plasmoid.configuration.backupAutoExport === true
         root.backupFingerprint = SettingsBackup.fingerprint(Plasmoid.configuration)
     }
 
@@ -2176,13 +2205,16 @@ PlasmoidItem {
         target: Plasmoid.configuration
         function onValueChanged(key, value) {
             if (key === "backupAutoExport") {
-                if (value === true) {
+                var on = value === true
+                if (on && !root.backupAutoOn) {
                     root.backupAutoForce = true
                     autoBackupTimer.restart()
-                } else {
+                } else if (!on) {
+                    root.backupAutoForce = false
                     autoBackupTimer.stop()
                 }
-            } else if (Plasmoid.configuration.backupAutoExport === true && SettingsBackup.isBackupKey(key)) {
+                root.backupAutoOn = on
+            } else if (root.backupAutoOn && SettingsBackup.isBackupKey(key)) {
                 autoBackupTimer.restart()
             }
         }

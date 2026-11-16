@@ -405,6 +405,15 @@ KCM.SimpleKCM {
     property string backupOrigin: ""
     // A menu Restore waiting for the step that runs (the status at open).
     property bool restorePending: false
+    // A Restore's import is on its way: scroll again once its confirmation
+    // is shown, so the confirmation and the origin line are in view.
+    property bool restoreScroll: false
+    // That confirmation is shown: scrolled again while the layout grows to
+    // hold it, until it closes or the user scrolls.
+    property bool restoreFollow: false
+    // Export pressed: the status is read again first (the panel menu or
+    // Automatic backup may have written a backup meanwhile).
+    property bool exportPending: false
 
     // Every step names this widget; nothing runs without a usable id.
     function runBackup(op) {
@@ -426,7 +435,17 @@ KCM.SimpleKCM {
 
     function requestExport() {
         page.backupMessage = ""
-        // Only a backup known to be absent can't be overwritten.
+        page.confirmingExport = false
+        page.exportPending = true
+        page.runBackup("status")
+        // No step could start (no usable id): ask as before.
+        if (page.backupOp === "")
+            page.continueExport()
+    }
+
+    // Only a backup known to be absent can't be overwritten.
+    function continueExport() {
+        page.exportPending = false
         if (page.backupState === "absent")
             page.exportBackup()
         else
@@ -453,15 +472,22 @@ KCM.SimpleKCM {
     // usual import, which asks before anything changes.
     function startRestore() {
         page.restorePending = false
+        page.restoreScroll = true
         page.scrollToBackup()
         page.requestImport()
     }
 
+    // The Backup section at the top; with an import confirmation shown, far
+    // enough that the plan line under the origin line is in view too.
     function scrollToBackup() {
         var flickable = page.flickable
         if (!flickable || !flickable.contentItem)
             return
         var top = backupSection.mapToItem(flickable.contentItem, 0, 0).y
+        if (page.confirmingImport) {
+            var end = backupPlanLabel.mapToItem(flickable.contentItem, 0, backupPlanLabel.height).y
+            top = Math.max(top, end - flickable.height)
+        }
         flickable.contentY = Math.max(0, Math.min(top, flickable.contentHeight - flickable.height))
     }
 
@@ -471,16 +497,25 @@ KCM.SimpleKCM {
         if (op === "status") {
             page.backupState = reply.ok ? (reply.exists ? "exists" : "absent") : reply.error
             page.backupExportedAt = reply.ok ? reply.exportedAt : ""
-            // A Restore asked for while this ran; one step runs at a time.
-            if (page.restorePending)
+            // A Restore asked for while this ran goes first; one step runs
+            // at a time, so an Export pressed meanwhile is dropped.
+            if (page.restorePending) {
+                page.exportPending = false
                 page.startRestore()
+            } else if (page.exportPending) {
+                page.continueExport()
+            }
             return
         }
         // This import answers a Restore asked for while it ran.
         if (op === "import" && page.restorePending) {
             page.restorePending = false
+            page.restoreScroll = true
             page.scrollToBackup()
         }
+        var restoring = op === "import" && page.restoreScroll
+        if (op === "import")
+            page.restoreScroll = false
         if (!reply.ok) {
             page.backupMessage = reply.error
             // A failed export runs no status: the Restore goes now.
@@ -548,6 +583,11 @@ KCM.SimpleKCM {
         page.backupExportedAt = reply.exportedAt
         page.backupOrigin = reply.origin
         page.confirmingImport = true
+        // Again as the layout grows by the confirmation.
+        if (restoring) {
+            page.restoreFollow = true
+            Qt.callLater(page.scrollToBackup)
+        }
     }
 
     // {id: host} of the applied entries this page can't read whose url
@@ -690,7 +730,7 @@ KCM.SimpleKCM {
         case "damaged":
             return i18n("The backup file is damaged: its checksum doesn't match, so it wasn't used. Nothing was changed.")
         case "key-unusable":
-            return i18n("The backup key (~/.local/share/hearthwire/backup-key) isn't safe to use, so nothing was exported. Delete it to make a new one; backups made with the old key then show a warning on import.")
+            return i18n("The backup key isn't safe to use, so nothing was exported. Delete the file backup-key in Hearthwire's data folder: the next export makes a new one, and older backups then show as not made by this Hearthwire.")
         case "no-applet":
             return i18n("This widget couldn't be identified, so the backup can't be used. Nothing was changed.")
         default:
@@ -751,6 +791,22 @@ KCM.SimpleKCM {
             return i18n("Checking…")
         default:
             return i18n("Couldn't check the encrypted folder.")
+        }
+    }
+
+    onConfirmingImportChanged: {
+        if (!page.confirmingImport)
+            page.restoreFollow = false
+    }
+
+    Connections {
+        target: page.flickable
+        function onContentHeightChanged() {
+            if (page.restoreFollow)
+                page.scrollToBackup()
+        }
+        function onMovementStarted() {
+            page.restoreFollow = false
         }
     }
 
@@ -1589,6 +1645,7 @@ KCM.SimpleKCM {
         }
 
         QQC2.Label {
+            id: backupPlanLabel
             objectName: "backupPlanLabel"
             Layout.fillWidth: true
             visible: page.confirmingImport

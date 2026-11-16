@@ -1223,7 +1223,8 @@ are not in the backup.
   - Both are compared with `hmac.compare_digest`, the checksum first. A
     fixed test vector in `tests/test_settingsbackup.py` pins the bytes.
 - `origin` (import only; informational, M-6: it never changes which
-  settings are kept):
+  settings are kept; M-8: once an `other` or `unsigned` import is applied,
+  the next export signs those settings with this install's key):
 
   | File | Result |
   | --- | --- |
@@ -1243,10 +1244,18 @@ are not in the backup.
   `backup-key` (never replaces; on `EEXIST` the existing key is read and
   used, so two exports at once share one key), the temporary unlinked and
   the folder fsynced. Export first deletes stale `backup-key.<16 hex>.tmp`
-  files (a symlink is unlinked, never followed). Read (`export` and
+  files (a symlink is unlinked, never followed). Export holds an exclusive
+  `flock` on the backup folder's descriptor and then on the key folder's
+  (round 2, LOW-1) for its whole write, so a concurrent export never deletes
+  another's live temporary or sees a key mid-link; import takes the key
+  folder's lock shared, `status` none. No lock file is made; a wait over
+  10 s (`LOCK_WAIT_SECONDS`) is `os-error`, and a file system without flock
+  runs unlocked (still fail-closed). Read (`export` and
   `import`; `status` never reads it, and `import` only after the checksum
   passed) with `O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC|O_NOCTTY`; it must be
-  a regular file, ours, with no group or other bits and exactly 32 bytes.
+  a regular file, ours, with no group or other bits, exactly 32 bytes and one
+  name (`st_nlink == 1`); an open refused with `ELOOP`, `EACCES`, `ENXIO` or
+  `EISDIR` counts as unusable too.
   Otherwise `export` is `key-unusable` and `import` gives `other`; the key
   is never replaced or repaired (M-5). No rotation. The key is never in
   argv, the environment, stdout, stderr, a reply, the backup or a log.

@@ -275,8 +275,9 @@ reads them (whitespace and key order don't count).
   prompt, and the wallet would not keep it from programs running as you
   either). The key is never shown, logged, written into the backup, put in
   a reply, the environment or a command line. A key file that is a symlink,
-  another user's, readable or writable by others, not exactly 32 bytes, or
-  in a folder others may write to is never used or replaced: Export then
+  another user's, readable or writable by others or unreadable, not exactly
+  32 bytes, hard-linked elsewhere, or in a folder others may write to is
+  never used or replaced: Export then
   stops with "The backup key … isn't safe to use", and you delete it to
   make a new one. Status never reads it; Import only reads it.
 - What Import shows, before you can press Replace:
@@ -290,9 +291,13 @@ reads them (whitespace and key order don't count).
     checksums: the same warning, and the import still works. Every new
     export writes version 2.
 - The result is for your information only: the same settings are checked
-  and kept, with the same preview, whatever it says. After you apply a
-  restored backup, the next export signs those settings with this
-  install's key.
+  and kept, with the same preview, whatever it says.
+- **After you restore another computer's backup, the next backup signs it
+  as this computer's.** Once you press Replace and Apply, those settings are
+  this widget's own, so the next export (the button, the menu or Automatic
+  backup, which runs about 3 seconds after that Apply) writes them signed
+  with this install's key, and a later import says "Made by Hearthwire on
+  this computer." The warning you saw before Replace is not kept anywhere.
 - Deleting the key makes every earlier backup show the warning. Hearthwire
   1.0.1 can't read a version 2 file ("made by a different version") and
   ignores the key.
