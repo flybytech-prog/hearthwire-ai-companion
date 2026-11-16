@@ -1619,7 +1619,7 @@ KCM.SimpleKCM {
             }
             Kirigami.ContextualHelpButton {
                 objectName: "backupAutoHelp"
-                toolTipText: i18n("Saved about 3 seconds after you press Apply when a backed-up setting changed, and once when you turn this on. It replaces the previous backup without asking. With several Hearthwire widgets, the last one to apply wins. It waits while an import's Replace question is open, and up to a minute after Restore settings… in the panel menu, so the backup being restored isn't replaced. The backup never holds sign-ins, the encrypted folder, zoom or the usage history setting.")
+                toolTipText: i18n("Saved about 3 seconds after you press Apply when a backed-up setting changed, and once when you turn this on. It replaces the previous backup without asking. With several Hearthwire widgets, the last one to apply wins. It waits while an import's Replace question is open and after Replace until you apply, and up to a minute after Restore settings… in the panel menu, so the backup being restored isn't replaced. The backup never holds sign-ins, the encrypted folder, zoom or the usage history setting.")
             }
         }
         RowLayout {

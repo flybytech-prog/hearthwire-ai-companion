@@ -12208,6 +12208,7 @@ def _backup_key_writer_problems(sources):
     if len(_key_writes(general, ("backupAutoExport",))) != 1:
         problems.append("configGeneral.qml writes cfg_backupAutoExport once, in its switch")
     problems += _restore_hold_problems(general)
+    problems += _replaced_pending_problems(sources)
     return problems
 
 
@@ -12218,6 +12219,24 @@ def _backup_key_writer_problems(sources):
 # read) or the page goes away, and the release clears only the page's own
 # stamp, never a newer menu request.
 HOLDING_AUTO_BACKUP = 'readonly property bool holdingAutoBackup: page.confirmingImport || page.backupOp === "import"'
+# Round 4 (L-5): Replace pressed, not yet applied, still holds: the page has
+# the backup's values, so the file is still the one being restored.
+# replacedPending is set only at the end of applyBackup (past the plan
+# check) and cleared only in saveConfig; the hold itself still ends only
+# through syncAutoBackupHold or onDestruction.
+HOLDING_REPLACED = 'readonly property bool holdingAutoBackup: page.confirmingImport || page.backupOp === "import" || page.replacedPending'
+REPLACED_SET = "page.replacedPending = true"
+REPLACED_CLEAR = "page.replacedPending = false"
+APPLY_BACKUP_GUARD = "if (!plan) return "
+APPLY_BACKUP_TAIL = f' page.backupMessage = "applied" {REPLACED_SET} }}'
+SAVE_CONFIG_BODY = ('{ if (page.backupMessage === "applied") page.backupMessage = "" '
+                    f"{REPLACED_CLEAR} }}")
+REPLACED_PENDING_FORMS = (
+    r"^\s*property\s+bool\s+replacedPending\s*:\s*false\s*$",
+    r'^\s*readonly\s+property\s+bool\s+holdingAutoBackup\s*:\s*page\s*\.\s*confirmingImport\s*\|\|\s*'
+    r'page\s*\.\s*backupOp\s*===\s*"import"\s*\|\|\s*page\s*\.\s*replacedPending\s*$',
+    r"^\s*page\s*\.\s*replacedPending\s*=\s*(?:true|false)\s*$",
+)
 HOLD_CHANGED = "onHoldingAutoBackupChanged: Qt.callLater(page.syncAutoBackupHold)"
 SYNC_HOLD_BODY = ('{ if (page.holdingAutoBackup && page.restoreHold === "") page.holdAutoBackup() '
                   "else if (!page.holdingAutoBackup) page.releaseAutoBackup() }")
@@ -12257,6 +12276,29 @@ def _restore_hold_problems(general):
     return problems
 
 
+def _replaced_pending_problems(sources):
+    """Round 4 (L-5): replacedPending joins the hold, is set only at the end
+    of applyBackup (after the plan check), cleared only in saveConfig, and
+    named nowhere else, in configGeneral or any other file."""
+    general = sources.get(_rel(CONFIG_GENERAL), "")
+    problems = _pin_problems(general, (HOLDING_REPLACED, REPLACED_SET, REPLACED_CLEAR,
+                                       "property bool replacedPending: false"), "configGeneral.qml")
+    if len(_hits(r"\breplacedPending\b", general)) != 4:
+        problems.append("configGeneral.qml names replacedPending 4 times: declared, held, set, cleared")
+    problems += _unknown_mentions(general, "replacedPending", REPLACED_PENDING_FORMS)
+    apply = _squashed(_function_body(general, "applyBackup") or "")
+    if (apply.count("replacedPending") != 1 or not apply.endswith(APPLY_BACKUP_TAIL)
+            or not 0 <= apply.find(APPLY_BACKUP_GUARD) < apply.find(REPLACED_SET)):
+        problems.append(f"applyBackup sets replacedPending only as its last line, after `{APPLY_BACKUP_GUARD}`")
+    save = _function_body(general, "saveConfig")
+    if save is None or _squashed(save) != SAVE_CONFIG_BODY:
+        problems.append(f"configGeneral.qml saveConfig must be exactly `{SAVE_CONFIG_BODY}`")
+    for name, code in sources.items():
+        if name != _rel(CONFIG_GENERAL) and re.search(r"\breplacedPending\b", code):
+            problems.append(f"{name}: only configGeneral.qml names replacedPending")
+    return problems
+
+
 def test_backup_keys_are_written_only_where_planned():
     problems = _backup_key_writer_problems(_all_code())
     assert not problems, problems
@@ -12275,6 +12317,30 @@ BACKUP_KEY_WRITER_MUTATIONS = [
     (CONFIG_GENERAL, "        page.restoreFollow = false\n    }\n\n    // Later,",
      "        page.restoreFollow = false\n        page.releaseAutoBackup()\n    }\n\n    // Later,"),
     (CONFIG_GENERAL, "    Component.onDestruction: page.releaseAutoBackup()\n", ""),
+    # Round 4 (L-5): Replace pressed holds until Apply; only saveConfig ends it.
+    (CONFIG_GENERAL, HOLDING_REPLACED, HOLDING_AUTO_BACKUP),
+    (CONFIG_GENERAL, HOLDING_REPLACED, HOLDING_REPLACED + " && page.backupOp === \"\""),
+    (CONFIG_GENERAL, f'        page.backupMessage = "applied"\n        {REPLACED_SET}\n',
+     f'        page.backupMessage = "applied"\n        {REPLACED_SET}\n        {REPLACED_CLEAR}\n'),
+    (CONFIG_GENERAL, f'        page.backupMessage = "applied"\n        {REPLACED_SET}\n',
+     '        page.backupMessage = "applied"\n'),
+    (CONFIG_GENERAL, "        if (!plan)\n            return\n", f"        {REPLACED_SET}\n        if (!plan)\n            return\n"),
+    (CONFIG_GENERAL, f"        {REPLACED_SET}\n", ""),
+    (CONFIG_GENERAL, f"        {REPLACED_SET}\n", "        page.replacedPending = page.backupMessage === \"applied\"\n"),
+    (CONFIG_GENERAL, f"            page.backupMessage = \"\"\n        {REPLACED_CLEAR}\n",
+     "            page.backupMessage = \"\"\n"),
+    (CONFIG_GENERAL, f"            page.backupMessage = \"\"\n        {REPLACED_CLEAR}\n",
+     f"            page.backupMessage = \"\"\n        {REPLACED_CLEAR}\n        page.releaseAutoBackup()\n"),
+    (CONFIG_GENERAL, f"            page.backupMessage = \"\"\n        {REPLACED_CLEAR}\n",
+     f"            page.backupMessage = \"\"\n        {REPLACED_CLEAR}\n        page.syncAutoBackupHold()\n"),
+    (CONFIG_GENERAL, "    function backupStatusText() {\n",
+     f"    function g() {{ {REPLACED_CLEAR} }}\n    function backupStatusText() {{\n"),
+    (CONFIG_GENERAL, "    function backupStatusText() {\n",
+     "    function g() { page[\"replacedPending\"] = false }\n    function backupStatusText() {\n"),
+    (CONFIG_GENERAL, "        page.restoreFollow = false\n    }\n\n    // Later,",
+     f"        page.restoreFollow = false\n        {REPLACED_CLEAR}\n    }}\n\n    // Later,"),
+    (CONFIG_CHAT, "            else if (key === \"backupRestoreAt\")\n",
+     "            else if (key === \"x\")\n                page.replacedPending = false\n            else if (key === \"backupRestoreAt\")\n"),
     # Only configGeneral refreshes the hold, and only in holdAutoBackup.
     (CONFIG_CHAT, "            else if (key === \"backupRestoreAt\")\n                page.cfg_backupRestoreAt = value\n",
      "            else if (key === \"backupRestoreAt\")\n                Plasmoid.configuration.backupRestoreAt = String(Date.now())\n"),

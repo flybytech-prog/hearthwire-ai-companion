@@ -2366,7 +2366,7 @@ TestCase {
         compare(box.checked, false)
         compare(box.text, "Back up automatically when settings are applied")
         compare(generalPart(page, "backupAutoHelp").toolTipText,
-                "Saved about 3 seconds after you press Apply when a backed-up setting changed, and once when you turn this on. It replaces the previous backup without asking. With several Hearthwire widgets, the last one to apply wins. It waits while an import's Replace question is open, and up to a minute after Restore settings… in the panel menu, so the backup being restored isn't replaced. The backup never holds sign-ins, the encrypted folder, zoom or the usage history setting.")
+                "Saved about 3 seconds after you press Apply when a backed-up setting changed, and once when you turn this on. It replaces the previous backup without asking. With several Hearthwire widgets, the last one to apply wins. It waits while an import's Replace question is open and after Replace until you apply, and up to a minute after Restore settings… in the panel menu, so the backup being restored isn't replaced. The backup never holds sign-ins, the encrypted folder, zoom or the usage history setting.")
         box.toggle()
         box.toggled()
         compare(page.cfg_backupAutoExport, true)
