@@ -227,8 +227,11 @@ one fixed file; there is no file dialog.
   (once per reason, until an export works again). There is one file per
   user and no older copies: with several Hearthwire widgets that have it on,
   the last one to apply wins. After **Restore settings…** it waits up to a
-  minute, so the backup you are restoring from is never replaced while you
-  look at it.
+  minute, while an import's Replace question is open, and after Replace
+  until you apply, so the backup you are restoring from is never replaced
+  while you look at it. If you cancel the import or close Settings without
+  applying, the next automatic backup saves your current settings over that
+  file.
 - **Back up settings** in the panel menu exports at once and shows a
   notification ("Settings backed up" or a fixed reason). **Restore
   settings…** opens Settings on General at the Backup section and starts an
