@@ -1,0 +1,32 @@
+# Weekly version updates. Every pull request is reviewed by hand; nothing is
+# merged automatically. Security updates (Dependabot alerts) are separate and
+# enabled in the repository settings.
+version: 2
+updates:
+  # The workflows pin every action by commit SHA; this keeps the pins current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7 # wait a week before proposing a brand-new release
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+    open-pull-requests-limit: 5
+
+  # Hash-pinned test dependencies used by the tests workflow.
+  - package-ecosystem: pip
+    directory: /.github
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7 # wait a week before proposing a brand-new release
+    groups:
+      test-deps:
+        patterns: ["*"]
+    commit-message:
+      prefix: test
+    open-pull-requests-limit: 5

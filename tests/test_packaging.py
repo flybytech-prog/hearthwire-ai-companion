@@ -1104,7 +1104,10 @@ def _without_case_patterns(line):
 def pipefail_problems(text):
     problems = []
     head, _, body = text.partition("\njobs:")
-    if not re.search(r"(?m)^defaults:\n  run:\n    shell: bash$", head):
+    # A workflow with no run steps (e.g. Scorecard, whose publish check refuses a top-level
+    # defaults block) has nothing for pipefail to guard; every other one needs bash -eo pipefail.
+    has_run_steps = re.search(r"(?m)^\s+(-\s+)?run:", text) is not None
+    if has_run_steps and not re.search(r"(?m)^defaults:\n  run:\n    shell: bash$", head):
         problems.append("no workflow-wide shell: bash (pipefail)")
     if re.search(r"(?m)^\s+shell:", body):
         problems.append("a step overrides the shell")
@@ -1121,6 +1124,13 @@ def pipefail_problems(text):
         if re.search(r"\bgrep\b", plain) and not re.search(r"\bif\s+(!\s+)?grep\b|\bgrep\b[^\n]*\|\|", plain):
             problems.append(f"a grep whose no-match status would fail the step: {line.strip()}")
     return problems
+
+
+def test_pipefail_rule_still_bites_on_a_workflow_with_run_steps():
+    bare = "on: push\npermissions: {}\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: echo hi\n"
+    assert "no workflow-wide shell: bash (pipefail)" in pipefail_problems(bare)
+    no_run = "on: push\npermissions: {}\njobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: a/b@0\n"
+    assert pipefail_problems(no_run) == []
 
 
 def test_every_pipe_is_safe_under_pipefail():
