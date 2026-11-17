@@ -39,6 +39,7 @@ import subprocess
 from collections.abc import Sequence
 from typing import Optional
 
+from . import termination
 from .webdata import HelperError, _close
 
 # =====================================================================================
@@ -273,7 +274,10 @@ def _query(argv: Sequence[str], timeout: Optional[float] = None) -> Optional[str
 
 
 def _spawn(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL) -> subprocess.Popen:
-    """Start one child: argv list, no shell, stderr on /dev/null, output never read."""
+    """Start one child: argv list, no shell, stderr on /dev/null, output never read.
+
+    Its own process group (task 011c), so termination.stop reaches what it starts.
+    """
     check_argv(argv)
     try:
         return subprocess.Popen(
@@ -282,19 +286,22 @@ def _spawn(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.D
             stdout=stdout,
             stderr=subprocess.DEVNULL,
             close_fds=True,
+            process_group=0,
         )
     except OSError:
         raise HelperError("missing-tool") from None
 
 
 def _finish(child: subprocess.Popen, timeout: float) -> Optional[int]:
-    """The child's exit code, or None when it had to be killed after ``timeout``."""
-    try:
-        return child.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        child.kill()
-        child.wait()
-        return None
+    """The child's exit code, or None when it had to be stopped after ``timeout``.
+
+    kwallet-query may wait for KDE Wallet's own prompt, so a stop signal ends
+    the wait (termination.Stopped); the caller's ``finally`` stops the child.
+    """
+    code = termination.wait(child, timeout)
+    if code is None:
+        termination.stop(child, grace=0.0)
+    return code
 
 
 def _boolean(answer: Optional[str]) -> Optional[bool]:
@@ -384,9 +391,8 @@ def write_new_key(tools: dict[str, str], wallet: str, *, entry: str = ENTRY,
         _close(reader)
         _close(writer)
         for child in (keygen, store):
-            if child is not None and child.poll() is None:
-                child.kill()
-                child.wait()
+            if child is not None:
+                termination.stop(child)
     if store_code != 0:
         raise HelperError("wallet-failed")
     if keygen_code != 0:
@@ -417,9 +423,8 @@ def read_key_into_pipe(kwallet_query: str, wallet: str, *, entry: str = ENTRY, f
         raise
     finally:
         _close(writer)
-        if child is not None and child.poll() is None:
-            child.kill()
-            child.wait()
+        if child is not None:
+            termination.stop(child)
     if code != 0:
         _close(reader)
         raise HelperError("wallet-failed")
@@ -447,9 +452,8 @@ def copy_entry(tools: dict[str, str], wallet: str, source: str, target: str, *,
         code = _finish(store, PROMPT_TIMEOUT if timeout is None else timeout)
     finally:
         _close(reader)
-        if store is not None and store.poll() is None:
-            store.kill()
-            store.wait()
+        if store is not None:
+            termination.stop(store)
     if code != 0:
         raise HelperError("wallet-failed")
 
@@ -508,15 +512,19 @@ def remove_entry(tools: dict[str, str], wallet: str, *, entry: str = ENTRY,
     delete it through kwalletd6.
 
     Raises wallet-failed (or missing-tool) when the entry may remain.
+
+    Task 011c: after a stop signal the overwrite is skipped (or ended, when the
+    signal comes while kwallet-query waits), and the delete still runs: its
+    qdbus6 calls need no input and are never cut short.
     """
     qdbus = tools.get("qdbus6")
     if qdbus is None:
         raise HelperError("missing-tool")
     timeout = PROMPT_TIMEOUT if timeout is None else timeout
-    if KEYGEN_TOOL in tools:
+    if KEYGEN_TOOL in tools and not termination.requested():
         try:
             write_new_key(tools, wallet, entry=entry, timeout=timeout)
-        except HelperError:
+        except (HelperError, termination.Stopped):
             pass  # Best effort: the value is unusable once the entry is gone, deleted below.
     if not _delete_entry(qdbus, wallet, entry, timeout):
         raise HelperError("wallet-failed")

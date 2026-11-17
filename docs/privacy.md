@@ -516,6 +516,15 @@ Your passphrase:
   kdialog hands it straight to gocryptfs. It never passes through Hearthwire
   and is never in process arguments, environment variables, logs, or the
   widget's configuration.
+- In the Hyprland app, when it stops a passphrase window's job (its time
+  limit, or you close the window or quit the app), the window closes with it
+  and nothing gets unlocked or created halfway. The same happens when you log
+  out. A folder that already unlocked stays unlocked. The same goes for the
+  text window of the prompt library: what was typed is discarded.
+- In the Plasma widget this does not work yet. If you close the settings
+  window, remove the widget or Plasma quits while a passphrase window is
+  open, that window can stay open, and typing the passphrase there still
+  unlocks the folder. Close such a window with Cancel. A fix is planned.
 - Creating the folder asks twice: once to choose the passphrase, then once
   more to unlock it. Hearthwire cannot enforce a strong passphrase; the
   dialog shows a strength meter.

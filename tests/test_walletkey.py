@@ -828,7 +828,8 @@ def test_walletkey_source_rules():
 def test_vault_wallet_paths_never_read_or_capture():
     tree = ast.parse(VAULT_SOURCE.read_text(encoding="utf-8"))
     functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
-    for name in ("add_key", "remove_key", "auto_unlock", "_unlock_with_wallet", "_mount", "_commit_slot", "_seal_new_slot"):
+    for name in ("add_key", "remove_key", "auto_unlock", "_unlock_with_wallet", "_mount", "_mount_attempt", "_commit_slot",
+                 "_seal_new_slot"):
         assert not _calls_in(functions[name], {"read", "pread", "readline", "communicate", "check_output"}), name
 
 

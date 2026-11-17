@@ -36,7 +36,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Optional
 
-from . import frontend, vault
+from . import frontend, termination, vault
 from .webdata import HelperError, _close, _descriptors, open_child_dir
 
 OPERATIONS = ("list", "add", "replace", "remove", "set-persona")
@@ -268,20 +268,29 @@ def _kdialog(environ: Optional[Mapping[str, str]]) -> str:
 
 
 def _run_dialog(argv: list[str], stdout: int) -> int:
-    """kdialog with stdout on our file; argv list, no shell, stdin/stderr on /dev/null."""
+    """kdialog with stdout on our file; argv list, no shell, stdin/stderr on /dev/null.
+
+    Task 011c: in its own process group; a stop signal closes the text box
+    (termination.Stopped), and _ask's ``finally`` removes the pending file.
+    """
     _check_dialog_argv(argv)
     try:
-        completed = subprocess.run(
+        child = subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
             stdout=stdout,
             stderr=subprocess.DEVNULL,
             close_fds=True,
-            check=False,
+            process_group=0,
         )
     except OSError:
         raise HelperError("missing-tool") from None
-    return completed.returncode
+    try:
+        code = termination.wait(child)
+    finally:
+        termination.stop(child)
+    assert code is not None  # No timeout: wait() returned only once the dialog exited.
+    return code
 
 
 def _same_directory(first: int, second: int) -> bool:

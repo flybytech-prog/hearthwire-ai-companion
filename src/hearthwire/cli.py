@@ -7,7 +7,8 @@ from collections.abc import Sequence
 
 from . import __version__
 from .core import (
-    droppedfile, frontend, installinfo, legacy, portowner, promptstore, settingsbackup, usagehistory, vault, webdata,
+    droppedfile, frontend, installinfo, legacy, portowner, promptstore, settingsbackup, termination, usagehistory,
+    vault, webdata,
 )
 from .core.catalog import PROVIDER_IDS
 from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
@@ -425,6 +426,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     current = _frontend()
     # Task 011: --migrate rewrites Plasma's own files, so the app may never run it.
     refused = current is None or (current == frontend.APP and args.migrate is not None)
+    stopped = False
     if refused:
         payload = {"ok": False, "error": "bad-frontend"}
     elif args.applet is not None and not frontend.applet_allowed(args.applet, current):
@@ -445,9 +447,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             sites=args.sites, known=args.known, site=args.site,
         ))
     elif args.vault is not None:
-        payload = _helper_reply(lambda: vault.run(args.vault, method=args.method))
+        payload, stopped = _stoppable_reply(lambda: vault.run(args.vault, method=args.method))
     elif args.prompts is not None:
-        payload = _helper_reply(lambda: promptstore.run(
+        payload, stopped = _stoppable_reply(lambda: promptstore.run(
             args.prompts, kind=args.kind, item=args.id, model=args.model,
         ))
     elif args.read_dropped is not None:
@@ -471,6 +473,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     if refused:
         return 2
+    if stopped:
+        return termination.EXIT_CODE
     return 0
 
 
@@ -483,6 +487,20 @@ def _helper_reply(action) -> dict[str, object]:
         return action()
     except Exception:  # noqa: BLE001 - fail closed with a code only
         return {"ok": False, "error": "os-error"}
+
+
+def _stoppable_reply(action) -> tuple[dict[str, object], bool]:
+    """--vault and --prompts, the flows whose children can wait for the user (task 011c).
+
+    SIGTERM, SIGHUP and SIGINT stop the run at its next wait point. By the time
+    Stopped gets here the flow has stopped its own children and undone the
+    unfinished step; the reply is fixed, and so is the exit status (main).
+    """
+    with termination.handling():
+        try:
+            return _helper_reply(action), False
+        except termination.Stopped:
+            return termination.reply(), True
 
 
 def _dropped_reply(value: str) -> dict[str, object]:

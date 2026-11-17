@@ -772,7 +772,8 @@ Argument rules (argparse exits 2 with a usage message on stderr otherwise):
 
 ### Replies and errors
 
-Every job prints one JSON object on stdout and exits 0. Replies never contain
+Every job prints one JSON object on stdout and exits 0 (143 after a stop
+signal, see Signal handling below). Replies never contain
 paths, names, counts, keys, or passphrases; stderr carries only argparse usage.
 Children get an argument list (no shell) with stdin, stdout, and stderr on
 `/dev/null`; the only exceptions are the pipe between the second
@@ -854,6 +855,67 @@ the slot (`add-key`): 9 `cancelled` (the current-passphrase window), 12
 `wrong-passphrase`, 6 and 11 `absent`, 24 and anything else
 `wallet-write-failed`.
 
+### Signal handling
+
+Task 011c (`src/hearthwire/core/termination.py`): the clean stop below
+applies when the helper gets SIGTERM, SIGHUP or SIGINT. The Hyprland app
+sends SIGTERM for its time limit, a disconnected or destroyed source, and
+when it quits; a logout sends SIGTERM too. **The Plasma widget does not:**
+its executable engine deletes the process of a dropped source, which is
+SIGKILL (closing the settings window, removing the widget, plasmashell
+quitting). Nothing can handle SIGKILL, so in the widget a passphrase window
+can stay open and still unlock the folder. That is being fixed separately.
+
+For `--vault` and `--prompts` only, the helper records SIGTERM, SIGHUP and
+SIGINT (a signal ignored at start stays ignored) and sets SIGCHLD to its
+default for the run. It acts on the signal at the next point where it waits:
+for a dialog's or kwallet-query's child, for the vault lock, or in the
+change-passphrase poll loop. `fusermount3`, `gocryptfs -version` and `cmp`
+are short and never cut short. Neither are the `qdbus6` calls, including a
+wallet `open` that may wait for KDE Wallet's own prompt (up to 120 s): the
+job then waits for that answer and finishes normally.
+
+- Every child that can wait for the user (gocryptfs `-init`, mount and
+  `-passwd`, the new-passphrase dialog, kwallet-query, openssl, the prompt
+  text box) runs in its own process group. An unfinished step's group gets
+  SIGTERM, 0.3 s, then SIGKILL.
+  - The group is signalled only while its leader is confirmed unreaped
+    (`waitid` with `WNOWAIT`), so the id is still ours.
+  - It is signalled only when the child is that group's leader; otherwise
+    only the child is signalled.
+  - A child that was already reaped is never signalled. Nothing else is ever
+    signalled: not the helper's group, not a front end.
+- A child that already exited is only reaped. A gocryptfs that mounted and
+  exited 0 leaves its daemon (the open folder) alone, and so does a daemon
+  from an earlier unlock.
+- A step that already has everything it needs gets up to 10 s to finish
+  instead of being cut off:
+  - `-passwd` once the new-passphrase dialog returned 0;
+  - `-init` once it has started writing the folder.
+  A finished change then replies as usual. A finished `-init` leaves a
+  complete, locked folder, and the mount after it is stopped.
+- The unfinished step is undone:
+  - a mount that came up before gocryptfs reported it is unmounted and the
+    mountpoint sealed (0500);
+  - a folder that an unfinished `create` made is removed (only while still
+    empty);
+  - `add-key`: `wallet.conf.new` is removed. A stop while the staged key is
+    copied to the real entry puts the old `wallet.conf` back, as after other
+    failures. The staged entry is then deleted.
+  - the prompt's pending file is removed;
+  - `passwd.status` is cleared.
+- Entry deletes (`remove-key`, `destroy`, the add-key cleanup) skip their
+  overwrite after a stop, or end it when the signal comes while it waits, and
+  still delete through `qdbus6`. A `remove-key` stopped this way finishes and
+  replies as usual.
+- The reply is then `{"ok":false,"error":"interrupted"}` with exit status
+  143, whichever signal it was. A signal that arrives after the last such
+  wait lets the job finish its short file work and print its normal reply
+  (exit 0). Other commands keep Python's default signal behaviour.
+- Neither front end reads a stopped job's reply, so `interrupted` is not
+  in the plasmoid's list of codes. Should one ever be read, the non-zero exit
+  makes it `bad-reply`.
+
 ### How the plasmoid uses the wallet jobs
 
 `chatVaultUnlock` (String, default `passphrase`; only the exact word `wallet`
@@ -915,7 +977,10 @@ open), `cancelled` (Cancel, or an empty answer), `too-long`, `not-text`
 (invalid UTF-8 or NUL), `full` (100 items, or 200 persona defaults),
 `absent` (no such item, or `set-persona --id` names a prompt), `busy` (vault
 lock held), `missing-tool` (no kdialog), `os-error` (anything else, including
-a symlink or non-folder in place of `library/`).
+a symlink or non-folder in place of `library/`). A stop signal while the
+text box is open closes it, removes the pending file and replies
+`interrupted` with exit status 143 (see Signal handling, under the Stay
+signed in helper).
 
 The plasmoid builds these commands only in `PromptLibrary.js`
 (`promptsCommand`), with the same `env HEARTHWIRE_RUN=… HEARTHWIRE_APPLET=…

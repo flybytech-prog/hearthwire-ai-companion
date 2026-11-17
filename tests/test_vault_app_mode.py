@@ -437,7 +437,7 @@ def test_the_app_flow_runs_through_the_askpass(stubs):
 
 
 CALL_SITE_MUTATIONS = {
-    "init without the mode": ('ctx.tools["kdialog"], ctx.cipher), mode=ctx.mode)\n', 'ctx.tools["kdialog"], ctx.cipher))\n'),
+    "init without the mode": ('ctx.tools["kdialog"], ctx.cipher), mode=ctx.mode,\n', 'ctx.tools["kdialog"], ctx.cipher),\n'),
     "mount without the mode": ("ctx.cipher, ctx.mountpoint),\n                    mode=ctx.mode)\n",
                                "ctx.cipher, ctx.mountpoint))\n"),
     "passwd argv checked as Plasma's": ("    _check_argv(argv, mode=ctx.mode)\n    _clear_marker(app)\n",

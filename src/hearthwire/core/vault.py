@@ -31,6 +31,12 @@ lists ``hearthwire-askpass`` as missing. kdialog is never used in app mode,
 and the KDE Wallet slot is neither used nor changed there (wallet
 ``unavailable``, wallet operations ``wallet-disabled``) until the app's own
 keyring unlock exists.
+
+Task 011c: a stop signal (SIGTERM, SIGHUP, SIGINT; ``termination.py``) while a
+step waits for its dialog, the wallet or the vault lock stops that step's
+children (their own process group), unmounts what the unfinished step mounted,
+removes a folder an unfinished ``-init`` made and the staged wallet slot, and
+replies ``interrupted``. A mount whose gocryptfs already exited 0 stays.
 """
 
 from __future__ import annotations
@@ -49,7 +55,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from . import frontend, walletkey
+from . import frontend, termination, walletkey
 from .webdata import (
     APP_DIR,
     PRIVATE_MODE,
@@ -169,6 +175,10 @@ EXIT_ALREADY_MOUNTED = 19
 # wait this long for an early exit (wrong passphrase) before opening the second
 # dialog; a later exit closes that dialog again.
 PASSWD_GRACE = 1.0
+# Task 011c: how long a gocryptfs that has every passphrase it needs (-passwd
+# after the new-passphrase dialog returned 0, -init once it writes the folder)
+# may still take after a stop signal. Bounded: the front end kills soon after.
+FINISH_TIMEOUT = 10.0
 
 # Lock: plain `fusermount3 -u`, never -z. WebEngine releases its files about a
 # second after the chat profile is destroyed (SP1), so a busy unmount is retried
@@ -406,24 +416,42 @@ def _check_argv(argv: Sequence[str], *, config: Optional[str] = None, mode: str 
 
 def _run(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
          timeout: Optional[float] = None, config: Optional[str] = None,
-         timeout_error: str = "os-error", mode: str = frontend.PLASMA) -> int:
-    """Run one child: argv list, no shell, stderr always on /dev/null."""
+         timeout_error: str = "os-error", mode: str = frontend.PLASMA, interruptible: bool = True,
+         settling: Optional[Callable[[], bool]] = None) -> int:
+    """Run one child: argv list, no shell, stderr always on /dev/null.
+
+    Task 011c: the child gets its own process group. When it did not finish (a
+    stop signal while ``interruptible``, or ``timeout``) that group is stopped,
+    so a dialog or gocryptfs below it goes too; a finished child is only reaped.
+    ``settling``: when it is true at a stop signal, the child is past its dialog
+    and writing; it gets FINISH_TIMEOUT to finish instead of being cut off halfway.
+    """
     _check_argv(argv, config=config, mode=mode)
     try:
-        completed = subprocess.run(
+        child = subprocess.Popen(
             list(argv),
             stdin=stdin,
             stdout=stdout,
             stderr=subprocess.DEVNULL,
             close_fds=True,
-            timeout=timeout,
-            check=False,
+            process_group=0,
         )
-    except subprocess.TimeoutExpired:
-        raise HelperError(timeout_error) from None
     except OSError:
         raise HelperError("missing-tool") from None
-    return completed.returncode
+    try:
+        try:
+            code = termination.wait(child, timeout, interruptible=interruptible)
+        except termination.Stopped:
+            if settling is None or not settling():
+                raise
+            code = termination.wait(child, FINISH_TIMEOUT, interruptible=False)
+            if code is None:
+                raise
+    finally:
+        termination.stop(child)
+    if code is None:
+        raise HelperError(timeout_error)
+    return code
 
 
 def _spawn(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -438,6 +466,7 @@ def _spawn(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.D
             stderr=subprocess.DEVNULL,
             close_fds=True,
             env=None if env is None else dict(env),
+            process_group=0,  # Task 011c: termination.stop reaches what it starts.
         )
     except OSError:
         raise HelperError("missing-tool") from None
@@ -459,14 +488,12 @@ def relay_environment(environ: Optional[Mapping[str, str]] = None) -> dict[str, 
 
 
 def _stop(child: subprocess.Popen) -> None:
-    """Close a dialog that is no longer wanted; reap it either way."""
-    if child.poll() is None:
-        child.terminate()
-        try:
-            child.wait(timeout=_TOOL_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait()
+    """Close a dialog that is no longer wanted; reap it either way.
+
+    SIGTERM to its process group, SIGKILL after the grace (a short one once a
+    stop signal came: the front end kills the helper soon after).
+    """
+    termination.stop(child, termination.STOP_GRACE if termination.requested() else _TOOL_TIMEOUT)
 
 
 def _gocryptfs_major(gocryptfs: str) -> int:
@@ -477,7 +504,7 @@ def _gocryptfs_major(gocryptfs: str) -> int:
     reader, writer = os.pipe()
     try:
         try:
-            code = _run([gocryptfs, *VERSION_ARGS], stdout=writer, timeout=_TOOL_TIMEOUT)
+            code = _run([gocryptfs, *VERSION_ARGS], stdout=writer, timeout=_TOOL_TIMEOUT, interruptible=False)
         finally:
             os.close(writer)
             writer = -1
@@ -595,14 +622,15 @@ def vault_lock(
     ctx: Context,
     *,
     wait: bool = False,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] = termination.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     app_dir: str = APP_DIR,
 ) -> Iterator[int]:
     """Hold ``$XDG_RUNTIME_DIR/hearthwire/vault.lock``; yields that directory's fd.
 
-    With ``wait`` it blocks as long as needed (an unlock dialog may be open in
+    With ``wait`` it waits as long as needed (an unlock dialog may be open in
     another widget); otherwise a lock held past ``LOCK_TIMEOUT`` gives "busy".
+    Either way it polls, so a stop signal ends the wait (task 011c).
     ``app_dir`` is only for the installer's migration (core/legacy.py), which
     also holds the former name's lock.
     """
@@ -618,20 +646,17 @@ def vault_lock(
                 raise HelperError("not-directory" if stat.S_ISDIR(info.st_mode) else "os-error")
             if info.st_uid != os.getuid():
                 raise HelperError("not-owned")
-            if wait:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
-            else:
-                deadline = monotonic() + LOCK_TIMEOUT
-                while True:
-                    try:
-                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except OSError as error:
-                        if error.errno not in _WOULD_BLOCK:
-                            raise HelperError("os-error") from None
-                    if monotonic() >= deadline:
-                        raise HelperError("busy")
-                    sleep(_POLL_INTERVAL)
+            deadline = None if wait else monotonic() + LOCK_TIMEOUT
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as error:
+                    if error.errno not in _WOULD_BLOCK:
+                        raise HelperError("os-error") from None
+                if deadline is not None and monotonic() >= deadline:
+                    raise HelperError("busy")
+                sleep(_POLL_INTERVAL)
             yield app
         finally:
             _close(descriptor)
@@ -774,7 +799,9 @@ def _unmount(ctx: Context) -> int:
     fusermount = ctx.tools.get("fusermount3")
     if fusermount is None:
         raise HelperError("missing-tool")
-    return _run(unmount_argv(fusermount, ctx.mountpoint), timeout=_TOOL_TIMEOUT, mode=ctx.mode)
+    # Never cut short by a stop signal: an unmount is short and may be the cleanup itself.
+    return _run(unmount_argv(fusermount, ctx.mountpoint), timeout=_TOOL_TIMEOUT, mode=ctx.mode,
+                interruptible=False)
 
 
 def _seal_mountpoint(ctx: Context, app: int) -> None:
@@ -1060,7 +1087,8 @@ def _commit_slot(ctx: Context, keys: int, wallet: str) -> None:
     3. Only then wallet.conf.old goes. If step 2 fails, the new slot goes back
        to wallet.conf.new and wallet.conf.old back to wallet.conf, so the old
        slot and entry keep working (unless kwallet-query -w changed the real
-       entry before it failed).
+       entry before it failed). A stop signal during step 2 (task 011c) rolls
+       back the same way.
     """
     _seal_new_slot(keys)
     had_old = _slot_exists(keys)
@@ -1073,7 +1101,7 @@ def _commit_slot(ctx: Context, keys: int, wallet: str) -> None:
         raise HelperError("wallet-write-failed") from None
     try:
         walletkey.copy_entry(ctx.wallet_tools, wallet, walletkey.ENTRY_NEW, walletkey.ENTRY)
-    except HelperError:
+    except (HelperError, termination.Stopped):
         try:
             _rename(keys, walletkey.SLOT_FILE, walletkey.SLOT_NEW)
             if had_old:
@@ -1158,10 +1186,12 @@ def add_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
                 if code != 0:
                     raise HelperError(exit_error("wallet-passwd", code))
                 _commit_slot(ctx, keys, wallet)
-            except (HelperError, OSError) as error:
+            except (HelperError, OSError, termination.Stopped) as error:
                 _clear_new_slot(keys)
                 # A wallet that did not answer is not asked again; a leftover
-                # staging entry is removed by the next set-up or removal.
+                # staging entry is removed by the next set-up or removal. After a
+                # stop signal (task 011c) it is deleted too, without the overwrite
+                # (walletkey.remove_entry): those qdbus6 calls need no input.
                 if not (isinstance(error, HelperError) and error.code == "wallet-failed"):
                     _drop_staged_entry(ctx, wallet)
                 raise
@@ -1337,7 +1367,19 @@ def _drop_mount(ctx: Context, app: int) -> None:
 
 
 def _mount(ctx: Context, app: int, wallet: Optional[str] = None) -> None:
-    """Mount with the passphrase dialog, or with the wallet slot when ``wallet`` is given."""
+    """Mount with the passphrase dialog, or with the wallet slot when ``wallet`` is given.
+
+    Task 011c: stopped before gocryptfs reported the mount, whatever came up is
+    unmounted again (its process group is already stopped by then).
+    """
+    try:
+        _mount_attempt(ctx, app, wallet)
+    except termination.Stopped:
+        _drop_mount(ctx, app)
+        raise
+
+
+def _mount_attempt(ctx: Context, app: int, wallet: Optional[str]) -> None:
     # Under the vault lock, right before mounting: 0700 (a sealed 0500 one is reset).
     _prepare_mountpoint(app)
     if wallet is None:
@@ -1397,6 +1439,31 @@ def _make_cipher_dir(ctx: Context) -> bool:
         return created
 
 
+def _cipher_has_files(ctx: Context) -> bool:
+    """True when -init has started writing the folder (it got the passphrase); task 011c.
+
+    Then a stop lets it finish: cut off, it would leave a half-written folder
+    (``damaged``) instead of either none or a complete one.
+    """
+    try:
+        with _descriptors() as opened:
+            base = open_base(ctx.data_base, create=False)
+            if base is None:
+                return False
+            opened.append(base)
+            app = open_child_dir(base, APP_DIR, create=False)
+            if app is None:
+                return False
+            opened.append(app)
+            cipher = open_child_dir(app, VAULT_DIR, create=False)
+            if cipher is None:
+                return False
+            opened.append(cipher)
+            return bool(os.listdir(cipher))
+    except (HelperError, OSError):
+        return False
+
+
 def _forget_cipher_dir(ctx: Context) -> None:
     """Remove the cipher dir again after a failed -init, only if still empty."""
     with _descriptors() as opened:
@@ -1427,7 +1494,14 @@ def create(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
         # A wallet slot left from an older folder could never open the new one.
         _remove_keys_dir(ctx)
         created = _make_cipher_dir(ctx)
-        code = _run(init_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.cipher), mode=ctx.mode)
+        try:
+            code = _run(init_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.cipher), mode=ctx.mode,
+                        settling=lambda: _cipher_has_files(ctx))
+        except termination.Stopped:
+            # Task 011c: stopped before -init finished: the new folder goes (only while empty).
+            if created:
+                _forget_cipher_dir(ctx)
+            raise
         if code != 0:
             if created:
                 _forget_cipher_dir(ctx)
@@ -1518,20 +1592,36 @@ def _read_marker(app: int) -> Optional[int]:
 
 def _first_dialog_status(app: int, child: subprocess.Popen) -> Optional[int]:
     """Wait for the old-passphrase dialog to exit; None when gocryptfs exited first."""
-    while child.poll() is None:
+    while not termination.exited(child):
         status = _read_marker(app)
         if status is not None:
             return status
-        time.sleep(_POLL_INTERVAL)
+        termination.sleep(_POLL_INTERVAL)
     return None
 
 
 def _exited_within(child: subprocess.Popen, seconds: float) -> bool:
+    return termination.wait(child, seconds) is not None
+
+
+def _passwd_exit(child: subprocess.Popen, dialog: Optional[subprocess.Popen]) -> int:
+    """gocryptfs -passwd's exit code (task 011c).
+
+    A stop signal ends the wait while a dialog may still be open. Once the
+    new-passphrase dialog returned 0, gocryptfs has both passphrases and is
+    re-keying: it gets FINISH_TIMEOUT to finish, so a change that went through
+    is not reported as interrupted (or cut off halfway).
+    """
     try:
-        child.wait(timeout=seconds)
-    except subprocess.TimeoutExpired:
-        return False
-    return True
+        code = termination.wait(child)
+    except termination.Stopped:
+        if dialog is None or not termination.exited(dialog) or dialog.wait() != 0:
+            raise
+        code = termination.wait(child, FINISH_TIMEOUT, interruptible=False)
+        if code is None:
+            raise
+    assert code is not None  # No timeout: wait() returned only once gocryptfs exited.
+    return code
 
 
 def _passwd(ctx: Context, app: int) -> int:
@@ -1545,6 +1635,9 @@ def _passwd(ctx: Context, app: int) -> int:
        kdialog --newpassword starts with stdout = the pipe's write end.
     3. This process closes its copy of the write end, so a cancelled second
        dialog gives gocryptfs EOF (exit 9). It never reads the pipe.
+
+    A stop signal (task 011c) ends either wait; the dialog's and gocryptfs's
+    process groups (with the relay and its dialog) are stopped on the way out.
     """
     python = sys.executable
     if not python or not os.path.isabs(python) or not os.path.isfile(RELAY):
@@ -1565,16 +1658,15 @@ def _passwd(ctx: Context, app: int) -> int:
             dialog = _spawn(new_passphrase_argv(ctx.tools["kdialog"]), stdout=writer, mode=ctx.mode)
         os.close(writer)
         writer = -1
-        code = child.wait()
+        code = _passwd_exit(child, dialog)
     finally:
         _close(reader)
         _close(writer)
         if dialog is not None:
             # gocryptfs is done (or failed early): a dialog still open is useless.
             _stop(dialog)
-        if child is not None and child.poll() is None:
-            child.kill()
-            child.wait()
+        if child is not None:
+            termination.stop(child)
         _clear_marker(app)
     return code
 
