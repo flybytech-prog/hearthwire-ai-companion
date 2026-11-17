@@ -1549,11 +1549,14 @@ exactly as in 1.1.0.
 - `--migrate …` rewrites Plasma's own files and moves the widget's wallet
   entry, so app mode refuses every operation with
   `{"ok":false,"error":"bad-frontend"}` and exit status 2, before anything
-  is read.
+  is read. `legacy.run_operation` refuses app mode (and a bad value) with
+  `bad-frontend` again on its own.
 - `--prompts add|replace` (app mode): the prompt library has no text box in
   app mode yet (the app's own comes in a later slice), so they reply
   `missing-tool` and kdialog is never looked up; `list`, `remove` and
-  `set-persona` work as in Plasma mode.
+  `set-persona` work as in Plasma mode. `replace` looks the item up first,
+  as in Plasma mode, so it replies `locked` while the encrypted folder is
+  locked and `absent` for an id that does not exist, before `missing-tool`.
 - `--settings-backup export --applet 2147483648` (app mode) reads the app's
   settings file below instead of Plasma's rc files. A missing folder or file,
   or a file that is not exactly the format, is `bad-data`; a link, a
@@ -1591,7 +1594,10 @@ exactly as in 1.1.0.
   shared folder and its key slots, but run no wallet tool in app mode, so a
   wallet entry the widget made stays there (useless without the slot) until
   the widget's remove or uninstall; purge's reply then has no
-  `wallet-entry`.
+  `wallet-entry`. Both skip the wallet by their own app-mode check, not only
+  because app mode finds no wallet tools, and the vault's argv check refuses
+  every kwallet-query, qdbus6 and openssl argv, and the `kwallet-query`
+  extpass, in app mode.
 
 ### App settings file
 

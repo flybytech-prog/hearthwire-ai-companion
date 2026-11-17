@@ -308,12 +308,15 @@ def _is_dialog(program: str, mode: str) -> bool:
 
 
 def _check_extpass(values: Sequence[str], mode: str) -> None:
-    """The extpass program is a dialog, the relay running a dialog, or exactly ``kwallet-query -r``."""
+    """The extpass program is a dialog, the relay running a dialog, or exactly ``kwallet-query -r``.
+
+    ``kwallet-query`` in Plasma mode only: app mode runs no wallet tool (task 011b).
+    """
     if not values:
         return
     program = os.path.basename(values[0])
     if program == "kwallet-query":
-        if not walletkey.is_read_argv(values):
+        if mode != frontend.PLASMA or not walletkey.is_read_argv(values):
             raise HelperError("os-error")
     elif program in ("kdialog", frontend.ASKPASS_NAME):
         if not _is_dialog(values[0], mode):
@@ -368,6 +371,8 @@ def _check_argv(argv: Sequence[str], *, config: Optional[str] = None, mode: str 
     as ``-extpass`` values). No argument outside an ``-extpass`` value may
     contain ``allow_``, wherever it sits. The dialog is ``mode``'s only (task
     011): kdialog in Plasma mode, the fixed hearthwire-askpass in app mode.
+    The KDE Wallet tools (kwallet-query, qdbus, openssl) run in Plasma mode
+    only (task 011b).
     """
     if not argv or not os.path.isabs(argv[0]):
         raise HelperError("os-error")
@@ -392,6 +397,8 @@ def _check_argv(argv: Sequence[str], *, config: Optional[str] = None, mode: str 
         if not _is_dialog(argv[0], mode) or arguments != new_passphrase_argv(argv[0])[1:]:
             raise HelperError("os-error")
     elif tool in ("kwallet-query", *walletkey.QDBUS_NAMES, "openssl"):
+        if mode != frontend.PLASMA:
+            raise HelperError("os-error")
         walletkey.check_argv(argv)
     else:
         raise HelperError("os-error")
@@ -1635,6 +1642,8 @@ def destroy(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     The wallet entry is removed only when this data folder had a wallet slot
     (checked before anything is deleted). The files go first; wallet-failed
     afterwards means only the wallet entry may remain (remove-key removes it).
+    In app mode the entry is the Plasma widget's and stays, as with purge
+    (task 011b): no wallet tool runs.
     """
     ctx = context(environ)
     _require_safe_rmtree()
@@ -1652,7 +1661,7 @@ def destroy(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
                 remove_entry(data_app, KEYS_DIR)
         # Not mounted (checked above), so this is the bare tmpfs mountpoint.
         remove_entry(app, VAULT_DIR)
-        if had_slot:
+        if had_slot and ctx.mode == frontend.PLASMA:
             walletkey.forget(ctx.wallet_tools)
     return {"ok": True}
 

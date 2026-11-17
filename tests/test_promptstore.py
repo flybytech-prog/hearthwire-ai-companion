@@ -312,6 +312,22 @@ def test_proof_the_app_dialog_rule_catches(lib, monkeypatch, old, new):
     assert app_dialog_problems(mutant(promptstore, old, new), lib, monkeypatch)
 
 
+def test_app_replace_looks_the_item_up_before_missing_tool(lib, monkeypatch):
+    """The order docs/provider-contracts.md gives (task 011b, N4): replace replies locked or absent
+    before missing-tool in app mode; add has no item to look up and is missing-tool even locked."""
+    monkeypatch.setenv("HEARTHWIRE_FRONTEND", "app")
+    assert promptstore.run("replace", item=1) == {"ok": False, "error": "locked"}
+    assert promptstore.run("add", kind="prompt") == {"ok": False, "error": "missing-tool"}
+    lib.mount()
+    assert promptstore.run("replace", item=1) == {"ok": False, "error": "absent"}
+    lib.folder.mkdir(mode=0o700, exist_ok=True)
+    (lib.folder / "prompt-1.txt").write_text("kept")
+    assert promptstore.run("replace", item=2) == {"ok": False, "error": "absent"}
+    assert promptstore.run("replace", item=1) == {"ok": False, "error": "missing-tool"}
+    assert lib.dialogs() == []
+    assert (lib.folder / "prompt-1.txt").read_text() == "kept"
+
+
 # --- what list trusts ------------------------------------------------------------------------------
 
 

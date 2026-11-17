@@ -38,7 +38,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import vault, walletkey
+from . import frontend, vault, walletkey
 from .appletconfig import read_rc
 from .settingsbackup import config_base
 from .usagehistory import HISTORY_DIR
@@ -931,10 +931,22 @@ _HANDLERS: dict[str, Callable[[Optional[Mapping[str, str]]], dict[str, object]]]
 
 
 def run_operation(operation: str, environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
-    """CLI entry: category names and fixed error codes only."""
+    """CLI entry: category names and fixed error codes only.
+
+    Plasma mode only: the move rewrites Plasma's own files and moves the
+    widget's wallet entry, so app mode (or a bad HEARTHWIRE_FRONTEND) is
+    ``bad-frontend`` before anything is read. cli.py refuses it first; this
+    is the module's own check (task 011b).
+    """
     handler = _HANDLERS.get(operation)
     if handler is None:
         raise ValueError("Unsupported migrate operation.")
+    try:
+        current: Optional[str] = frontend.mode(environ)
+    except HelperError:
+        current = None
+    if current != frontend.PLASMA:
+        return {"ok": False, "error": "bad-frontend"}
     try:
         return handler(environ)
     except HelperError as error:

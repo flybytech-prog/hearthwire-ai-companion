@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from hearthwire import cli
-from hearthwire.core import frontend, settingsbackup, usagehistory, webdata
+from hearthwire.core import frontend, legacy, settingsbackup, usagehistory, webdata
 
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND_PY = Path(frontend.__file__)
@@ -418,6 +418,120 @@ def test_app_mode_never_migrates(homes, capsys, monkeypatch):
 ])
 def test_proof_the_migrate_rule_catches(homes, capsys, monkeypatch, old, new):
     assert migrate_problems(mutant(cli, old, new).main, capsys, homes, monkeypatch)
+
+
+# legacy.run_operation refuses app mode by itself (task 011b, N3): with cli.py's
+# own refusal switched off, --migrate still reaches no handler outside Plasma mode.
+CLI_REFUSAL_OFF = ("    refused = current is None or (current == frontend.APP and args.migrate is not None)\n",
+                   "    refused = False\n")
+
+
+def legacy_problems(module, call, homes, monkeypatch):
+    """App mode and a bad value are bad-frontend before any handler runs; Plasma mode runs it."""
+    problems = []
+    ran = []
+    for operation in module.OPERATIONS:
+        monkeypatch.setitem(module._HANDLERS, operation,
+                            lambda environ=None, operation=operation: ran.append(operation) or {"ok": True})
+    for value in ("app", "nonsense", ""):
+        monkeypatch.setenv("HEARTHWIRE_FRONTEND", value)
+        for operation in module.OPERATIONS:
+            try:
+                result = call(operation)
+            except Exception as error:  # noqa: BLE001 - a mutant may fail any way; that is a miss too.
+                result = f"raised {type(error).__name__}"
+            if result != {"ok": False, "error": "bad-frontend"}:
+                problems.append(f"{value!r} --migrate {operation}: {result}")
+    if ran:
+        problems.append(f"legacy ran {ran} outside Plasma mode")
+    for value in (None, "plasma"):
+        if value is None:
+            monkeypatch.delenv("HEARTHWIRE_FRONTEND")
+        else:
+            monkeypatch.setenv("HEARTHWIRE_FRONTEND", value)
+        ran.clear()
+        if call("status") != {"ok": True} or ran != ["status"]:
+            problems.append(f"plasma ({value!r}) --migrate status does not run")
+    if tree(homes) != ["config", "data", "home", "state"]:
+        problems.append(f"files made: {tree(homes)}")
+    return problems
+
+
+def through_cli_alone(module, capsys):
+    """cli.main without its own --migrate refusal, running ``module`` as legacy."""
+    copy = mutant(cli, *CLI_REFUSAL_OFF)
+    copy.legacy = module
+
+    def call(operation):
+        assert copy.main(["--migrate", operation]) == 0
+        return json.loads(capsys.readouterr().out)
+
+    return call
+
+
+def test_legacy_refuses_app_mode_by_itself(homes, monkeypatch):
+    assert legacy_problems(legacy, legacy.run_operation, homes, monkeypatch) == []
+
+
+def legacy_environ_problems(module, homes, monkeypatch):
+    """run_operation asks the front end of its ``environ`` argument, not of os.environ (review-3 L1)."""
+    problems = []
+    ran = []
+    for operation in module.OPERATIONS:
+        monkeypatch.setitem(module._HANDLERS, operation,
+                            lambda environ=None, operation=operation: ran.append(operation) or {"ok": True})
+    monkeypatch.delenv("HEARTHWIRE_FRONTEND", raising=False)
+    for value in ("app", "nonsense", ""):
+        for operation in module.OPERATIONS:
+            try:
+                result = module.run_operation(operation, {"HEARTHWIRE_FRONTEND": value})
+            except Exception as error:  # noqa: BLE001 - a mutant may fail any way; that is a miss too.
+                result = f"raised {type(error).__name__}"
+            if result != {"ok": False, "error": "bad-frontend"}:
+                problems.append(f"environ {value!r} --migrate {operation}: {result}")
+    if ran:
+        problems.append(f"legacy ran {ran} for an app or bad environ")
+    monkeypatch.setenv("HEARTHWIRE_FRONTEND", "app")
+    for environ in ({}, {"HEARTHWIRE_FRONTEND": "plasma"}):
+        ran.clear()
+        if module.run_operation("status", environ) != {"ok": True} or ran != ["status"]:
+            problems.append(f"a Plasma environ {environ} does not run status")
+    if tree(homes) != ["config", "data", "home", "state"]:
+        problems.append(f"files made: {tree(homes)}")
+    return problems
+
+
+def test_legacy_asks_its_environ_argument(homes, monkeypatch):
+    assert legacy_environ_problems(legacy, homes, monkeypatch) == []
+
+
+def test_proof_the_legacy_environ_rule_catches(homes, monkeypatch):
+    # mutant() asserts that the patch applies to legacy.py.
+    copy = mutant(legacy, "        current: Optional[str] = frontend.mode(environ)\n",
+                  "        current: Optional[str] = frontend.mode()\n")
+    assert legacy_environ_problems(copy, homes, monkeypatch)
+
+
+def test_legacy_refuses_app_mode_without_the_cli_layer(homes, capsys, monkeypatch):
+    assert legacy_problems(legacy, through_cli_alone(legacy, capsys), homes, monkeypatch) == []
+
+
+LEGACY_MUTATIONS = {
+    "no module refusal": ('    if current != frontend.PLASMA:\n        return {"ok": False, "error": "bad-frontend"}\n', ""),
+    "only app mode refused": ("    if current != frontend.PLASMA:\n        return {\"ok\": False",
+                              "    if current == frontend.APP:\n        return {\"ok\": False"),
+    "a bad value taken as Plasma": ("    except HelperError:\n        current = None\n    if current",
+                                    "    except HelperError:\n        current = frontend.PLASMA\n    if current"),
+    "refused after the handler": ("    try:\n        current: Optional[str] = frontend.mode(environ)\n",
+                                  "    handler(environ)\n    try:\n        current: Optional[str] = frontend.mode(environ)\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(LEGACY_MUTATIONS))
+def test_proof_the_legacy_rule_catches(homes, capsys, monkeypatch, name):
+    copy = mutant(legacy, *LEGACY_MUTATIONS[name])
+    assert legacy_problems(copy, copy.run_operation, homes, monkeypatch)
+    assert legacy_problems(copy, through_cli_alone(copy, capsys), homes, monkeypatch)
 
 
 def clear_all_problems(main, capsys, homes, monkeypatch):

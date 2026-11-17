@@ -13,11 +13,12 @@ import json
 import os
 import stat
 import sys
+import types
 from pathlib import Path
 
 import pytest
 
-from hearthwire.core import frontend, vault, webdata
+from hearthwire.core import frontend, vault, walletkey, webdata
 from test_frontend import mutant
 from test_vault import STUB, Stubs, extpass_values, reply, without_extpass
 
@@ -340,6 +341,15 @@ def wallet_guard_problems(source):
     if not stop or not wallet or stop[0] > wallet[0] or any(
             "walletkey." in ast.unparse(statement) for statement in purge[:stop[0]]):
         problems.append("purge stops in app mode before any wallet tool")
+    # destroy (task 011b, N2): every wallet call sits under its own Plasma-mode check.
+    destroy = functions["destroy"]
+    guards = [node for node in ast.walk(destroy) if isinstance(node, ast.If)
+              and ast.unparse(node.test) == "had_slot and ctx.mode == frontend.PLASMA"]
+    guarded = {id(node) for guard in guards for statement in guard.body for node in ast.walk(statement)}
+    calls = [node for node in ast.walk(destroy) if isinstance(node, ast.Call)
+             and ast.unparse(node.func).startswith("walletkey.")]
+    if not guards or not calls or any(id(node) not in guarded for node in calls):
+        problems.append("destroy runs a wallet tool only in Plasma mode")
     guard = functions.get("_no_app_wallet")
     if guard is None or "if ctx.mode != frontend.PLASMA: raise HelperError('wallet-disabled')" not in " ".join(
             ast.unparse(guard).split()):
@@ -372,6 +382,12 @@ def test_every_wallet_operation_refuses_app_mode_first():
      "    tools, _missing = walletkey.find_tools()\n    if not had_slot:\n        return present\n    if app_mode:\n"),
     ("        return present\n    tools, _missing = walletkey.find_tools()\n",
      "        pass\n    tools, _missing = walletkey.find_tools()\n"),
+    # destroy (task 011b, N2)
+    ("        if had_slot and ctx.mode == frontend.PLASMA:\n", "        if had_slot:\n"),
+    ("        if had_slot and ctx.mode == frontend.PLASMA:\n", "        if had_slot or ctx.mode == frontend.PLASMA:\n"),
+    ("        if had_slot and ctx.mode == frontend.PLASMA:\n", "        if had_slot and ctx.mode == frontend.APP:\n"),
+    ("        remove_entry(app, VAULT_DIR)\n        if had_slot and",
+     "        remove_entry(app, VAULT_DIR)\n        walletkey.find_tools()\n        if had_slot and"),
 ])
 def test_proof_the_wallet_guard_rule_catches(old, new):
     source = VAULT_PY.read_text(encoding="utf-8")
@@ -510,4 +526,122 @@ def test_plasma_purge_still_forgets_the_entry(stubs, capsys, monkeypatch, tmp_pa
     enrolled_by_the_widget(stubs, capsys, monkeypatch, tmp_path)
     stubs.plasma()
     assert cli_purge(capsys) == {"ok": True, "removed": ["vault", "vault-keys", "wallet-entry"]}
+    assert WALLET_KEY not in json.loads(stubs.wallet.read_text())
+
+
+# --- no wallet tool argv in app mode (task 011b, N1) -----------------------------------------------------
+
+WALLET = "kdewallet"
+
+
+def wallet_argv_problems(module, stubs):
+    """_check_argv takes the KDE Wallet tools' argv (and the kwallet-query extpass) in Plasma mode only."""
+    gocryptfs = str(stubs.bin / "gocryptfs")
+    kwallet_query = "/usr/bin/kwallet-query"
+    slot = "/d/hearthwire/vault-keys/wallet.conf"
+    cases = {
+        "openssl rand": (walletkey.keygen_argv("/usr/bin/openssl"), None),
+        "kwallet-query read": (walletkey.read_argv(kwallet_query, WALLET), None),
+        "kwallet-query write": (walletkey.write_argv(kwallet_query, WALLET), None),
+        "qdbus6 isEnabled": (walletkey.kwallet_argv("/usr/bin/qdbus6", "isEnabled"), None),
+        "qdbus-qt6 localWallet": (walletkey.kwallet_argv("/usr/bin/qdbus-qt6", "localWallet"), None),
+        "qdbus6 Secret Service": (walletkey.secrets_argv("/usr/bin/qdbus6", walletkey.SECRETS_DEFAULT_ALIAS,
+                                                         "Locked"), None),
+        "the kwallet-query extpass": (module.wallet_mount_argv(gocryptfs, kwallet_query, WALLET, slot, "/c", "/m"),
+                                      slot),
+    }
+    problems = []
+    for current in (frontend.PLASMA, frontend.APP):
+        for name, (argv, config) in cases.items():
+            try:
+                module._check_argv(argv, config=config, mode=current)
+                accepted = True
+            except webdata.HelperError:
+                accepted = False
+            if accepted != (current == frontend.PLASMA):
+                problems.append(f"{current} mode {'takes' if accepted else 'refuses'} {name}")
+    return problems
+
+
+def test_app_mode_refuses_every_wallet_tool_argv(stubs):
+    assert wallet_argv_problems(vault, stubs) == []
+
+
+WALLET_ARGV_MUTATIONS = {
+    "wallet tools in any mode": ("        if mode != frontend.PLASMA:\n            raise HelperError(\"os-error\")\n"
+                                 "        walletkey.check_argv(argv)\n", "        walletkey.check_argv(argv)\n"),
+    "wallet tools in app mode only": ("        if mode != frontend.PLASMA:\n            raise HelperError(\"os-error\")\n"
+                                      "        walletkey.check_argv(argv)\n",
+                                      "        if mode == frontend.PLASMA:\n            raise HelperError(\"os-error\")\n"
+                                      "        walletkey.check_argv(argv)\n"),
+    "the kwallet-query extpass in any mode": ("        if mode != frontend.PLASMA or not walletkey.is_read_argv(values):\n",
+                                              "        if not walletkey.is_read_argv(values):\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(WALLET_ARGV_MUTATIONS))
+def test_proof_the_wallet_argv_rule_catches(stubs, name):
+    assert wallet_argv_problems(mutant(vault, *WALLET_ARGV_MUTATIONS[name]), stubs)
+
+
+# --- destroy leaves the widget's wallet entry by its own check (task 011b, N2) ---------------------------
+
+# context() gives app mode no wallet tools; with that switched off, destroy's
+# own check must still keep the widget's entry.
+NO_CONTEXT_GAP = ("    if mode == frontend.APP:\n        # No KDE Wallet", "    if False:\n        # No KDE Wallet")
+NO_DESTROY_CHECK = ("        if had_slot and ctx.mode == frontend.PLASMA:\n            walletkey.forget(",
+                    "        if had_slot:\n            walletkey.forget(")
+
+
+def mutants(module, *pairs):
+    """``module`` with every (old, new) pair applied once, in order."""
+    path = Path(module.__file__)
+    source = path.read_text(encoding="utf-8")
+    for old, new in pairs:
+        assert old in source, f"proof fixture out of date: {old!r} not in {path.name}"
+        source = source.replace(old, new, 1)
+    copy = types.ModuleType(module.__name__ + "_mutant")
+    copy.__file__ = str(path)
+    copy.__package__ = module.__package__
+    sys.modules[copy.__name__] = copy
+    try:
+        exec(compile(source, str(path), "exec"), copy.__dict__)
+    finally:
+        del sys.modules[copy.__name__]
+    return copy
+
+
+def destroy_problems(module, stubs, entry):
+    problems = []
+    result = module.run("destroy")
+    if result != {"ok": True}:
+        problems.append(f"the reply is {result}")
+    if stubs.calls():
+        problems.append(f"ran {[call['tool'] for call in stubs.calls()]}")
+    if json.loads(stubs.wallet.read_text()).get(WALLET_KEY) != entry:
+        problems.append("the widget's wallet entry changed")
+    if stubs.cipher.exists():
+        problems.append("the encrypted folder is still there")
+    return problems
+
+
+def test_app_destroy_runs_no_wallet_tool_and_keeps_the_widgets_entry(stubs, capsys, monkeypatch, tmp_path):
+    entry = enrolled_by_the_widget(stubs, capsys, monkeypatch, tmp_path)
+    assert destroy_problems(vault, stubs, entry) == []
+
+
+def test_app_destroy_keeps_the_entry_even_with_wallet_tools_in_its_context(stubs, capsys, monkeypatch, tmp_path):
+    entry = enrolled_by_the_widget(stubs, capsys, monkeypatch, tmp_path)
+    assert destroy_problems(_copy(mutants(vault, NO_CONTEXT_GAP)), stubs, entry) == []
+
+
+def test_proof_the_destroy_rule_catches(stubs, capsys, monkeypatch, tmp_path):
+    entry = enrolled_by_the_widget(stubs, capsys, monkeypatch, tmp_path)
+    assert destroy_problems(_copy(mutants(vault, NO_CONTEXT_GAP, NO_DESTROY_CHECK)), stubs, entry)
+
+
+def test_plasma_destroy_still_forgets_the_entry(stubs, capsys, monkeypatch, tmp_path):
+    enrolled_by_the_widget(stubs, capsys, monkeypatch, tmp_path)
+    stubs.plasma()
+    assert reply("destroy", capsys) == {"ok": True}
     assert WALLET_KEY not in json.loads(stubs.wallet.read_text())
