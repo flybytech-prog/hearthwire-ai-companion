@@ -196,7 +196,10 @@ PlasmoidItem {
     // -1 until Component.onCompleted has read the configuration.
     property int chatGeneration: -1
     property string chatModeSeen: "memory"
-    readonly property int chatAppletId: ChatStorage.validInt(Plasmoid.id)
+    // double, not int: the hearthwire-hyprland app's id is 2147483648 (2**31),
+    // which an int would wrap to -2147483648; a whole double prints as plain
+    // digits, so the helper commands and profile names stay exact.
+    readonly property double chatAppletId: ChatStorage.validInt(Plasmoid.id)
     readonly property string chatProfileName:
         ChatStorage.profileName(root.chatAppletId, root.chatGeneration)
     // Same rule as the helper: $XDG_RUNTIME_DIR, else nothing (memory only).

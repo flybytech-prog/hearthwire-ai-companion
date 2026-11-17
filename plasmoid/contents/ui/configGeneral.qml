@@ -183,7 +183,8 @@ KCM.SimpleKCM {
     // Seeded in Component.onCompleted; see ChatStorage.firstRun.
     property int vaultRun: 0
     // Only makes the helper's source name unique; 0 if the id is odd.
-    readonly property int vaultApplet: Math.max(0, ChatStorage.validInt(Plasmoid.id))
+    // double, not int: holds the app's id 2147483648 exactly (as main.qml's chatAppletId).
+    readonly property double vaultApplet: Math.max(0, ChatStorage.validInt(Plasmoid.id))
     property string vaultMessage: ""
     // The KDE Wallet key slot as status reports it: "", set-up, off, unavailable.
     property string vaultWallet: ""

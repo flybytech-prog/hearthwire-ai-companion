@@ -2549,6 +2549,56 @@ TestCase {
     readonly property string emptyRead: JSON.stringify({ok: true, history_version: 1, bucket_seconds: 3600,
                                                         now: nowSeconds(), series: []})
 
+    // The hearthwire-hyprland app's id, 2**31 (core/frontend.py APP_APPLET_ID),
+    // reaches the chat storage and vault commands exactly: main.qml's
+    // chatAppletId and configGeneral.qml's vaultApplet are doubles, as an int
+    // would wrap it to -2147483648. A Plasma id (small) gives the same
+    // commands as before.
+    function appletIdRows() {
+        return [{tag: "app id", id: 2147483648, text: "2147483648"},
+                {tag: "plasma id", id: 7, text: "7"}]
+    }
+
+    function test_appletIdReachesTheChatCommands_data() {
+        return appletIdRows()
+    }
+
+    function test_appletIdReachesTheChatCommands(data) {
+        Plasmoid.id = data.id
+        var main = loadMain({})
+        compare(main.chatAppletId, data.id)
+        var gen = main.chatGeneration
+        verify(gen >= 0, "generation " + gen)
+        var prefix = "env HEARTHWIRE_RUN=5 HEARTHWIRE_APPLET=" + data.text + " python3 -P -m hearthwire "
+        compare(main.chatCommand("prepare", 5),
+                prefix + "--web-data prepare --store encrypted --applet " + data.text + " --generation " + gen)
+        compare(main.chatCommand("keep", 5),
+                prefix + "--web-data remove --store encrypted --applet " + data.text + " --keep " + gen)
+        compare(main.chatCommand("remove", 5), prefix + "--web-data remove --store encrypted --applet " + data.text)
+        compare(main.chatCommand("status", 5), prefix + "--vault status")
+        compare(main.chatCommand("unlock-wallet", 5), prefix + "--vault unlock --method wallet")
+        compare(main.chatProfileName, "applet-" + data.text + "-g" + gen)
+    }
+
+    function test_appletIdReachesTheVaultPage_data() {
+        return appletIdRows()
+    }
+
+    function test_appletIdReachesTheVaultPage(data) {
+        Plasmoid.id = data.id
+        var page = load(testCase.generalPageFile, {})
+        compare(page.vaultApplet, data.id)
+        // The page asks the vault's status and the install info on opening.
+        tryVerify(function () { return everyCommand(page).length >= 2 }, 2000)
+        var vault = new RegExp("^env HEARTHWIRE_RUN=[0-9]+ HEARTHWIRE_APPLET=" + data.text
+                               + " python3 -P -m hearthwire --vault status$")
+        var info = new RegExp("^env HEARTHWIRE_RUN=[0-9]+ HEARTHWIRE_APPLET=" + data.text
+                              + " python3 -P( -s)? -m hearthwire --install-info$")
+        var commands = everyCommand(page)
+        verify(commands.some(function (c) { return vault.test(c) }), JSON.stringify(commands))
+        verify(commands.some(function (c) { return info.test(c) }), JSON.stringify(commands))
+    }
+
     // L1: each history step is this widget's, whatever its id is.
     function test_historyStepsNameTheWidget() {
         Plasmoid.id = 42

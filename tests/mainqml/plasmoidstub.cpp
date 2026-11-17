@@ -39,7 +39,7 @@ class PlasmoidStub : public QObject
 {
     Q_OBJECT
     // 7 unless a test sets another; tst_main_wiring.qml puts it back in init().
-    Q_PROPERTY(int id MEMBER m_id NOTIFY idChanged)
+    Q_PROPERTY(qint64 id MEMBER m_id NOTIFY idChanged)
     Q_PROPERTY(QObject *configuration READ configuration CONSTANT)
     Q_PROPERTY(QVariant icon MEMBER m_icon NOTIFY changed)
     Q_PROPERTY(bool busy MEMBER m_busy NOTIFY changed)
@@ -157,7 +157,8 @@ private:
     }
 
     QQmlPropertyMap *m_configuration;
-    int m_id = 7;
+    // 64-bit: the hearthwire-hyprland app's id is 2147483648 (2**31).
+    qint64 m_id = 7;
     QVariant m_icon;
     bool m_busy = false;
     int m_formFactor = 0;

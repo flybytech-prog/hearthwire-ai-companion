@@ -1,0 +1,3 @@
+[
+  {"match": "^env HEARTHWIRE_RUN=\\d+ python3 -P -m hearthwire --json --providers=", "exitCode": 0, "stdoutFile": "snapshot.json"}
+]
