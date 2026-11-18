@@ -279,6 +279,7 @@ def _spawn(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.D
     Its own process group (task 011c), so termination.stop reaches what it starts.
     """
     check_argv(argv)
+    termination.check()  # Task 011d (audit N3): nothing new starts after a stop signal.
     try:
         return subprocess.Popen(
             list(argv),
@@ -292,13 +293,22 @@ def _spawn(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.D
         raise HelperError("missing-tool") from None
 
 
-def _finish(child: subprocess.Popen, timeout: float) -> Optional[int]:
+def _finish(child: subprocess.Popen, timeout: float, *, settling: bool = False) -> Optional[int]:
     """The child's exit code, or None when it had to be stopped after ``timeout``.
 
     kwallet-query may wait for KDE Wallet's own prompt, so a stop signal ends
     the wait (termination.Stopped); the caller's ``finally`` stops the child.
+    ``settling`` (task 011d): a child that is already writing is let finish
+    after a stop signal, up to termination.FINISH_TIMEOUT, before Stopped.
     """
-    code = termination.wait(child, timeout)
+    try:
+        code = termination.wait(child, timeout)
+    except termination.Stopped:
+        if not settling:
+            raise
+        code = termination.wait(child, termination.FINISH_TIMEOUT, interruptible=False)
+        if code is None:
+            raise
     if code is None:
         termination.stop(child, grace=0.0)
     return code
@@ -433,12 +443,14 @@ def read_key_into_pipe(kwallet_query: str, wallet: str, *, entry: str = ENTRY, f
 
 def copy_entry(tools: dict[str, str], wallet: str, source: str, target: str, *,
                source_folder: str = FOLDER, target_folder: str = FOLDER,
-               timeout: Optional[float] = None) -> None:
+               timeout: Optional[float] = None, settling: bool = False) -> None:
     """``kwallet-query -r <source>`` into a pipe, and only after it exited 0 that pipe
     into ``kwallet-query -w <target>`` (which must exit 0). Never read here.
 
     The folders differ only for the installer's migration (LEGACY_FOLDER to
-    FOLDER) and its rollback (the reverse).
+    FOLDER) and its rollback (the reverse). ``settling`` (task 011d): a stop
+    signal while ``-w`` runs lets it finish (bounded), as the wallet slot's
+    commit needs; one before ``-w`` started still raises Stopped.
     """
     kwallet_query = tools.get("kwallet-query")
     if kwallet_query is None:
@@ -449,7 +461,7 @@ def copy_entry(tools: dict[str, str], wallet: str, source: str, target: str, *,
         store = _spawn(write_argv(kwallet_query, wallet, target, target_folder), stdin=reader)
         os.close(reader)
         reader = -1
-        code = _finish(store, PROMPT_TIMEOUT if timeout is None else timeout)
+        code = _finish(store, PROMPT_TIMEOUT if timeout is None else timeout, settling=settling)
     finally:
         _close(reader)
         if store is not None:

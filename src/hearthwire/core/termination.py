@@ -30,10 +30,14 @@ gocryptfs whose mount came up and whose parent exited 0: that daemon is the
 user's open folder.
 
 The Plasma widget's executable engine does not send SIGTERM: it deletes the
-QProcess of a dropped source, which is SIGKILL. Nothing here can handle that,
-so in the widget a passphrase window can stay open (a separate fix).
+QProcess of a dropped source, which is SIGKILL. Nothing can handle that, so
+from the command line these jobs run in a worker process (task 011d,
+``worker.py``): the helper process only waits for it and forwards stop
+signals, and when the helper process is killed the kernel sends the worker
+SIGTERM. The stop below then runs in the worker.
 
-``handling()`` also sets SIGCHLD to its default for the run. With SIGCHLD
+``handling()`` also sets SIGCHLD to its default for the run (cli.main does
+so for every command, task 011d). With SIGCHLD
 ignored (inherited), the kernel reaps exited children itself: exit codes are
 lost and a pid could be reused while we still hold it. A child that was
 reaped elsewhere is never signalled.
@@ -58,6 +62,10 @@ ERROR = "interrupted"
 # (~ProcessRunner; forceStop gives 3 s). Two stops in a row (_passwd) and an
 # unmount have to fit in that.
 STOP_GRACE = 0.3
+# How long a step that already has everything it needs may still take after a
+# stop signal before it is stopped anyway (vault.FINISH_TIMEOUT, the wallet slot
+# commit's kwallet-query -w).
+FINISH_TIMEOUT = 10.0
 # Longest gap between two looks at the flag or a child while waiting.
 POLL_INTERVAL = 0.05
 _FIRST_POLL = 0.001
@@ -73,6 +81,8 @@ class Stopped(BaseException):
 
 class _State:
     signal: Optional[int] = None
+    # Set by record_early(): the next handling() keeps a signal that came before it.
+    early: bool = False
 
 
 _STATE = _State()
@@ -87,6 +97,16 @@ def _record(signum: int, _frame: object) -> None:
         _STATE.signal = signum
 
 
+def record_early() -> None:
+    """Task 011d, in the worker before its job starts: record stop signals from now on (one ignored
+    stays ignored), and let the job's ``handling()`` see one that came before it."""
+    _STATE.signal = None
+    _STATE.early = True
+    for number in SIGNALS:
+        if signal.getsignal(number) is not signal.SIG_IGN:
+            signal.signal(number, _record)
+
+
 @contextmanager
 def handling() -> Iterator[None]:
     """Record SIGTERM, SIGHUP and SIGINT instead of dying; the old handlers come back afterwards.
@@ -94,7 +114,9 @@ def handling() -> Iterator[None]:
     A signal that is ignored when the run starts (``nohup``) stays ignored.
     """
     previous: dict[int, object] = {}
-    _STATE.signal = None
+    if not _STATE.early:
+        _STATE.signal = None
+    _STATE.early = False
     try:
         try:
             previous[signal.SIGCHLD] = signal.signal(signal.SIGCHLD, signal.SIG_DFL)
@@ -231,5 +253,5 @@ def stop(child: subprocess.Popen, grace: float = STOP_GRACE) -> None:
     child.wait()
 
 
-__all__ = ["ERROR", "EXIT_CODE", "SIGNALS", "STOP_GRACE", "Stopped", "check", "exited", "handling", "reply",
-           "requested", "sleep", "stop", "wait"]
+__all__ = ["ERROR", "EXIT_CODE", "FINISH_TIMEOUT", "SIGNALS", "STOP_GRACE", "Stopped", "check", "exited", "handling", "record_early",
+           "reply", "requested", "sleep", "stop", "wait"]

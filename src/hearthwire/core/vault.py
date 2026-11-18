@@ -37,6 +37,10 @@ step waits for its dialog, the wallet or the vault lock stops that step's
 children (their own process group), unmounts what the unfinished step mounted,
 removes a folder an unfinished ``-init`` made and the staged wallet slot, and
 replies ``interrupted``. A mount whose gocryptfs already exited 0 stays.
+
+Task 011d: from the command line, these jobs run in a worker process
+(``worker.py``) that gets SIGTERM when the helper process itself is killed,
+so a SIGKILL (the Plasma widget dropping its source) stops them the same way.
 """
 
 from __future__ import annotations
@@ -177,8 +181,13 @@ EXIT_ALREADY_MOUNTED = 19
 PASSWD_GRACE = 1.0
 # Task 011c: how long a gocryptfs that has every passphrase it needs (-passwd
 # after the new-passphrase dialog returned 0, -init once it writes the folder)
-# may still take after a stop signal. Bounded: the front end kills soon after.
-FINISH_TIMEOUT = 10.0
+# may still take after a stop signal. Longer than the app's kill windows (1 s
+# on quit, 3 s on forceStop) on purpose (task 011d): the app's kill reaches only
+# the front process (worker.py), which makes the worker's death signal a second
+# SIGTERM that changes nothing. The worker keeps waiting here, holding the vault
+# lock until gocryptfs is done and the step is undone or finished; the next job
+# waits for that lock (or replies busy after LOCK_TIMEOUT).
+FINISH_TIMEOUT = termination.FINISH_TIMEOUT
 
 # Lock: plain `fusermount3 -u`, never -z. WebEngine releases its files about a
 # second after the chat profile is destroyed (SP1), so a busy unmount is retried
@@ -427,6 +436,9 @@ def _run(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.DEV
     and writing; it gets FINISH_TIMEOUT to finish instead of being cut off halfway.
     """
     _check_argv(argv, config=config, mode=mode)
+    if interruptible:
+        # Task 011d (audit N3): after a stop signal no new step starts (no dialog flashes up).
+        termination.check()
     try:
         child = subprocess.Popen(
             list(argv),
@@ -456,7 +468,11 @@ def _run(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.DEV
 
 def _spawn(argv: Sequence[str], *, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
            env: Optional[Mapping[str, str]] = None, mode: str = frontend.PLASMA) -> subprocess.Popen:
-    """Start one child without waiting: argv list, no shell, stderr on /dev/null."""
+    """Start one child without waiting: argv list, no shell, stderr on /dev/null.
+
+    Only for steps that may wait for the user, so none starts after a stop signal (task 011d).
+    """
+    termination.check()
     _check_argv(argv, mode=mode)
     try:
         return subprocess.Popen(
@@ -1088,7 +1104,9 @@ def _commit_slot(ctx: Context, keys: int, wallet: str) -> None:
        to wallet.conf.new and wallet.conf.old back to wallet.conf, so the old
        slot and entry keep working (unless kwallet-query -w changed the real
        entry before it failed). A stop signal during step 2 (task 011c) rolls
-       back the same way.
+       back the same way, except while ``kwallet-query -w`` writes the real
+       entry: that one is let finish (task 011d, audit N5), so the slot and the
+       entry never disagree.
     """
     _seal_new_slot(keys)
     had_old = _slot_exists(keys)
@@ -1100,7 +1118,7 @@ def _commit_slot(ctx: Context, keys: int, wallet: str) -> None:
     except OSError:
         raise HelperError("wallet-write-failed") from None
     try:
-        walletkey.copy_entry(ctx.wallet_tools, wallet, walletkey.ENTRY_NEW, walletkey.ENTRY)
+        walletkey.copy_entry(ctx.wallet_tools, wallet, walletkey.ENTRY_NEW, walletkey.ENTRY, settling=True)
     except (HelperError, termination.Stopped):
         try:
             _rename(keys, walletkey.SLOT_FILE, walletkey.SLOT_NEW)
@@ -1380,6 +1398,8 @@ def _mount(ctx: Context, app: int, wallet: Optional[str] = None) -> None:
 
 
 def _mount_attempt(ctx: Context, app: int, wallet: Optional[str]) -> None:
+    # A stop that came while -init finished: no gocryptfs is started just to be stopped.
+    termination.check()
     # Under the vault lock, right before mounting: 0700 (a sealed 0500 one is reset).
     _prepare_mountpoint(app)
     if wallet is None:
@@ -1464,6 +1484,46 @@ def _cipher_has_files(ctx: Context) -> bool:
         return False
 
 
+# What gocryptfs -init writes before the folder is complete: the config goes
+# to this name first and is then renamed to gocryptfs.conf.
+INIT_TEMP_NAMES = frozenset({CONF_FILE + ".tmp"})
+
+
+def _forget_init_leftovers(ctx: Context) -> None:
+    """After a stopped -init (task 011d, audit N2): remove gocryptfs's temp files; best effort.
+
+    Only when the folder holds nothing but INIT_TEMP_NAMES, each a regular
+    file of ours, and no gocryptfs.conf: a stop that cut off the first write
+    leaves an empty folder (``absent``) instead of a ``damaged`` one. The
+    folder is opened without following links and names are removed below it.
+    """
+    try:
+        with _descriptors() as opened:
+            base = open_base(ctx.data_base, create=False)
+            if base is None:
+                return
+            opened.append(base)
+            app = open_child_dir(base, APP_DIR, create=False)
+            if app is None:
+                return
+            opened.append(app)
+            cipher = open_child_dir(app, VAULT_DIR, create=False)
+            if cipher is None:
+                return
+            opened.append(cipher)
+            names = os.listdir(cipher)
+            if not names or not set(names) <= INIT_TEMP_NAMES:
+                return
+            for name in names:
+                info = os.stat(name, dir_fd=cipher, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                    return
+            for name in names:
+                os.unlink(name, dir_fd=cipher)
+    except (HelperError, OSError):
+        pass
+
+
 def _forget_cipher_dir(ctx: Context) -> None:
     """Remove the cipher dir again after a failed -init, only if still empty."""
     with _descriptors() as opened:
@@ -1498,7 +1558,9 @@ def create(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
             code = _run(init_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.cipher), mode=ctx.mode,
                         settling=lambda: _cipher_has_files(ctx))
         except termination.Stopped:
-            # Task 011c: stopped before -init finished: the new folder goes (only while empty).
+            # Task 011c: stopped before -init finished: the new folder goes (only while empty),
+            # after the temp file of a first write that was cut off (task 011d).
+            _forget_init_leftovers(ctx)
             if created:
                 _forget_cipher_dir(ctx)
             raise

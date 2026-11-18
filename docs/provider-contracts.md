@@ -860,17 +860,57 @@ the slot (`add-key`): 9 `cancelled` (the current-passphrase window), 12
 Task 011c (`src/hearthwire/core/termination.py`): the clean stop below
 applies when the helper gets SIGTERM, SIGHUP or SIGINT. The Hyprland app
 sends SIGTERM for its time limit, a disconnected or destroyed source, and
-when it quits; a logout sends SIGTERM too. **The Plasma widget does not:**
-its executable engine deletes the process of a dropped source, which is
-SIGKILL (closing the settings window, removing the widget, plasmashell
-quitting). Nothing can handle SIGKILL, so in the widget a passphrase window
-can stay open and still unlock the folder. That is being fixed separately.
+when it quits; a logout sends SIGTERM too. The Plasma widget's executable
+engine instead deletes the process of a dropped source, which is SIGKILL
+(closing the settings window, removing the widget, plasmashell quitting).
 
-For `--vault` and `--prompts` only, the helper records SIGTERM, SIGHUP and
-SIGINT (a signal ignored at start stays ignored) and sets SIGCHLD to its
-default for the run. It acts on the signal at the next point where it waits:
-for a dialog's or kwallet-query's child, for the vault lock, or in the
-change-passphrase poll loop. `fusermount3`, `gocryptfs -version` and `cmp`
+Task 011d (`src/hearthwire/core/worker.py`) covers the widget too: a SIGKILL
+of the helper still stops the step. From the command line (`python3 -m
+hearthwire`, the console script), `--vault` and `--prompts` run in a worker
+process:
+
+- The process the front end started (the front) forks the worker (no exec)
+  right after it checked the arguments and the front end, and only if it
+  has a single thread and libc's `prctl` is there; otherwise the job runs
+  in the front as before. It opens nothing and never takes the vault lock.
+  SIGTERM, SIGHUP and SIGINT are blocked from just before the fork. The
+  front forwards them to the worker (one ignored at start stays ignored in
+  the front) and then unblocks them, so one that came meanwhile, or one
+  blocked at start, is forwarded too. It waits for the worker and exits with
+  its exit status; its old mask comes back afterwards. stdout and stderr are
+  inherited, so the reply and the exit status are unchanged.
+- The worker first sets `PR_SET_DUMPABLE` to 0 (no core dump, no same-user
+  ptrace or `/proc/<pid>/mem` read; a failure there is ignored). A SIGTERM
+  ignored at start is set back to its default, so the death signal always
+  stops the job (fail closed); SIGHUP and SIGINT ignored at start stay
+  ignored. It sets `PR_SET_PDEATHSIG` to SIGTERM and reads it back with
+  `PR_GET_PDEATHSIG`. If that fails (a seccomp filter, say), the worker runs
+  nothing and exits with 120, and the front runs the job itself, as when
+  `prctl` is missing or the process has a second thread; a stop that came
+  meanwhile ends the run with exit 143 and no reply. Then the worker checks
+  that the front is still its parent; if not, it exits at once and runs
+  nothing. Then it records stop signals, unblocks them (its children get
+  the old mask without them) and runs the job, holding the vault lock
+  itself. A stop that came before the job's own signal handling is kept, so
+  the job stops at its first check.
+- When the front is killed (SIGKILL included), the kernel sends the worker
+  SIGTERM, and the stop below runs there. A forwarded signal followed by
+  that one is the same stop. The front never exits before its worker is
+  reaped, so no worker outlives a front that exited on its own.
+- The app kills the front 1 s after its SIGTERM when it quits, or 3 s after
+  it on a forced stop. That kill now reaches only the front: the worker
+  keeps going, including the 10 s finish wait below, and holds the vault
+  lock until its step is finished or undone. A job started meanwhile waits
+  for the lock (or replies `busy` after 5 s, as for any held lock).
+
+Every command starts with SIGCHLD set to its default. For `--vault` and
+`--prompts` only, the helper (the worker, when split) records SIGTERM,
+SIGHUP and SIGINT (a signal ignored at start stays ignored) and sets SIGCHLD
+to its default for the run. It acts on the signal at the next point where it
+waits: for a dialog's or kwallet-query's child, for the vault lock, or in the
+change-passphrase poll loop. After a stop signal no child that can wait for
+the user is started any more, and neither is the mount after an `-init` that
+finished. `fusermount3`, `gocryptfs -version` and `cmp`
 are short and never cut short. Neither are the `qdbus6` calls, including a
 wallet `open` that may wait for KDE Wallet's own prompt (up to 120 s): the
 job then waits for that answer and finishes normally.
@@ -890,18 +930,25 @@ job then waits for that answer and finishes normally.
   from an earlier unlock.
 - A step that already has everything it needs gets up to 10 s to finish
   instead of being cut off:
-  - `-passwd` once the new-passphrase dialog returned 0;
-  - `-init` once it has started writing the folder.
-  A finished change then replies as usual. A finished `-init` leaves a
-  complete, locked folder, and the mount after it is stopped.
+  - `-passwd` once the new-passphrase dialog returned 0 (while that dialog
+    is still open, the stop is immediate);
+  - `-init` once it has started writing the folder;
+  - add-key's `kwallet-query -w` of the real entry, once it has started.
+  A finished change or add-key then replies as usual. A finished `-init`
+  leaves a complete, locked folder, and no mount is started after it.
 - The unfinished step is undone:
   - a mount that came up before gocryptfs reported it is unmounted and the
     mountpoint sealed (0500);
   - a folder that an unfinished `create` made is removed (only while still
-    empty);
+    empty). An `-init` cut off at its first write can leave only
+    `gocryptfs.conf.tmp`; with no `gocryptfs.conf` next to it, that regular
+    file of yours is removed first (without following links), so the folder
+    is never left `damaged`;
   - `add-key`: `wallet.conf.new` is removed. A stop while the staged key is
-    copied to the real entry puts the old `wallet.conf` back, as after other
-    failures. The staged entry is then deleted.
+    read for the copy to the real entry, or a `-w` that does not finish within
+    the 10 s, puts the old `wallet.conf` back, as after other failures. The
+    staged entry is then deleted. A `-w` that timed out may still have
+    written the real entry, so run `add-key` again if the wallet unlock fails.
   - the prompt's pending file is removed;
   - `passwd.status` is cleared.
 - Entry deletes (`remove-key`, `destroy`, the add-key cleanup) skip their

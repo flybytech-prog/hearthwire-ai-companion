@@ -274,6 +274,7 @@ def _run_dialog(argv: list[str], stdout: int) -> int:
     (termination.Stopped), and _ask's ``finally`` removes the pending file.
     """
     _check_dialog_argv(argv)
+    termination.check()  # Task 011d: no text box opens after a stop signal.
     try:
         child = subprocess.Popen(
             argv,

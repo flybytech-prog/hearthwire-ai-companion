@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import signal
 from collections.abc import Sequence
 
 from . import __version__
 from .core import (
     droppedfile, frontend, installinfo, legacy, portowner, promptstore, settingsbackup, termination, usagehistory,
-    vault, webdata,
+    vault, webdata, worker,
 )
 from .core.catalog import PROVIDER_IDS
 from .core.snapshot import catalog_snapshot, collect_snapshot, detect_snapshot
@@ -419,7 +420,26 @@ def _frontend() -> str | None:
         return None
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _default_sigchld() -> None:
+    """SIGCHLD to its default for every command (task 011d, audit N4).
+
+    Inherited as ignored, the kernel reaps exited children itself: their exit
+    codes are lost and a pid could be reused while it is still held.
+    """
+    try:
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    except ValueError:
+        pass  # Not the main thread (an in-process caller): left as it is.
+
+
+def main(argv: Sequence[str] | None = None, *, split: bool | None = None) -> int:
+    """Run one command; its exit status.
+
+    ``split`` (task 011d): --vault and --prompts run in a worker process
+    (core/worker.py). The default is to split only for the real command line
+    (``argv`` None: ``python3 -m hearthwire`` and the console script).
+    """
+    _default_sigchld()
     argument_parser = parser()
     args = argument_parser.parse_args(argv)
     _check_helper_arguments(args, argument_parser)
@@ -446,12 +466,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.web_data, args.store, args.applet, generation=args.generation, keep=args.keep,
             sites=args.sites, known=args.known, site=args.site,
         ))
-    elif args.vault is not None:
-        payload, stopped = _stoppable_reply(lambda: vault.run(args.vault, method=args.method))
-    elif args.prompts is not None:
-        payload, stopped = _stoppable_reply(lambda: promptstore.run(
-            args.prompts, kind=args.kind, item=args.id, model=args.model,
-        ))
+    elif args.vault is not None or args.prompts is not None:
+        if (argv is None) if split is None else split:
+            # Task 011d: the same run, in a worker that a SIGKILL of this process still stops.
+            return worker.run(lambda: main(argv, split=False))
+        if args.vault is not None:
+            payload, stopped = _stoppable_reply(lambda: vault.run(args.vault, method=args.method))
+        else:
+            payload, stopped = _stoppable_reply(lambda: promptstore.run(
+                args.prompts, kind=args.kind, item=args.id, model=args.model,
+            ))
     elif args.read_dropped is not None:
         payload = _dropped_reply(args.read_dropped)
     elif args.usage_history is not None:

@@ -66,8 +66,15 @@ def mounted(mountpoint):
 
 
 if tool in ("kdialog", "hearthwire-askpass"):
+    if "STUB_DIALOG_IGNORE_TERM" in env:
+        # Only SIGKILL ends it: a stop then takes the whole grace time.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     note("dialog")
-    time.sleep(float(env.get("STUB_DIALOG_SLEEP", "60")))
+    if "--newpassword" in args and "STUB_NEWDIALOG_SLEEP" in env:
+        note("newdialog")
+        time.sleep(float(env["STUB_NEWDIALOG_SLEEP"]))
+    else:
+        time.sleep(float(env.get("STUB_DIALOG_SLEEP", "60")))
     code = int(env.get("STUB_DIALOG_EXIT", "0"))
     if code == 0:
         print("stub-passphrase", flush=True)
@@ -148,7 +155,7 @@ if os.environ.get("STUB_KWALLET_BLOCK") == f"{args[2]}:{args[3]}":
         start = handle.read().rsplit(")", 1)[1].split()[19]
     with open(os.path.join(os.environ["STUB_PIDS"], f"kwallet-{os.getpid()}"), "w") as handle:
         handle.write(start)
-    time.sleep(60)
+    time.sleep(float(os.environ.get("STUB_KWALLET_SLEEP", "60")))
 real = os.environ["STUB_KWALLET_REAL"]
 os.execv(real, [real, *args])
 '''
@@ -163,15 +170,22 @@ sys.path.insert(0, spec["src"])
 signal.signal(signal.SIGINT, signal.default_int_handler)
 signal.signal(signal.SIGHUP, signal.SIG_DFL)
 signal.signal(signal.SIGTERM, signal.SIG_DFL)
+if spec.get("sigterm_ignored"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)  # As inherited (nohup-like): after the reset above.
 if spec.get("sigchld_ignored"):
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 from hearthwire import cli
 from hearthwire.core import frontend, vault
+sources = {}
 for name, old, new in spec["mutations"]:
+    # Several mutations of one module add up.
     module = importlib.import_module(name)
-    source = open(module.__file__).read()
+    source = sources[name] if name in sources else open(module.__file__).read()
     assert old in source, (name, old)
-    exec(compile(source.replace(old, new, 1), module.__file__, "exec"), module.__dict__)
+    sources[name] = source.replace(old, new, 1)
+for name, source in sources.items():
+    module = importlib.import_module(name)
+    exec(compile(source, module.__file__, "exec"), module.__dict__)
 vault.MOUNTINFO = spec["mountinfo"]
 # The stub mountpoint is a plain directory, so its device equals its parent's.
 vault._same_device = lambda root_info, parent_info: False
@@ -179,7 +193,8 @@ vault.PASSWD_GRACE = 0.2
 if spec.get("askpass"):
     frontend.ASKPASS_PATH = spec["askpass"]
     frontend.askpass_path = lambda lstat=None: spec["askpass"]
-sys.exit(cli.main(spec["argv"]))
+# Task 011d: split like the real command line (a front process and its worker) unless told not to.
+sys.exit(cli.main(spec["argv"], split=spec["split"]))
 '''
 
 
@@ -242,10 +257,12 @@ class Case:
     def mounted(self):
         return "fuse.gocryptfs" in self.mountinfo.read_text()
 
-    def start(self, argv, *, mutations=(), app=False, sigchld_ignored=False, **stub_env):
+    def start(self, argv, *, mutations=(), app=False, sigchld_ignored=False, sigterm_ignored=False, split=True,
+              preexec_fn=None,
+              stdout=subprocess.PIPE, stderr=subprocess.PIPE, **stub_env):
         spec = {"src": str(SRC), "argv": argv, "mutations": [list(item) for item in mutations],
                 "mountinfo": str(self.mountinfo), "askpass": str(self.askpass) if app else None,
-                "sigchld_ignored": sigchld_ignored}
+                "sigchld_ignored": sigchld_ignored, "sigterm_ignored": sigterm_ignored, "split": split}
         spec_path = self.root / f"spec-{len(self.helpers)}.json"
         spec_path.write_text(json.dumps(spec))
         env = {"PATH": str(self.bin), "HOME": str(self.home), "XDG_DATA_HOME": str(self.data),
@@ -257,8 +274,8 @@ class Case:
         if app:
             env["HEARTHWIRE_FRONTEND"] = "app"
         helper = subprocess.Popen([sys.executable, "-I", str(self.driver), str(spec_path)], env=env,
-                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  start_new_session=True)
+                                  stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                  start_new_session=True, preexec_fn=preexec_fn)
         self.helpers.append(helper)
         return helper
 
@@ -499,13 +516,19 @@ def _set_up_wallet(case):
     assert (_keys(case) / "wallet.conf").exists() and WALLET_KEY in _wallet(case)
 
 
+# The commit's kwallet-query -w is let finish after a stop (task 011d, N5); with this bound it is
+# stopped after 0.5 s, so the rollback runs.
+SHORT_FINISH = ("hearthwire.core.termination", "FINISH_TIMEOUT = 10.0\n", "FINISH_TIMEOUT = 0.5\n")
+
+
 def resetup_problems(case, mutations=()):
-    """Re-setup stopped while the staged key is copied to the real entry (security M1, L2)."""
+    """Re-setup stopped while the staged key is copied to the real entry and the write
+    does not finish (security M1, L2)."""
     _set_up_wallet(case)
     slot = _keys(case) / "wallet.conf"
     inode, entry = os.stat(slot).st_ino, _wallet(case)[WALLET_KEY]
-    problems = stop_problems(case, ADD_KEY, ready=_kwallet_waits, mutations=mutations, STUB_DIALOG_SLEEP=0,
-                             STUB_KWALLET_BLOCK="--write-password:encrypted-chat-folder")
+    problems = stop_problems(case, ADD_KEY, ready=_kwallet_waits, mutations=[SHORT_FINISH, *mutations],
+                             STUB_DIALOG_SLEEP=0, STUB_KWALLET_BLOCK="--write-password:encrypted-chat-folder")
     if not slot.exists() or os.stat(slot).st_ino != inode:
         problems.append("the old slot is not back")
     for name in ("wallet.conf.old", "wallet.conf.new"):
@@ -589,11 +612,11 @@ def test_proof_the_delete_after_a_stop_is_needed(case):
                                        "        except HelperError:\n            pass  # Best")])
 
 
-def sigchld_problems(case, mutations=()):
+def sigchld_problems(case, mutations=(), split=True):
     """SIGCHLD ignored by whoever started the helper: exit codes must still count (security L1)."""
     case.make_locked()
-    result = case.run(["--vault", "unlock"], mutations=mutations, sigchld_ignored=True, STUB_DIALOG_SLEEP=0,
-                      STUB_DIALOG_EXIT=1)
+    result = case.run(["--vault", "unlock"], mutations=mutations, sigchld_ignored=True, split=split,
+                      STUB_DIALOG_SLEEP=0, STUB_DIALOG_EXIT=1)
     return [] if result == (0, '{"ok":false,"error":"cancelled"}\n', "") else [f"got {result}"]
 
 
@@ -603,9 +626,17 @@ def test_an_inherited_ignored_sigchld_is_reset(case):
 
 
 def test_proof_the_sigchld_reset_is_needed(case):
+    """Both resets taken out (cli.main's for every command, task 011d N4, and handling()'s)."""
     assert sigchld_problems(case, [("hearthwire.core.termination",
                                     "            previous[signal.SIGCHLD] = signal.signal(signal.SIGCHLD, signal.SIG_DFL)\n",
-                                    "            pass\n")])
+                                    "            pass\n"),
+                                   ("hearthwire.cli", "        signal.signal(signal.SIGCHLD, signal.SIG_DFL)\n",
+                                    "        pass\n")])
+
+
+@pytest.mark.parametrize("split", [True, False])
+def test_an_inherited_ignored_sigchld_is_reset_with_and_without_the_worker(case, split):
+    assert sigchld_problems(case, split=split) == []
 
 
 def _new_passphrase_given(case):
@@ -631,7 +662,7 @@ def test_proof_the_change_is_let_finish(case):
 
 
 def init_finish_problems(case, mutations=()):
-    """A stop while -init writes the folder: it finishes (a complete, locked folder), the mount is stopped."""
+    """A stop while -init writes the folder: it finishes (a complete, locked folder), and no mount starts."""
     temporary = case.cipher / "gocryptfs.conf.tmp"
     problems = stop_problems(case, ["--vault", "create"], ready=lambda case: temporary.exists(),
                              mutations=mutations, STUB_DIALOG_SLEEP=0, STUB_INIT_HOLD=1.5)
@@ -639,6 +670,10 @@ def init_finish_problems(case, mutations=()):
         problems.append("the folder is half-written")
     if case.mounted():
         problems.append("mounted")
+    # Task 011d (review-5 I4): the mount after it is not started just to be stopped
+    # (its first step makes the mountpoint).
+    if len(case.noted("gocryptfs")) != 1 or os.path.lexists(case.mountpoint):
+        problems.append("the mount step started")
     return problems
 
 
@@ -649,6 +684,90 @@ def test_a_stop_while_init_writes_lets_it_finish(case):
 def test_proof_init_is_let_finish(case):
     assert init_finish_problems(case, [("hearthwire.core.vault", "settling=lambda: _cipher_has_files(ctx))",
                                         "settling=None)")])
+
+
+def test_proof_no_mount_starts_after_a_finished_init(case):
+    assert init_finish_problems(case, [
+        ("hearthwire.core.vault",
+         "    # A stop that came while -init finished: no gocryptfs is started just to be stopped.\n"
+         "    termination.check()\n", "")])
+
+
+# --- task 011d: review-5 R1, audit N2 and N5 -------------------------------------------------------
+
+
+def newdialog_problems(case, mutations=()):
+    """change-passphrase stopped while the new-passphrase dialog is still open (review-5 R1)."""
+    case.make_locked()
+    problems = stop_problems(case, ["--vault", "change-passphrase"], ready=lambda case: bool(case.alive("newdialog")),
+                             mutations=mutations, STUB_DIALOG_SLEEP=0, STUB_NEWDIALOG_SLEEP=60)
+    if (case.cipher / "gocryptfs.conf").read_text() != "{}":
+        problems.append("the config changed")
+    if (case.mountpoint.parent / vault.PASSWD_MARKER).exists():
+        problems.append("passwd.status is left")
+    return problems
+
+
+def test_a_stop_while_the_new_passphrase_dialog_is_open(case):
+    assert newdialog_problems(case) == []
+
+
+def test_proof_an_open_new_passphrase_dialog_is_not_waited_for(case):
+    """Mutation N1 of review-5: the finish wait also while the second dialog is still open."""
+    assert newdialog_problems(case, [(
+        "hearthwire.core.vault",
+        "        if dialog is None or not termination.exited(dialog) or dialog.wait() != 0:\n",
+        "        if dialog is None:\n")])
+
+
+# -init cut off at its first write: the "has started writing" check said not yet (the race of audit N2).
+INIT_RACE = ("hearthwire.core.vault", "settling=lambda: _cipher_has_files(ctx))", "settling=None)")
+
+
+def init_cut_problems(case, mutations=()):
+    temporary = case.cipher / "gocryptfs.conf.tmp"
+    problems = stop_problems(case, ["--vault", "create"], ready=lambda case: temporary.exists(),
+                             mutations=[INIT_RACE, *mutations], STUB_DIALOG_SLEEP=0, STUB_INIT_HOLD=60)
+    if case.cipher.exists():
+        problems.append(f"the folder is left: {sorted(os.listdir(case.cipher))}")
+    return problems
+
+
+def test_a_stop_that_cuts_off_init_leaves_no_damaged_folder(case):
+    assert init_cut_problems(case) == []
+
+
+def test_proof_the_init_temp_file_is_removed(case):
+    assert init_cut_problems(case, [("hearthwire.core.vault", "            _forget_init_leftovers(ctx)\n", "")])
+
+
+def commit_finish_problems(case, mutations=()):
+    """A stop while the commit's kwallet-query -w writes the real entry: it finishes, the new slot stays (N5)."""
+    _set_up_wallet(case)
+    slot = _keys(case) / "wallet.conf"
+    inode, entry = os.stat(slot).st_ino, _wallet(case)[WALLET_KEY]
+    problems = stop_problems(case, ADD_KEY, ready=_kwallet_waits, mutations=mutations, expect=('{"ok":true}\n', 0),
+                             STUB_DIALOG_SLEEP=0, STUB_KWALLET_SLEEP=1.0,
+                             STUB_KWALLET_BLOCK="--write-password:encrypted-chat-folder")
+    if not slot.exists() or os.stat(slot).st_ino == inode:
+        problems.append("the new slot is not in")
+    if _wallet(case).get(WALLET_KEY) in (None, entry):
+        problems.append("the real entry is not the new one")
+    for name in ("wallet.conf.old", "wallet.conf.new"):
+        if (_keys(case) / name).exists():
+            problems.append(f"{name} is left")
+    if WALLET_KEY + ".new" in _wallet(case):
+        problems.append("the staged entry is left")
+    return problems
+
+
+def test_a_stop_while_the_commit_writes_the_entry_lets_it_finish(case):
+    assert commit_finish_problems(case) == []
+
+
+def test_proof_the_commit_write_is_let_finish(case):
+    assert commit_finish_problems(case, [("hearthwire.core.vault", "walletkey.ENTRY, settling=True)",
+                                          "walletkey.ENTRY, settling=False)")])
 
 
 # --- proofs: each check bites ---------------------------------------------------------------------
@@ -725,7 +844,12 @@ def test_the_unmutated_cases_pass(case, name):
 @pytest.mark.parametrize("name", sorted(PROOFS))
 def test_proof_each_stop_step_is_needed(case, name):
     module, old, new, (argv, options) = PROOFS[name]
-    assert _outcome_problems(case, argv, options, [(module, old, new)])
+    mutations = [(module, old, new)]
+    if name == "no handler":
+        # Task 011d: the worker records stop signals before the job (record_early); take that out too.
+        mutations.append(("hearthwire.core.termination", "            signal.signal(number, _record)\n",
+                          "            pass\n"))
+    assert _outcome_problems(case, argv, options, mutations)
 
 
 # --- termination.py itself, in this process ---------------------------------------------------------
