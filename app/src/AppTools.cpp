@@ -5,6 +5,7 @@
 #include "UrlGuard.h"
 
 #include <QCoreApplication>
+#include <QGuiApplication>
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
@@ -23,10 +24,45 @@ AppTools *s_tools = nullptr;
 int AppTools::s_warnings = 0;
 int AppTools::s_qmlWarnings = 0;
 
-AppTools::AppTools(PlasmoidHost *host, QObject *parent)
+AppTools::AppTools(PlasmoidHost *host, SingleInstance *instance, QObject *parent)
     : QObject(parent)
     , m_host(host)
+    , m_instance(instance)
 {
+}
+
+void AppTools::present(QObject *window)
+{
+    auto *quick = qobject_cast<QQuickWindow *>(window);
+    if (!quick)
+        return;
+    ++m_presents;
+    quick->show();
+    quick->raise();
+    const QString token = m_instance ? SingleInstance::filterToken(m_instance->takeToken()) : QString();
+    if (token.isEmpty()) {
+        quick->requestActivate();
+        return;
+    }
+    qputenv("XDG_ACTIVATION_TOKEN", token.toLatin1());
+    quick->requestActivate();
+    // qtwayland has used and unset it; without Wayland it is still ours.
+    qunsetenv("XDG_ACTIVATION_TOKEN");
+}
+
+void AppTools::dropToken()
+{
+    if (m_instance)
+        m_instance->takeToken();
+}
+
+void AppTools::quit()
+{
+    if (fixtures() && m_holdQuit) {
+        ++m_quitRequests;
+        return;
+    }
+    QCoreApplication::quit();
 }
 
 AppTools *AppTools::create(QQmlEngine *, QJSEngine *)
@@ -113,6 +149,52 @@ void AppTools::finish(int code) const
 int AppTools::guardRefusals() const
 {
     return fixtures() ? UrlGuard::refusals() : -1;
+}
+
+void AppTools::simulateInstance(bool available)
+{
+#ifdef HW_FIXTURES
+    if (m_instance)
+        m_instance->simulateAvailable(available);
+#else
+    Q_UNUSED(available)
+#endif
+}
+
+void AppTools::simulateShow(const QString &tab, const QString &token)
+{
+    if (fixtures() && m_instance)
+        m_instance->Show(tab, token);
+}
+
+void AppTools::simulateToggle(const QString &token)
+{
+    if (fixtures() && m_instance)
+        m_instance->Toggle(token);
+}
+
+int AppTools::presents() const
+{
+    return fixtures() ? m_presents : -1;
+}
+
+bool AppTools::tokenPending() const
+{
+    return fixtures() && m_instance && m_instance->hasToken();
+}
+
+void AppTools::holdQuit(bool hold)
+{
+    if (!fixtures())
+        return;
+    m_holdQuit = hold;
+    // Held, the last window closing doesn't end the checks either.
+    QGuiApplication::setQuitOnLastWindowClosed(!hold);
+}
+
+int AppTools::quitRequests() const
+{
+    return fixtures() ? m_quitRequests : -1;
 }
 
 bool AppTools::sendKey(QObject *window, int key) const

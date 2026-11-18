@@ -185,6 +185,16 @@ ApplicationWindow {
         dialog.pendingItem = null
     }
 
+    // The app is quitting (its window was closed, task 012 R3.4): unapplied
+    // changes are dropped, as Cancel + Discard would, without asking.
+    function dropAndClose() {
+        dialog.pendingItem = null
+        dialog.wasConfigurationChangedSignalSent = false
+        applyButton.enabled = false
+        prompt.close()
+        dialog.close()
+    }
+
     onClosing: (close) => {
         close.accepted = dialog.closingAllowed()
     }

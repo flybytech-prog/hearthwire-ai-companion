@@ -346,7 +346,8 @@ private Q_SLOTS:
                                  "GIO_EXTRA_MODULES", "GIO_MODULE_DIR", "GDK_PIXBUF_MODULE_FILE", "GDK_PIXBUF_MODULEDIR",
                                  "QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "QML_IMPORT_PATH", "QML2_IMPORT_PATH",
                                  "QML_XHR_ALLOW_FILE_READ", "QT_QUICK_CONTROLS_STYLE_PATH", "LD_BIND_NOW", "MYPYTHONPATH",
-                                 "hearthwire_x", "MYGCONV_PATH", "HW_TEST_DIR", "XDG", "LC", "SSH_AUTH_SOCK", "PATHX"})
+                                 "hearthwire_x", "MYGCONV_PATH", "HW_TEST_DIR", "XDG", "LC", "SSH_AUTH_SOCK", "PATHX",
+                                 "XDG_ACTIVATION_TOKEN"})
             QTest::newRow(name) << QString::fromLatin1(name) << true;
         for (const char *name : {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "LC_ALL",
                                  "LC_MESSAGES", "TZ", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",

@@ -1,13 +1,23 @@
 # ctest: C++ unit tests (HelperCommand, ProcessRunner, ConfigStore,
-# PlasmoidHost) and the plasmoid's tests/qml under the stand-ins.
-# Every test runs offscreen and never touches a session bus; the
-# ProcessRunner test runs only a fake python3 it writes into a temp folder.
+# PlasmoidHost, ...) and the plasmoid's tests/qml under the stand-ins.
+# Every test runs offscreen and never touches a session bus of the host:
+# the bus tests (hw_bus_test) run on a private bus, all others see a dead
+# address. The ProcessRunner test runs only a fake python3 it writes into a
+# temp folder.
 enable_testing()
 
 set(hw_src ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-set(hw_test_env "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_MATERIAL_VARIANT=Dense")
+# No test may reach a real bus: every test gets a dead
+# DBUS_SESSION_BUS_ADDRESS and DBUS_SYSTEM_BUS_ADDRESS (nothing listens there) and its own runtime
+# folder in the build tree. The bus tests below run on a private bus.
+set(hw_test_runtime ${CMAKE_BINARY_DIR}/test-runtime)
+file(MAKE_DIRECTORY ${hw_test_runtime})
+file(CHMOD ${hw_test_runtime} DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+set(hw_test_env "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_MATERIAL_VARIANT=Dense"
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=${CMAKE_BINARY_DIR}/no-bus" "DBUS_SYSTEM_BUS_ADDRESS=unix:path=${CMAKE_BINARY_DIR}/no-bus"
+    "XDG_RUNTIME_DIR=${hw_test_runtime}")
 
-function(hw_test name)
+function(hw_test_target name)
     qt_add_executable(${name} ${name}.cpp)
     target_include_directories(${name} PRIVATE ${hw_src})
     target_compile_definitions(${name} PRIVATE
@@ -15,7 +25,38 @@ function(hw_test name)
         HW_REPO_SRC="${CMAKE_CURRENT_SOURCE_DIR}/../../src"
         HW_TEST_PYTHON="${HW_HELPER_PYTHON}")
     target_link_libraries(${name} PRIVATE Qt6::Test ${ARGN})
+endfunction()
+
+function(hw_test name)
+    hw_test_target(${name} ${ARGN})
     add_test(NAME ${name} COMMAND ${name})
+    set_tests_properties(${name} PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 120)
+endfunction()
+
+# --- Bus tests (task 012 R3): each runs under its own dbus-run-session, on a
+# private bus from dbus-session.conf (a path socket in the 0700 build-tree
+# folder bus/, EXTERNAL auth, no service folders, no includes: nothing can be
+# activated). Required: without dbus-run-session the configure fails rather
+# than skipping them. Each test also checks its address (tests/BusGuard.h).
+find_program(HW_DBUS_RUN_SESSION dbus-run-session REQUIRED)
+find_program(HW_DBUS_DAEMON dbus-daemon REQUIRED)
+set(HW_BUS_DIR ${CMAKE_BINARY_DIR}/bus)
+# A unix socket path has at most 107 bytes; dbus adds /dbus-<10 random>.
+string(LENGTH "${HW_BUS_DIR}/dbus-0123456789" hw_bus_path_length)
+if(hw_bus_path_length GREATER 100)
+    message(FATAL_ERROR "The build folder's path is too long for the test bus socket (${hw_bus_path_length} bytes); use a shorter one")
+endif()
+file(MAKE_DIRECTORY ${HW_BUS_DIR})
+file(CHMOD ${HW_BUS_DIR} DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+set(HW_BUS_CONFIG ${CMAKE_CURRENT_BINARY_DIR}/dbus-session.conf)
+configure_file(dbus-session.conf.in ${HW_BUS_CONFIG} @ONLY)
+
+function(hw_bus_test name)
+    hw_test_target(${name} ${ARGN})
+    target_link_libraries(${name} PRIVATE Qt6::DBus)
+    target_compile_definitions(${name} PRIVATE HW_TEST_BUS_DIR="${HW_BUS_DIR}")
+    add_test(NAME ${name} COMMAND ${HW_DBUS_RUN_SESSION} --config-file=${HW_BUS_CONFIG} --dbus-daemon=${HW_DBUS_DAEMON}
+        -- $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 120)
 endfunction()
 
@@ -26,6 +67,21 @@ hw_test(tst_configstore hwcompat_Plasmoid Qt6::Qml)
 hw_test(tst_plasmoidhost hwcompat_Plasmoidplugin Qt6::Quick)
 hw_test(tst_urlguard hwcompat_Plasmoidplugin Qt6::Quick Qt6::QuickControls2)
 hw_test(tst_themewatcher hwcompat_Kirigamiplugin Qt6::Quick)
+hw_test(tst_importtrust Qt6::Qml)
+target_sources(tst_importtrust PRIVATE ${hw_src}/ImportTrust.h ${hw_src}/ImportTrust.cpp ${hw_src}/UrlGuard.h)
+# BusGuard.h's own rows (no bus).
+hw_test(tst_busguard Qt6::Core)
+target_compile_definitions(tst_busguard PRIVATE HW_TEST_BUS_DIR="${HW_BUS_DIR}")
+hw_bus_test(tst_notifier hwcompat_Notification)
+hw_bus_test(tst_singleinstance Qt6::Qml)
+target_sources(tst_singleinstance PRIVATE ${hw_src}/SingleInstance.h ${hw_src}/SingleInstance.cpp)
+# The real binary, only ever as a second copy (the test owns the name first).
+hw_bus_test(tst_secondlaunch)
+add_dependencies(tst_secondlaunch hearthwire-hyprland)
+target_compile_definitions(tst_secondlaunch PRIVATE HW_APP_BINARY="$<TARGET_FILE:hearthwire-hyprland>")
+if(HW_FIXTURES)
+    target_compile_definitions(tst_secondlaunch PRIVATE HW_APP_FIXTURES)
+endif()
 
 # Planted plugins for tst_pluginpaths (never installed, never loaded by the app).
 # Test-only: the planted platform plugin needs Qt's private qpa/ headers, which
@@ -89,7 +145,7 @@ target_compile_definitions(hearthwire-qmltests PRIVATE
     HW_MAIN_XML="${HW_SYNCED}/main.xml"
     HW_EMPTY_BOOK="${CMAKE_CURRENT_BINARY_DIR}/empty-book.json")
 target_link_libraries(hearthwire-qmltests PRIVATE
-    Qt6::QuickTest Qt6::Quick Qt6::QuickControls2
+    Qt6::QuickTest Qt6::Quick Qt6::QuickControls2 Qt6::DBus
     hwcompat_Kirigamiplugin hwcompat_PlasmaComponentsplugin hwcompat_PlasmaExtrasplugin
     hwcompat_PlasmaCoreplugin hwcompat_Plasmoidplugin hwcompat_Plasma5Supportplugin
     hwcompat_KCMUtilsplugin hwcompat_Notificationplugin hwcompat_Configurationplugin hwstyleplugin)
@@ -111,6 +167,9 @@ foreach(file IN LISTS hw_app_qml_tests)
     add_test(NAME app_qml_${base} COMMAND hearthwire-qmltests -input ${file})
     set_tests_properties(app_qml_${base} PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 120)
 endforeach()
+# The Notification stand-in's test: the Notifier in Record mode (nothing
+# leaves the process; hearthwire-qmltests reads this one variable).
+set_tests_properties(app_qml_tst_notification PROPERTIES ENVIRONMENT "${hw_test_env};HW_QMLTEST_NOTIFIER=record")
 
 # The app itself refuses -platformpluginpath (review-4 LOW-2): one fixed
 # line, exit 2, before Qt reads the argument.
@@ -127,4 +186,33 @@ endforeach()
 # The synced trees themselves, checked independently of the sync tools.
 add_test(NAME synced_tree_has_no_kde
     COMMAND ${Python3_EXECUTABLE} -I -B ${CMAKE_CURRENT_SOURCE_DIR}/check_synced.py ${HW_SYNCED} ${HW_QMLTESTS})
-set_tests_properties(synced_tree_has_no_kde PROPERTIES TIMEOUT 60)
+set_tests_properties(synced_tree_has_no_kde PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 60)
+
+# No RPATH/RUNPATH entry that is empty, relative or $ORIGIN-based
+# (review-6-security LOW-1), in the build tree's binaries that ctest runs
+# and (below) in the staged install. readelf is required, as dbus-run-session.
+find_program(HW_READELF readelf REQUIRED)
+add_test(NAME app_runpath COMMAND ${Python3_EXECUTABLE} -I -B ${CMAKE_CURRENT_SOURCE_DIR}/check_install.py
+    --readelf ${HW_READELF} --runpath $<TARGET_FILE:hearthwire-hyprland> $<TARGET_FILE:hearthwire-qmltests>)
+set_tests_properties(app_runpath PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 60)
+
+# Install layout (R3.3): a staged `cmake --install --prefix /usr` holds
+# exactly the binary and the .desktop file. A fixture build can't install.
+if(NOT HW_FIXTURES)
+    set(hw_stage ${CMAKE_BINARY_DIR}/stage)
+    add_test(NAME app_install_layout COMMAND ${CMAKE_COMMAND} -E env DESTDIR=${hw_stage}
+        sh -c "rm -rf -- \"$0\" && \"$1\" --install \"$2\" --prefix /usr >/dev/null && \"$3\" -I -B \"$4\" --stage \"$0\" --readelf \"$5\""
+        ${hw_stage} ${CMAKE_COMMAND} ${CMAKE_BINARY_DIR} ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_install.py
+        ${HW_READELF})
+    set_tests_properties(app_install_layout PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 120 RUN_SERIAL TRUE)
+endif()
+set(hw_desktop ${CMAKE_CURRENT_SOURCE_DIR}/../data/hearthwire-hyprland.desktop)
+find_program(HW_DESKTOP_FILE_VALIDATE desktop-file-validate)
+if(HW_DESKTOP_FILE_VALIDATE)
+    add_test(NAME app_desktop_file_valid COMMAND sh -c "\"$0\" \"$1\" && \"$2\" -I -B \"$3\" --desktop \"$1\""
+        ${HW_DESKTOP_FILE_VALIDATE} ${hw_desktop} ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_install.py)
+else()
+    add_test(NAME app_desktop_file_valid COMMAND ${Python3_EXECUTABLE} -I -B ${CMAKE_CURRENT_SOURCE_DIR}/check_install.py
+        --desktop ${hw_desktop})
+endif()
+set_tests_properties(app_desktop_file_valid PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 60 FAIL_REGULAR_EXPRESSION "error:|warning:|FAIL")

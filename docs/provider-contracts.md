@@ -1711,6 +1711,50 @@ exactly as in 1.1.0.
   every kwallet-query, qdbus6 and openssl argv, and the `kwallet-query`
   extpass, in app mode.
 
+### The app's own interfaces (no helper involved)
+
+These belong to the app itself (task 012 R3, `app/src/SingleInstance.h`,
+`app/src/Notifier.h`); the helper has no part in them.
+
+- Single instance, session bus: name
+  `io.github.flybytechprog.hearthwire.hyprland`, object
+  `/io/github/flybytechprog/hearthwire/hyprland`, interface
+  `io.github.flybytechprog.hearthwire.hyprland.Window`, exported with
+  scriptable slots only (no properties, no signals):
+  - `Toggle(s activationToken)`, returns nothing: hide a shown, active
+    window, else show it.
+  - `Show(s tab, s activationToken)`, returns nothing: show the window;
+    `tab` is `""` (keep the tab), `usage`, `chat` or `ollama` (chosen as the
+    widget's shortcut does: a hidden tab falls back to the other, `ollama`
+    needs the Chat tab and the Ollama entry). Any other tab:
+    `org.freedesktop.DBus.Error.InvalidArgs` ("unknown tab"), nothing happens.
+  - Token: used only when it is 1..255 characters of `[A-Za-z0-9_.:+/=-]`,
+    otherwise taken as `""` (no error). The sending side applies the same rule.
+  - A caller whose uid (bus `GetConnectionUnixUser`) is not the app's:
+    `org.freedesktop.DBus.Error.AccessDenied` ("not allowed"), nothing happens.
+  - The name is taken with do-not-queue and no replacement.
+- Command line: `hearthwire-hyprland [--toggle | --tab usage|chat|ollama]`.
+  When another copy owns the name, the new one calls `Toggle(token)` (with
+  `--toggle`) or `Show(tab or "", token)` (token from its own
+  `XDG_ACTIVATION_TOKEN`), waits at most 5 s and exits 0; if the name has no
+  owner after all it becomes the first copy; any other error or no answer:
+  "another copy is running but did not answer", exit 1. Every usage error
+  ends with one fixed line and exit 2, before the bus is used: both options,
+  a tab outside the three, an unknown option, an option without its value
+  (`--tab` alone) or with one it does not take (`--toggle=x`), or an extra
+  argument. `--help` and `--version` exit 0 and never use the bus. The first copy starts shown
+  (on the `--tab` tab). The second copy reads no settings and starts no helper.
+- Notifications: `org.freedesktop.Notifications.Notify` (asynchronous),
+  app_name `Hearthwire`, replaces_id 0, app_icon `hearthwire`, summary =
+  title, body = text, no actions, expire_timeout -1, hints `transient` (b
+  true), `urgency` (y: Low 0; Default, Normal, High 1; Critical 2) and
+  `desktop-entry` `hearthwire-hyprland`. `GetCapabilities` is asked once;
+  without `body-markup` the body is sent un-escaped (`&lt;`, `&gt;`, then
+  `&amp;`).
+- Desktop file: `hearthwire-hyprland.desktop`; its name is the app id (the
+  Wayland app id from `setDesktopFileName`, `StartupWMClass` and the
+  notifications' `desktop-entry`). No D-Bus activation, no actions.
+
 ### App settings file
 
 Written only by the app (0700 folder, 0600 file, replaced atomically, at most

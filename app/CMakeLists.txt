@@ -1,6 +1,7 @@
 # hearthwire-hyprland: the plasmoid's QML in a plain Qt Quick (Material)
 # app, through the private Hearthwire.Compat.* stand-ins (task 008 plan-v1
-# §2.1-2.2). Task 012: no WebEngine, notifications, D-Bus or packaging yet.
+# §2.1-2.2). Task 012: single instance and notifications on the session bus,
+# a .desktop file and install rules; no WebEngine yet (013).
 #
 # Build out of tree only, e.g.
 #   cmake -S app -B "$TMPDIR/hw-app" -G Ninja && cmake --build "$TMPDIR/hw-app"
@@ -12,8 +13,15 @@
 #                    Never for a release.
 #   HW_TESTS=ON      C++ unit tests and the tests/qml run under the stand-ins.
 #   HW_HELPER_PYTHON the python3 the helper runs with (absolute; no PATH lookup).
+#
+# Install (release builds only; a fixture build refuses):
+#   cmake --install <build> --prefix /usr
+# installs exactly bin/hearthwire-hyprland and
+# share/applications/hearthwire-hyprland.desktop. The icon "hearthwire" ships
+# with hearthwire-helper, not here; tests and planted plugins never install.
 cmake_minimum_required(VERSION 3.21)
 project(hearthwire-hyprland VERSION 1.2.0 LANGUAGES CXX)
+include(GNUInstallDirs)
 
 if(CMAKE_BINARY_DIR STREQUAL CMAKE_SOURCE_DIR)
     message(FATAL_ERROR "Build out of tree (for example in $TMPDIR).")
@@ -29,13 +37,19 @@ if(NOT IS_ABSOLUTE "${HW_HELPER_PYTHON}")
     message(FATAL_ERROR "HW_HELPER_PYTHON must be an absolute path")
 endif()
 
-set(hw_qt_components Gui Qml Quick QuickControls2)
+set(hw_qt_components Gui Qml Quick QuickControls2 DBus)
 if(HW_TESTS)
     list(APPEND hw_qt_components Test QuickTest)
 endif()
 find_package(Qt6 6.8 REQUIRED COMPONENTS ${hw_qt_components})
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 qt_standard_project_setup(REQUIRES 6.8)
+# No RUNPATH at all (review-6-security LOW-1). qt_standard_project_setup()
+# sets the install RPATH to $ORIGIN:$ORIGIN/../lib, and CMake pads the
+# build-tree RUNPATH with ':' to that length for the install rewrite: empty
+# entries, which ld.so reads as the current folder. The app has no libraries
+# of its own; every one it needs is in the system's folders.
+set(CMAKE_INSTALL_RPATH "")
 qt_policy(SET QTP0004 NEW)
 
 # Every QML module lands in build/qml/<URI path>, which tooling also reads.
@@ -111,7 +125,8 @@ hw_compat(Plasmoid src/PlasmoidHost.h src/PlasmoidHost.cpp src/ConfigStore.h src
 hw_compat(Plasma5Support src/ProcessRunner.h src/ProcessRunner.cpp src/HelperCommand.h src/HelperCommand.cpp)
 target_compile_definitions(hwcompat_Plasma5Support PRIVATE HW_HELPER_PYTHON="${HW_HELPER_PYTHON}")
 hw_compat(KCMUtils)
-hw_compat(Notification)
+hw_compat(Notification src/Notifier.h src/Notifier.cpp)
+target_link_libraries(hwcompat_Notification PUBLIC Qt6::DBus)
 hw_compat(Configuration)
 
 # --- The app's Qt Quick Controls style: Material, with the few controls that
@@ -133,6 +148,7 @@ qt_add_executable(hearthwire-hyprland
     src/LocalizedContext.h src/LocalizedContext.cpp
     src/IconProvider.h
     src/ImportPaths.h
+    src/ImportTrust.h src/ImportTrust.cpp
     src/UrlGuard.h)
 
 file(GLOB hw_app_qml CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/qml/Hearthwire/App/*.qml)
@@ -148,7 +164,7 @@ qt_add_qml_module(hearthwire-hyprland
     VERSION 1.0
     DEPENDENCIES Hearthwire.Compat.Plasmoid
     QML_FILES ${hw_app_qml}
-    SOURCES src/AppTools.h src/AppTools.cpp)
+    SOURCES src/AppTools.h src/AppTools.cpp src/SingleInstance.h src/SingleInstance.cpp)
 target_include_directories(hearthwire-hyprland PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(hearthwire-hyprland PRIVATE HW_VERSION="${PROJECT_VERSION}")
 
@@ -161,7 +177,7 @@ if(HW_FIXTURES)
 endif()
 
 target_link_libraries(hearthwire-hyprland PRIVATE
-    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::DBus
     hwplasmoidplugin hwstyleplugin
     hwcompat_Kirigamiplugin hwcompat_PlasmaComponentsplugin hwcompat_PlasmaExtrasplugin
     hwcompat_PlasmaCoreplugin hwcompat_Plasmoidplugin hwcompat_Plasma5Supportplugin
@@ -173,6 +189,16 @@ qt_add_resources(hearthwire-hyprland plasmoid_images
     PREFIX /qt/qml/Hearthwire/images
     BASE ${HW_PLASMOID}/contents/images
     FILES ${hw_images})
+
+# --- Install: the binary and its .desktop file (its name is the app id,
+# setDesktopFileName and the notifications' desktop-entry hint).
+if(HW_FIXTURES)
+    install(CODE "message(FATAL_ERROR \"A fixture build (HW_FIXTURES=ON) is for tests only and can't be installed\")")
+else()
+    install(TARGETS hearthwire-hyprland RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES data/hearthwire-hyprland.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
+        PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+endif()
 
 if(HW_TESTS)
     enable_testing()

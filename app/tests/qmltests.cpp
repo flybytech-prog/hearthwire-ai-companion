@@ -4,7 +4,8 @@
 // the engine as the app does: the app style (Material behind it), i18n() as the root context
 // object, image://icon, one Plasmoid host whose settings are main.xml's
 // defaults and never saved. Fixture mode is on, so no test can start a
-// helper. Run: hearthwire-qmltests -input <synced test file>.
+// helper; the Notifier sends nothing (Off, or Record for tst_notification).
+// Run: hearthwire-qmltests -input <synced test file>.
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickStyle>
@@ -15,6 +16,7 @@
 #include "IconProvider.h"
 #include "ImportPaths.h"
 #include "LocalizedContext.h"
+#include "Notifier.h"
 #include "PlasmoidHost.h"
 #include "ProcessRunner.h"
 
@@ -37,6 +39,10 @@ public Q_SLOTS:
     void applicationAvailable()
     {
         hwDropEnvironmentImportPaths();
+        // The Notifier stays Off (counts only) unless the test asks for
+        // Record; never Bus.
+        if (qgetenv("HW_QMLTEST_NOTIFIER") == "record")
+            Notifier::setDefaultMode(Notifier::Mode::Record);
         // The app's style, as main.cpp sets it.
         QQuickStyle::setStyle(QStringLiteral("Hearthwire.Style"));
         QQuickStyle::setFallbackStyle(QStringLiteral("Material"));

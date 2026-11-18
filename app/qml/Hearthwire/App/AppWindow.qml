@@ -5,16 +5,29 @@ import QtQuick.Controls.Material
 import Hearthwire.Compat.Kirigami as Kirigami
 import Hearthwire.Compat.Plasmoid
 import Hearthwire.App
+import "qrc:/qt/qml/Hearthwire/Plasmoid/SettingsLogic.js" as SettingsLogic
 
 // The app window: the plasmoid's main.qml (unchanged, from the synced
 // Hearthwire.Plasmoid module) lives here without a panel, and its
 // fullRepresentation fills the window. expanded follows the window: shown
-// = expanded. main.qml's own `expanded = false` (the popup's Minimize
-// button) hides the window only with hideOnCollapse, which stays off until
-// R3 gives a hidden window a way back (single instance, tray): until then
-// a hidden window would leave a process running with no window (review-4
-// S3), so expanded is set back to true and the window stays.
-// `expanded = true` shows and raises a hidden window.
+// = expanded. `expanded = true` shows and raises a hidden window.
+// Task 012 R3.4:
+// - Minimize (main.qml's `expanded = false`, the popup's button) hides the
+//   window only while this copy owns the single-instance name
+//   (hideOnCollapse = App.instance.available): it keeps running (refresh,
+//   alerts) and a new launch, --toggle or --tab brings it back. Without a
+//   session bus nothing could bring it back (review-4 S3), so expanded is
+//   set back to true and the window stays.
+// - Closing the window (its close button, Hyprland's killactive, Super+W)
+//   quits the app; an open Settings dialog closes too and its unapplied
+//   changes are dropped, as Cancel + Discard would, without asking. The
+//   helpers stop as the engine is torn down.
+// - A compositor's own minimize needs nothing here.
+// - Focus loss never hides the window (main.qml's hideOnWindowDeactivate
+//   is a panel popup's and is ignored).
+// - Show(tab) / Toggle() from a later launch (SingleInstance.h) pick the
+//   tab through SettingsLogic.shortcutPlan(), as the plasmoid's shortcut
+//   does; Plasmoid.activated is not sent (shortcutOpens is panel-only).
 // Settings opens from Plasmoid.internalAction("configure").
 ApplicationWindow {
     id: window
@@ -30,8 +43,8 @@ ApplicationWindow {
     Material.background: Kirigami.Theme.backgroundColor
     Material.foreground: Kirigami.Theme.textColor
 
-    // R3 turns this on (with single instance or a tray).
-    readonly property bool hideOnCollapse: false
+    // Only a copy others can reach (single instance) may hide.
+    readonly property bool hideOnCollapse: App.instance.available
 
     // main.qml's PlasmoidItem (created at run time, so untyped here).
     property var plasmoidItem: null
@@ -79,9 +92,7 @@ ApplicationWindow {
         function onExpandedChanged() {
             var expanded = window.plasmoidItem.expanded
             if (expanded && !window.visible) {
-                window.show()
-                window.raise()
-                window.requestActivate()
+                App.present(window)
             } else if (!expanded && window.visible) {
                 if (window.hideOnCollapse)
                     window.hide()
@@ -89,6 +100,73 @@ ApplicationWindow {
                     window.plasmoidItem.expanded = true
             }
         }
+    }
+
+    // A later launch: show on a tab ("" keeps the tab).
+    function showTab(tab) {
+        var root = window.plasmoidItem
+        var plan = null
+        if (root && tab !== "") {
+            // The linter can't see into a qrc: JS import.
+            // qmllint disable missing-property
+            plan = SettingsLogic.shortcutPlan(tab, root.popupTabs, root.chatSiteIds.indexOf("ollama") >= 0)
+            // qmllint enable missing-property
+            if (plan.tab !== "")
+                root.popupTab = plan.tab
+            if (plan.site !== "")
+                root.chatSiteId = plan.site
+            if (plan.focusInput)
+                root.ollamaFocusRequested()
+        }
+        window.bringUp()
+    }
+
+    // --toggle: hide a shown, active window; else show it.
+    function toggle() {
+        var root = window.plasmoidItem
+        if (window.visible && window.active) {
+            // Hidden, not presented: the call's token is not kept for later.
+            App.dropToken()
+            if (root)
+                root.expanded = false
+            return
+        }
+        window.bringUp()
+    }
+
+    // Expanded and presented exactly once (the call's token is used once,
+    // for the one requestActivate()): a hidden window is presented by
+    // onExpandedChanged above, a shown one here.
+    function bringUp() {
+        var root = window.plasmoidItem
+        if (root && !root.expanded && !window.visible) {
+            root.expanded = true
+            if (window.visible)
+                return
+        }
+        if (root)
+            root.expanded = true
+        App.present(window)
+    }
+
+    Connections {
+        target: App.instance
+        function onShowRequested(tab) {
+            window.showTab(tab)
+        }
+        function onToggleRequested() {
+            window.toggle()
+        }
+        // The name was lost: nothing can bring a hidden window back.
+        function onAvailableChanged() {
+            if (!App.instance.available && !window.visible)
+                window.showTab("")
+        }
+    }
+
+    onClosing: {
+        settingsWindow.dropAndClose()
+        App.quit()
     }
 
     Connections {

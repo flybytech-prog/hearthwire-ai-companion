@@ -348,6 +348,9 @@ bool ProcessRunner::passedToHelper(const QString &name)
         QStringLiteral("XCURSOR_SIZE"), QStringLiteral("GTK_THEME"), QStringLiteral("GDK_SCALE"),
         QStringLiteral("GDK_DPI_SCALE"), QStringLiteral("GDK_BACKEND"), QStringLiteral("DESKTOP_SESSION"),
         QStringLiteral("KDE_FULL_SESSION"), QStringLiteral("KDE_SESSION_VERSION")};
+    // The app's activation token (task 012 R3.1) is the window's, never the helper's.
+    if (name == QLatin1String("XDG_ACTIVATION_TOKEN"))
+        return false;
     return exact.contains(name) || name.startsWith(QLatin1String("XDG_")) || name.startsWith(QLatin1String("LC_"));
 }
 

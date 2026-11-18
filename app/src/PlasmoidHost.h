@@ -74,8 +74,9 @@ Q_SIGNALS:
     void busyChanged();
     void contextualActionsChanged();
     void configureRequested();
-    // Plasma: the applet's global shortcut. The app sends it for its
-    // keybind or a second launch (later slices).
+    // Plasma: the applet's global shortcut. The app never sends it: a later
+    // launch (--toggle/--tab) goes through AppWindow.qml's Show/Toggle
+    // handling; Settings' shortcutOpens is panel-only (R4 hides that row).
     void activated();
 
 private:

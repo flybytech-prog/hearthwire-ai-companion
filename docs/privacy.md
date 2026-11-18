@@ -1266,6 +1266,42 @@ Plasma widget never sets it. For the widget nothing changes.
   background, are replaced by the app's own, and so are the theme's
   critical, warning and good colours together when they are too grey or
   too alike in hue to tell apart.
+- **QML folders only you or root can change.** The QML folders the app loads
+  from (Qt's own, such as `/usr/lib/qt6/qml`) are used only when that folder
+  and every folder above it belong to root or to you and nobody else can
+  write to them (a root-owned sticky folder such as `/tmp` above it
+  excepted). What is inside that folder (the module folders and their
+  files) is not checked: it is trusted as installed. Any other folder is
+  left out; the app logs how many, never which. If Qt's own folder is left
+  out, the app does not start (exit 3).
+- **One copy, and what other programs can ask it.** The app runs once per
+  session. It owns the name `io.github.flybytechprog.hearthwire.hyprland` on
+  your session bus, and launching it again (or `hearthwire-hyprland
+  --toggle` / `--tab usage|chat|ollama`, for example from a Hyprland key
+  binding) only asks the running copy to show itself on a tab, or to hide
+  or show. That is all any program can ask it over the bus: show, hide, pick
+  a tab, with the desktop's activation token so the window may take the
+  focus. Nothing is read, returned, changed or started that way: no
+  settings, no usage, no chat, no helper. Only your own programs can ask (a
+  call from another user is refused), and a program of yours that takes the
+  name first would only get those same requests. The activation token is
+  never logged and never passed to the helper. Without a session bus the
+  app simply runs on its own.
+- **Notifications.** Usage alerts and settings-backup results are shown
+  through the desktop's notification service (`org.freedesktop.Notifications`)
+  with the same text as the widget's: the provider and limit names from the
+  catalog, a whole percentage, or a fixed backup message; never helper
+  output, sign-ins or chat. They are marked transient, so a daemon that
+  honours that keeps no history of them, but the notification daemon in use
+  (and any program watching your session bus) sees the text, and some
+  daemons keep a history anyway. The app never logs their text.
+- **Closing and Minimize.** Closing the window (its close button or
+  Hyprland's close shortcut) quits the app; an open Settings window closes
+  with it and changes not yet applied are dropped. The popup's Minimize
+  button hides the window and the app keeps running (refreshing usage and
+  sending alerts) until you launch it again or use `--toggle`/`--tab`;
+  without a session bus Minimize leaves the window where it is, since
+  nothing could bring it back.
 
 ## Upgrading from Hearthside
 

@@ -22,6 +22,14 @@
 //   apart (MinStatusChroma, MinStatusHueDistance).
 // Anything else (no Omarchy, a missing or refused file) gives the built-in
 // palette, dark or light as the system colour scheme says.
+//
+// The file is read on the GUI thread, synchronously (review-4-security
+// INFO 4; kept on purpose, task 012 R3.7b): it sits in the same home as
+// settings.json, which is read the same way at start, and fontconfig, the
+// icon theme and Qt's QML cache read from there synchronously too, so a
+// stalled home stalls the app anyway. The read itself is bounded: one
+// regular file of at most 64 KiB, opened O_NONBLOCK | O_NOFOLLOW (a FIFO
+// or a device is refused before any read), once per settled change.
 #pragma once
 
 #include <QByteArray>
@@ -108,6 +116,8 @@ constexpr double MinAccentContrast = 3.0;
 // (max - min of the sRGB channels, 0..1) of at least MinStatusChroma, and
 // every two of them a hue at least MinStatusHueDistance degrees apart.
 // Otherwise all three are the built-in ones (distinctStatus()).
+// 0.15 kept by the user (2026-11-17, review-5 nit 2): the near-grey stock
+// themes (ethereal, last-horizon, about 0.06) get the built-in colours.
 constexpr double MinStatusChroma = 0.15;
 constexpr double MinStatusHueDistance = 20.0;
 

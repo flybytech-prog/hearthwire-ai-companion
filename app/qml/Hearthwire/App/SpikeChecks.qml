@@ -24,6 +24,9 @@ Item {
     property var emitted: []
     property int reemitsBefore: 0
     property string holdStamp: ""
+    property bool chatShownBefore: false
+    property bool activeBefore: false
+    property int presentsBefore: 0
     // QML warnings before Settings first opens (round 2: a TypeError while a
     // page goes away must fail a check, not only move the count).
     property int qmlWarningsBefore: -1
@@ -270,12 +273,73 @@ Item {
             appWindow.plasmoidItem.expanded = false
             return 300
         },
+        // R3.4 (M16): without single instance nothing could bring a hidden
+        // window back, so Minimize keeps it; with it, Minimize hides.
         function () {
-            // Until R3 (review-4 S3): no hidden window, so no process left
-            // running without one; expanded is set back.
-            check("expanded = false keeps the window (no hidden process until R3)",
-                  appWindow.hideOnCollapse === false && appWindow.visible === true
-                  && appWindow.plasmoidItem.expanded === true)
+            check("M16a: expanded = false keeps the window without single instance",
+                  App.instance.available === false && appWindow.hideOnCollapse === false
+                  && appWindow.visible === true && appWindow.plasmoidItem.expanded === true)
+            App.simulateInstance(true)
+            appWindow.plasmoidItem.expanded = false
+            return 300
+        },
+        function () {
+            check("M16b: with single instance, expanded = false hides the window (the app keeps running)",
+                  appWindow.hideOnCollapse === true && appWindow.visible === false
+                  && appWindow.plasmoidItem.expanded === false)
+            checks.chatShownBefore = config.showChatTab
+            config.showChatTab = false
+            checks.presentsBefore = App.presents()
+            App.simulateShow("chat", "hw-check-token")
+            return 300
+        },
+        function () {
+            check("M16c: Show(chat) with Chat hidden shows the window on Usage",
+                  appWindow.visible === true && appWindow.plasmoidItem.expanded === true
+                  && appWindow.plasmoidItem.popupTab === "usage", "tab " + appWindow.plasmoidItem.popupTab)
+            // review-6 L1: one present(), so the token goes to the one activation.
+            check("showing a hidden window presents it once and uses the token",
+                  App.presents() - checks.presentsBefore === 1 && App.tokenPending() === false,
+                  (App.presents() - checks.presentsBefore) + " present(s)")
+            config.showChatTab = checks.chatShownBefore
+            checks.activeBefore = appWindow.active
+            checks.presentsBefore = App.presents()
+            App.simulateToggle("hw-check-token")
+            return 300
+        },
+        function () {
+            check("Toggle on a shown, active window hides it", checks.activeBefore === true && appWindow.visible === false,
+                  "active before " + checks.activeBefore)
+            // review-6 I2: the hiding call's token is not kept for a later present().
+            check("the hiding Toggle keeps no token and presents nothing",
+                  App.tokenPending() === false && App.presents() === checks.presentsBefore)
+            App.simulateToggle()
+            return 300
+        },
+        function () {
+            check("the next Toggle shows it again", appWindow.visible === true && appWindow.plasmoidItem.expanded === true)
+            check("the showing Toggle presents once", App.presents() - checks.presentsBefore === 1,
+                  (App.presents() - checks.presentsBefore) + " present(s)")
+            checks.presentsBefore = App.presents()
+            App.simulateShow("", "hw-check-token")
+            return 300
+        },
+        function () {
+            check("Show on a shown window presents it once and uses the token",
+                  appWindow.visible === true && App.presents() - checks.presentsBefore === 1 && App.tokenPending() === false,
+                  (App.presents() - checks.presentsBefore) + " present(s)")
+            appWindow.plasmoidItem.expanded = false
+            return 300
+        },
+        // review-6 L4: losing the name brings a hidden window back.
+        function () {
+            check("M16d: hidden before the name is lost", appWindow.visible === false && App.instance.available === true)
+            App.simulateInstance(false)
+            return 300
+        },
+        function () {
+            check("M16d: losing the name shows the hidden window",
+                  App.instance.available === false && appWindow.visible === true && appWindow.plasmoidItem.expanded === true)
             Plasmoid.internalAction("configure").trigger()
             return 800
         },
@@ -314,6 +378,21 @@ Item {
             check("the URL guard is installed (a probe outside the app is refused)",
                   error.indexOf("hearthwire-refused") >= 0 && App.guardRefusals() === 1,
                   "refusals " + App.guardRefusals())
+            Plasmoid.internalAction("configure").trigger()
+            return 800
+        },
+        // R3.4: closing the window quits, Settings and its changes go too.
+        function () {
+            page.cfg_refreshInterval = 333
+            App.holdQuit(true)
+            appWindow.close()
+            return 300
+        },
+        function () {
+            check("closing the window quits; open Settings closes without asking, its change dropped",
+                  App.quitRequests() === 1 && settings.visible === false && settings.promptOpen === false
+                  && config.refreshInterval === 120 && App.storedValue("refreshInterval") === 120,
+                  "quit " + App.quitRequests() + ", refreshInterval " + config.refreshInterval)
             return -1
         }
     ]

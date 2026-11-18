@@ -14,6 +14,7 @@
 #include <QTest>
 #include <QtQml/qqmlextensionplugin.h>
 
+#include <cmath>
 #include <cstdio>
 #include <memory>
 #include <sys/stat.h>
@@ -419,6 +420,44 @@ private Q_SLOTS:
         // Links are not status colours: the theme's (here the built-in
         // blue, Minimal has none).
         QCOMPARE(p.color(Window, LinkColor), builtin.blue);
+    }
+
+    // Hue distance wraps around 0/360 (review-5 nit 1): red at 350 and
+    // yellow at 9 are 19 degrees apart, not 341.
+    void statusHueWrapsAround_data()
+    {
+        QTest::addColumn<QColor>("red");
+        QTest::addColumn<QColor>("yellow");
+        QTest::addColumn<double>("apart");
+        QTest::addColumn<bool>("own");
+        const QColor red = QColor::fromHsv(350, 200, 230).toRgb();
+        QTest::newRow("red 350, yellow 9 (19 degrees across 0): built-in")
+            << red << QColor::fromHsv(9, 200, 230).toRgb() << 19.0 << false;
+        QTest::newRow("red 350, yellow 11 (21 degrees across 0): own")
+            << red << QColor::fromHsv(11, 200, 230).toRgb() << 21.0 << true;
+    }
+
+    void statusHueWrapsAround()
+    {
+        QFETCH(QColor, red);
+        QFETCH(QColor, yellow);
+        QFETCH(double, apart);
+        QFETCH(bool, own);
+        const QColor green = QColor::fromRgb(80, 200, 80);
+        const QByteArray text = Minimal + "red = \"" + red.name().toLatin1() + "\"\nyellow = \"" + yellow.name().toLatin1()
+            + "\"\ngreen = \"" + green.name().toLatin1() + "\"\n";
+        const std::optional<Source> source = parse(text);
+        QVERIFY(source.has_value());
+        // The row is what it says, after the trip through "#rrggbb".
+        const double hueRed = source->red.toHsv().hsvHueF() * 360.0;
+        const double hueYellow = source->yellow.toHsv().hsvHueF() * 360.0;
+        QVERIFY2(hueRed > 340.0 && hueYellow < 20.0, qPrintable(QStringLiteral("hues %1, %2").arg(hueRed).arg(hueYellow)));
+        QVERIFY(std::fabs(360.0 - hueRed + hueYellow - apart) < 0.6);
+        QCOMPARE(distinctStatus(source->red, source->yellow, source->green), own);
+        const Palette p = derive(*source);
+        const Source builtin = builtIn(true);
+        QCOMPARE(p.color(Window, NegativeTextColor), own ? source->red : builtin.red);
+        QCOMPARE(p.color(Window, NeutralTextColor), own ? source->yellow : builtin.yellow);
     }
 
     void textOnTheAccentReads()

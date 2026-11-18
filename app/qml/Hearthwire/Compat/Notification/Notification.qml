@@ -1,8 +1,13 @@
 import QtQml
 
-// Notification (KNotification): SPIKE: sendEvent() is counted, nothing is
-// shown; the Notifier (later) replaces it.
+// Notification (KNotification): sendEvent() hands the event to the
+// Notifier (Notifier.h), which shows it through the desktop's notification
+// daemon in the app, or only counts it (QML tests, fixture builds, no
+// session bus). No actions. As in KNotification, autoDelete (the default)
+// destroys the object once the event is sent.
 QtObject {
+    id: notification
+
     enum Urgency { DefaultUrgency = -1, LowUrgency = 10, NormalUrgency = 50, HighUrgency = 70, CriticalUrgency = 90 }
 
     property string componentName
@@ -17,7 +22,10 @@ QtObject {
     signal closed()
 
     function sendEvent() {
-        sent += 1
+        Notifier.send(notification.eventId, notification.title, notification.text, notification.urgency)
+        notification.sent += 1
+        if (notification.autoDelete)
+            Qt.callLater(notification.destroy)
     }
     function close() {
         closed()

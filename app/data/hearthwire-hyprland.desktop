@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Hearthwire
+GenericName=AI usage and chat
+Comment=AI subscription usage and chat sites
+Exec=hearthwire-hyprland
+Icon=hearthwire
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=hearthwire-hyprland
+SingleMainWindow=true

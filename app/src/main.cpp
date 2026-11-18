@@ -11,10 +11,21 @@
 //   --shots DIR        save usage.png and one settings-<page>.png per settings
 //                      page, then quit
 //   --checks           run the app checks (SpikeChecks.qml), then quit
+//   --session-bus      use the session bus (single instance, notifications);
+//                      without it a fixture build never connects to a bus
+//
+// Options (every build): --toggle, or --tab usage|chat|ollama (not both).
+// One copy per session (SingleInstance.h): a later launch asks the running
+// one to show itself (Show(tab, token)) or toggle (Toggle(token)) and ends
+// with 0; 1 when the running copy did not answer; 2 for any usage error
+// (an unknown option, a missing value, an extra argument, both options, a
+// tab outside the three), before any bus use.
+// Without a session bus the app runs alone, without single instance.
 //
 // The look follows the Omarchy theme (ThemeWatcher.h) through the app's
 // Qt Quick Controls style, Hearthwire.Style (Material behind it).
 #include <QCommandLineParser>
+#include <QDBusConnection>
 #include <QDir>
 #include <QGuiApplication>
 #include <QIcon>
@@ -32,10 +43,13 @@
 #include "ConfigStore.h"
 #include "IconProvider.h"
 #include "ImportPaths.h"
+#include "ImportTrust.h"
 #include "KirigamiCompat.h"
 #include "LocalizedContext.h"
+#include "Notifier.h"
 #include "PlasmoidHost.h"
 #include "ProcessRunner.h"
+#include "SingleInstance.h"
 #include "ThemeWatcher.h"
 #include "UrlGuard.h"
 
@@ -108,8 +122,62 @@ int main(int argc, char *argv[])
     parser.addOption({QStringLiteral("config-dir"), QStringLiteral("Settings folder."), QStringLiteral("dir")});
     parser.addOption({QStringLiteral("shots"), QStringLiteral("Save screenshots there, then quit."), QStringLiteral("dir")});
     parser.addOption({QStringLiteral("checks"), QStringLiteral("Run the config dialog checks, then quit.")});
+    parser.addOption({QStringLiteral("session-bus"), QStringLiteral("Use the session bus (tests on a private bus only).")});
 #endif
-    parser.process(app);
+    parser.addOption({QStringLiteral("toggle"), QStringLiteral("Show the window, or hide it when it is shown and active.")});
+    parser.addOption({QStringLiteral("tab"), QStringLiteral("Show the window on this tab: usage, chat or ollama."), QStringLiteral("tab")});
+    // parse(), not process(): process() ends a bad command line with 1, the
+    // code for "another copy did not answer". Every usage error is 2.
+    if (!parser.parse(app.arguments())) {
+        std::fprintf(stderr, "hearthwire-hyprland: unknown option or missing value; see --help\n");
+        return 2;
+    }
+    if (parser.isSet(QStringLiteral("help")) || parser.isSet(QStringLiteral("help-all")))
+        parser.showHelp(0);
+    if (parser.isSet(QStringLiteral("version")))
+        parser.showVersion();
+    if (!parser.positionalArguments().isEmpty()) {
+        std::fprintf(stderr, "hearthwire-hyprland: unexpected argument; see --help\n");
+        return 2;
+    }
+
+    // Checked before any bus use.
+    const bool toggle = parser.isSet(QStringLiteral("toggle"));
+    const QString tab = parser.value(QStringLiteral("tab"));
+    if ((toggle && parser.isSet(QStringLiteral("tab")))
+        || (parser.isSet(QStringLiteral("tab")) && (tab.isEmpty() || !SingleInstance::validTab(tab)))) {
+        std::fprintf(stderr, "hearthwire-hyprland: use --toggle or --tab usage|chat|ollama, not both\n");
+        return 2;
+    }
+
+    // Single instance, before any settings, theme, helper or QML.
+#ifdef HW_FIXTURES
+    const bool useBus = parser.isSet(QStringLiteral("session-bus"));
+#else
+    const bool useBus = true;
+#endif
+    const QDBusConnection bus = useBus ? QDBusConnection::sessionBus() : QDBusConnection(QStringLiteral("hearthwire-no-bus"));
+    auto *instance = new SingleInstance(bus, &app);
+    if (useBus) {
+        SingleInstance::Claim claim = instance->claim();
+        if (claim == SingleInstance::Claim::Taken) {
+            // forward() filters it (the same rule as the receiving side).
+            const QString token = qEnvironmentVariable("XDG_ACTIVATION_TOKEN");
+            const SingleInstance::Forward forwarded = SingleInstance::forward(bus, toggle, tab, token);
+            if (forwarded == SingleInstance::Forward::Done)
+                return 0;
+            if (forwarded == SingleInstance::Forward::NoOwner)
+                claim = instance->claim();
+            if (claim != SingleInstance::Claim::Claimed) {
+                std::fprintf(stderr, "hearthwire-hyprland: another copy is running but did not answer\n");
+                return 1;
+            }
+        }
+        if (claim == SingleInstance::Claim::NoBus)
+            std::fprintf(stderr, "hearthwire-hyprland: no session bus; running without single instance\n");
+        else
+            Notifier::setDefaultMode(Notifier::Mode::Bus);
+    }
 
     QString settingsFile = ConfigStore::defaultFile();
 #ifdef HW_FIXTURES
@@ -144,7 +212,7 @@ int main(int argc, char *argv[])
     host->setConfiguration(store);
     PlasmoidHost::setInstance(host);
 
-    auto *tools = new AppTools(host, &app);
+    auto *tools = new AppTools(host, instance, &app);
 #ifdef HW_FIXTURES
     tools->shotsDir = parser.value(QStringLiteral("shots"));
     tools->checks = parser.isSet(QStringLiteral("checks"));
@@ -157,7 +225,8 @@ int main(int argc, char *argv[])
         // Made before the engine, so it outlives it.
         std::unique_ptr<UrlGuard> guard;
         QQmlApplicationEngine engine;
-        engine.setImportPathList(hwImportPaths(engine.importPathList()));
+        // Only folders nobody but root or the user can change (ImportTrust.h).
+        engine.setImportPathList(hwTrustedImportPaths(hwImportPaths(engine.importPathList())));
         guard = std::make_unique<UrlGuard>(engine.importPathList());
         engine.addUrlInterceptor(guard.get());
         engine.addImageProvider(QStringLiteral("icon"), new IconProvider);
@@ -165,6 +234,9 @@ int main(int argc, char *argv[])
         QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(3); },
                          Qt::QueuedConnection);
         engine.loadFromModule("Hearthwire.App", "AppWindow");
+        // --tab on the first copy: that tab (as a later launch would ask).
+        if (!tab.isEmpty())
+            QMetaObject::invokeMethod(instance, [instance, tab] { instance->Show(tab, QString()); }, Qt::QueuedConnection);
         code = app.exec();
         // The engine (and every DataSource, which stops its helpers) goes first.
     }
