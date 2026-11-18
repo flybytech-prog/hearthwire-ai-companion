@@ -3,10 +3,12 @@ import QtQuick.Controls
 import Hearthwire.Compat.Plasmoid
 import Hearthwire.App
 
-// FIXTURE BUILDS ONLY (task 012; HW_FIXTURES=ON): with --shots and/or --checks, drives the
+// FIXTURE BUILDS ONLY (task 012; HW_FIXTURES=ON): with --checks, drives the
 // app through the Usage tab and the settings dialog and prints one
 // "SPIKE CHECK <name>: PASS|FAIL" line per Plasma semantic it compares,
-// then quits. Without either option it does nothing.
+// then quits; the last checks prove the URL guard is installed and refused
+// nothing else. With --shots only, saves the Usage tab and every settings
+// page. Without either option it does nothing.
 Item {
     id: checks
 
@@ -37,6 +39,44 @@ Item {
             check("screenshot " + name, App.grab(window, name))
     }
 
+    property real defaultWidth: 0
+
+    // The Usage tab for usage.png (the popup opens on Chat by default).
+    function showUsage() {
+        if (appWindow.plasmoidItem)
+            appWindow.plasmoidItem.popupTab = "usage"
+    }
+
+    // The right edge, in form's coordinates, of the furthest visible item
+    // under item.
+    function rightEdge(item, form) {
+        if (!item || !item.visible)
+            return 0
+        var edge = item.width > 0 ? item.mapToItem(form, item.width, 0).x : 0
+        for (var i = 0; i < item.children.length; i++)
+            edge = Math.max(edge, checks.rightEdge(item.children[i], form))
+        return edge
+    }
+
+    // The first ComboBox under item (QQC2's, from the app style).
+    function findCombo(item) {
+        if (!item)
+            return null
+        if (item.implicitContentWidthPolicy !== undefined && item.popup !== undefined)
+            return item
+        for (var i = 0; i < item.children.length; i++) {
+            var found = checks.findCombo(item.children[i])
+            if (found)
+                return found
+        }
+        if (item.contentItem && item.contentItem !== item && item.contentItem.parent !== item) {
+            var inside = checks.findCombo(item.contentItem)
+            if (inside)
+                return inside
+        }
+        return null
+    }
+
     Connections {
         target: checks.config
         function onValueChanged(key, value) {
@@ -47,6 +87,7 @@ Item {
     // Each step returns how long to wait before the next, in ms.
     readonly property var steps: [
         function () {
+            checks.showUsage()
             return 1500
         },
         function () {
@@ -75,9 +116,33 @@ Item {
                   && page.cfg_refreshIntervalDefault === config.refreshIntervalDefault
                   && page.cfg_refreshIntervalDefault === 300)
             check("Apply disabled after open", settings.applyEnabled === false)
+            // R2 look: the app style, and the form in two columns at the default size.
+            var combo = checks.findCombo(page)
+            check("the app style sizes a ComboBox to its widest item", combo !== null
+                  && combo.implicitContentWidthPolicy === 1, combo ? "policy " + combo.implicitContentWidthPolicy : "none")
+            var edge = checks.rightEdge(page.mainItem, page.mainItem)
+            check("nothing on General extends past the form's edge (default size)",
+                  page.mainItem !== null && edge <= page.mainItem.width + 1,
+                  "right edge " + Math.round(edge) + ", form " + Math.round(page.mainItem.width)
+                  + (page.mainItem.wideMode ? ", two columns" : ", one column"))
             shot(settings, "settings-general.png")
             if (!App.runChecks())
                 return -1
+            checks.defaultWidth = settings.width
+            settings.width = settings.minimumWidth
+            return 600
+        },
+        function () {
+            var edge = checks.rightEdge(page.mainItem, page.mainItem)
+            check("nothing on General extends past the form's edge (minimum size)",
+                  page.mainItem !== null && edge <= page.mainItem.width + 1,
+                  "right edge " + Math.round(edge) + ", form " + Math.round(page.mainItem.width)
+                  + (page.mainItem.wideMode ? ", two columns" : ", one column"))
+            shot(settings, "settings-general-min.png")
+            settings.width = checks.defaultWidth
+            return 600
+        },
+        function () {
             page.cfg_refreshInterval = 60
             return 50
         },
@@ -137,6 +202,9 @@ Item {
         function () {
             check("Discard opens the other page", settings.currentSource === "configUsage.qml"
                   && page !== null && page.cfg_usageMode === "remaining")
+            check("the AI Provider Settings list opens at its top (header not cut off)",
+                  page.view.contentY === page.view.originY && page.view.headerItem.height > 0,
+                  "contentY " + page.view.contentY + ", originY " + page.view.originY)
             shot(settings, "settings-usage.png")
             page.cfg_usageMode = "used"
             settings.accept()
@@ -198,9 +266,92 @@ Item {
             check("no QML warning while Settings opened, applied and closed its pages",
                   checks.qmlWarningsBefore >= 0 && App.qmlWarnings() === checks.qmlWarningsBefore,
                   (App.qmlWarnings() - checks.qmlWarningsBefore) + " new")
+            // R2: main.qml's `expanded = false` (the popup's Minimize button).
+            appWindow.plasmoidItem.expanded = false
+            return 300
+        },
+        function () {
+            // Until R3 (review-4 S3): no hidden window, so no process left
+            // running without one; expanded is set back.
+            check("expanded = false keeps the window (no hidden process until R3)",
+                  appWindow.hideOnCollapse === false && appWindow.visible === true
+                  && appWindow.plasmoidItem.expanded === true)
+            Plasmoid.internalAction("configure").trigger()
+            return 800
+        },
+        // R2: Escape = Cancel, Return = OK.
+        function () {
+            page.cfg_refreshInterval = 120
+            check("Escape: sent", App.sendKey(settings, Qt.Key_Escape))
+            return 200
+        },
+        function () {
+            check("Escape with changes asks first (Cancel)", settings.visible && settings.promptOpen === true)
+            settings.discard()
+            return 300
+        },
+        function () {
+            check("Discard after Escape closes without storing", settings.visible === false && config.refreshInterval === 900)
+            Plasmoid.internalAction("configure").trigger()
+            return 800
+        },
+        function () {
+            page.cfg_refreshInterval = 120
+            check("Return: sent", App.sendKey(settings, Qt.Key_Return))
+            return 300
+        },
+        function () {
+            check("Return applies and closes (OK)", settings.visible === false && config.refreshInterval === 120
+                  && App.storedValue("refreshInterval") === 120)
+            check("no QML warning in the R2 steps", App.qmlWarnings() === checks.qmlWarningsBefore,
+                  (App.qmlWarnings() - checks.qmlWarningsBefore) + " new")
+            // The URL guard refused nothing the app itself loads...
+            check("the URL guard refused nothing in the whole run", App.guardRefusals() === 0,
+                  App.guardRefusals() + " refusal(s)")
+            // ...and is installed: a file outside the app and Qt is refused.
+            var probe = Qt.createComponent("file:///hw-guard-probe/none.qml")
+            var error = probe.status === Component.Error ? probe.errorString() : ""
+            check("the URL guard is installed (a probe outside the app is refused)",
+                  error.indexOf("hearthwire-refused") >= 0 && App.guardRefusals() === 1,
+                  "refusals " + App.guardRefusals())
             return -1
         }
     ]
+
+    // --shots without --checks: the Usage tab and every settings page.
+    readonly property var shotSteps: [
+        function () {
+            checks.showUsage()
+            return 1500
+        },
+        function () {
+            shot(appWindow, "usage.png")
+            Plasmoid.internalAction("configure").trigger()
+            return 1500
+        },
+        function () {
+            shot(settings, "settings-general.png")
+            checks.defaultWidth = settings.width
+            settings.width = settings.minimumWidth
+            return 1000
+        },
+        function () {
+            shot(settings, "settings-general-min.png")
+            settings.width = checks.defaultWidth
+            settings.openCategory(settings.configModel.get(1))
+            return 1500
+        },
+        function () {
+            shot(settings, "settings-usage.png")
+            settings.openCategory(settings.configModel.get(2))
+            return 1500
+        },
+        function () {
+            shot(settings, "settings-chat.png")
+            return -1
+        }
+    ]
+    readonly property var plan: App.runChecks() ? checks.steps : checks.shotSteps
 
     Timer {
         id: driver
@@ -209,12 +360,12 @@ Item {
         onTriggered: {
             var wait = -1
             try {
-                wait = checks.steps[checks.step]()
+                wait = checks.plan[checks.step]()
             } catch (error) {
                 checks.check("step " + checks.step, false, String(error))
             }
             checks.step += 1
-            if (wait < 0 || checks.step >= checks.steps.length) {
+            if (wait < 0 || checks.step >= checks.plan.length) {
                 console.info("SPIKE CHECKS: " + checks.failures + " failed")
                 App.finish(checks.failures === 0 ? 0 : 1)
                 return

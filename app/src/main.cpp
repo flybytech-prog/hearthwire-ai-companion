@@ -8,8 +8,12 @@
 // A fixture build (CMake -DHW_FIXTURES=ON, tests only, never shipped) runs
 // no helper at all, answers from the compiled-in fixture book, and takes:
 //   --config-dir DIR   keep settings.json there (default: a new temp folder)
-//   --shots DIR        save usage.png and settings-general.png, then quit
-//   --checks           run the config-dialog checks (SpikeChecks.qml), then quit
+//   --shots DIR        save usage.png and one settings-<page>.png per settings
+//                      page, then quit
+//   --checks           run the app checks (SpikeChecks.qml), then quit
+//
+// The look follows the Omarchy theme (ThemeWatcher.h) through the app's
+// Qt Quick Controls style, Hearthwire.Style (Material behind it).
 #include <QCommandLineParser>
 #include <QDir>
 #include <QGuiApplication>
@@ -28,9 +32,11 @@
 #include "ConfigStore.h"
 #include "IconProvider.h"
 #include "ImportPaths.h"
+#include "KirigamiCompat.h"
 #include "LocalizedContext.h"
 #include "PlasmoidHost.h"
 #include "ProcessRunner.h"
+#include "ThemeWatcher.h"
 #include "UrlGuard.h"
 
 Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_KirigamiPlugin)
@@ -43,6 +49,7 @@ Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_KCMUtilsPlugin)
 Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_NotificationPlugin)
 Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_ConfigurationPlugin)
 Q_IMPORT_QML_PLUGIN(Hearthwire_PlasmoidPlugin)
+Q_IMPORT_QML_PLUGIN(Hearthwire_StylePlugin)
 
 namespace {
 void countMessages(QtMsgType type, const QMessageLogContext &context, const QString &message)
@@ -61,12 +68,21 @@ void countMessages(QtMsgType type, const QMessageLogContext &context, const QStr
 int main(int argc, char *argv[])
 {
     qInstallMessageHandler(countMessages);
+    if (hwRefusedArgument(argc, argv)) {
+        std::fprintf(stderr, "hearthwire-hyprland: -platformpluginpath is not accepted; Qt's plugins come only from Qt's own folder\n");
+        return 2;
+    }
     hwDropEnvironmentImportPaths();
     hwDropEnvironmentPluginPaths();
+    hwDropEnvironmentModulePaths();
     QGuiApplication::setApplicationName(QStringLiteral("hearthwire-hyprland"));
     QGuiApplication::setApplicationVersion(QStringLiteral(HW_VERSION));
     QGuiApplication::setDesktopFileName(QStringLiteral("hearthwire-hyprland"));
-    QQuickStyle::setStyle(QStringLiteral("Material"));
+    // Material, through the app's own style module (qml/Hearthwire/Style).
+    // Material is also named the fallback, so it reads its settings (the
+    // Dense variant below) as when it is the style itself.
+    QQuickStyle::setStyle(QStringLiteral("Hearthwire.Style"));
+    QQuickStyle::setFallbackStyle(QStringLiteral("Material"));
     // Desktop sizes, not touch sizes, unless the user chose otherwise.
     if (qEnvironmentVariableIsEmpty("QT_QUICK_CONTROLS_MATERIAL_VARIANT"))
         qputenv("QT_QUICK_CONTROLS_MATERIAL_VARIANT", "Dense");
@@ -117,6 +133,12 @@ int main(int argc, char *argv[])
                                  ? "hearthwire-hyprland: settings.json is damaged; using defaults (it is kept as settings.json.damaged)\n"
                                  : "hearthwire-hyprland: settings.json can't be read safely; using defaults and not saving\n");
     }
+
+    // The Omarchy theme, followed live; the built-in palette without one.
+    auto *theme = new ThemeWatcher(ThemeWatcher::defaultThemeDir(), &app);
+    QObject::connect(theme, &ThemeWatcher::changed, &app, [theme] { ThemePalette::instance()->setTheme(theme->source()); });
+    theme->start();
+    ThemePalette::instance()->setTheme(theme->source());
 
     auto *host = new PlasmoidHost(&app);
     host->setConfiguration(store);

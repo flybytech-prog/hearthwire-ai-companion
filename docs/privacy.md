@@ -1244,6 +1244,25 @@ Plasma widget never sets it. For the widget nothing changes.
   so adding or replacing a saved prompt or persona there is not available
   (the helper reports a missing tool and never opens KDE's kdialog); saved
   ones can still be listed and removed.
+- **Only Qt's own plugin and QML folders.** The app ignores the variables
+  that name extra folders to load code from: Qt's (`QT_PLUGIN_PATH`,
+  `QT_QPA_PLATFORM_PLUGIN_PATH`, `QML_IMPORT_PATH`, `QML2_IMPORT_PATH`) and
+  those of GTK and GIO, which a GTK platform theme would load (`GTK_PATH`,
+  `GTK_MODULES`, `GTK3_MODULES`, `GIO_EXTRA_MODULES` and the like). It
+  refuses to start with the `-platformpluginpath` argument. The helper and
+  the windows it opens get only a fixed list of the app's variables (paths,
+  locale, session, display), none of these. A Qt theming plugin (a platform
+  theme or style) therefore works only when installed system-wide in Qt's
+  own plugin folder. This does not protect against the session itself:
+  whoever can set the environment the app starts in (for example
+  `LD_PRELOAD`) can still run code in it, so that environment must be one
+  you trust. The app follows the Omarchy theme by reading
+  `~/.local/state/omarchy/current/theme/colors.toml` (only its colours, only
+  a file of yours that only you can change, at most 64 KiB); colours that
+  would not be readable, such as a warning colour too close to the
+  background, are replaced by the app's own, and so are the theme's
+  critical, warning and good colours together when they are too grey or
+  too alike in hue to tell apart.
 
 ## Upgrading from Hearthside
 

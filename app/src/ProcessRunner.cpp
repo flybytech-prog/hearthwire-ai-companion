@@ -232,7 +232,7 @@ void ProcessRunner::start(const QString &source)
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
     const QStringList names = environment.keys();
     for (const QString &name : names) {
-        if (strippedFromHelper(name))
+        if (!passedToHelper(name))
             environment.remove(name);
     }
     for (const auto &word : command.environment)
@@ -306,16 +306,49 @@ bool ProcessRunner::owns(const Job *job, quint64 serial) const
     return std::any_of(m_detached.cbegin(), m_detached.cend(), same);
 }
 
-// What the helper never inherits from the app: the HEARTHWIRE_* variables
-// (the front end is set by the app alone, task 011) and whatever would let
-// the environment run other code inside python3 or the loader (PYTHONPATH,
-// PYTHONSTARTUP, PYTHONHOME, ...; LD_PRELOAD, LD_LIBRARY_PATH, LD_AUDIT; and
-// glibc's GCONV_PATH (iconv modules) and LOCPATH (locale data)).
-bool ProcessRunner::strippedFromHelper(const QString &name)
+// What the helper inherits from the app: an allow-list (review-4 LOW-1),
+// so no variable that loads code into python3, the loader, GTK, GIO or Qt
+// (PYTHON*, LD_*, GCONV_PATH, LOCPATH, GTK_MODULES, GIO_EXTRA_MODULES,
+// QT_PLUGIN_PATH, QML_IMPORT_PATH, ...) and no HEARTHWIRE_* (the front end
+// is set by the app alone, task 011) reaches it or its dialogs. Kept, for
+// what the helper and the programs it starts need (src/hearthwire):
+// - the account and its tools: PATH (tool lookup, login-shell capture),
+//   HOME, USER, LOGNAME, SHELL, TERM (core/environment.py), and
+//   CLAUDE_CONFIG_DIR, CODEX_HOME (core/discovery.py, providers);
+// - its folders and the session: XDG_* (config, data, cache, runtime:
+//   settings backup, locks, the encrypted folder), DBUS_SESSION_BUS_ADDRESS
+//   (secret-tool);
+// - language and time: LANG, LANGUAGE, LC_*, TZ;
+// - the network: SSL_CERT_FILE, SSL_CERT_DIR and the proxy variables
+//   (urllib reads them; both cases);
+// - the passphrase window (hearthwire-askpass, a Qt program; kdialog for
+//   Plasma): WAYLAND_DISPLAY, DISPLAY, XAUTHORITY, the Qt look and scaling
+//   variables that name no folder (QT_QPA_PLATFORM, QT_QPA_PLATFORMTHEME,
+//   QT_STYLE_OVERRIDE, QT_*SCALE*, QT_FONT_DPI,
+//   QT_WAYLAND_DISABLE_WINDOWDECORATION), XCURSOR_THEME, XCURSOR_SIZE,
+//   GTK_THEME, GDK_SCALE, GDK_DPI_SCALE, GDK_BACKEND, DESKTOP_SESSION,
+//   KDE_FULL_SESSION, KDE_SESSION_VERSION.
+// HEARTHWIRE_FRONTEND=app and the command's own HEARTHWIRE_* words are
+// added afterwards.
+bool ProcessRunner::passedToHelper(const QString &name)
 {
-    return name.startsWith(QLatin1String("HEARTHWIRE_")) || name.startsWith(QLatin1String("PYTHON"))
-        || name == QLatin1String("LD_PRELOAD") || name == QLatin1String("LD_LIBRARY_PATH")
-        || name == QLatin1String("LD_AUDIT") || name == QLatin1String("GCONV_PATH") || name == QLatin1String("LOCPATH");
+    static const QStringList exact{
+        QStringLiteral("PATH"), QStringLiteral("HOME"), QStringLiteral("USER"), QStringLiteral("LOGNAME"),
+        QStringLiteral("SHELL"), QStringLiteral("TERM"), QStringLiteral("CLAUDE_CONFIG_DIR"), QStringLiteral("CODEX_HOME"),
+        QStringLiteral("DBUS_SESSION_BUS_ADDRESS"), QStringLiteral("LANG"), QStringLiteral("LANGUAGE"), QStringLiteral("TZ"),
+        QStringLiteral("SSL_CERT_FILE"), QStringLiteral("SSL_CERT_DIR"), QStringLiteral("HTTP_PROXY"),
+        QStringLiteral("HTTPS_PROXY"), QStringLiteral("NO_PROXY"), QStringLiteral("ALL_PROXY"), QStringLiteral("http_proxy"),
+        QStringLiteral("https_proxy"), QStringLiteral("no_proxy"), QStringLiteral("all_proxy"),
+        QStringLiteral("WAYLAND_DISPLAY"), QStringLiteral("DISPLAY"), QStringLiteral("XAUTHORITY"),
+        QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("QT_QPA_PLATFORMTHEME"), QStringLiteral("QT_STYLE_OVERRIDE"),
+        QStringLiteral("QT_SCALE_FACTOR"), QStringLiteral("QT_SCREEN_SCALE_FACTORS"),
+        QStringLiteral("QT_AUTO_SCREEN_SCALE_FACTOR"), QStringLiteral("QT_ENABLE_HIGHDPI_SCALING"),
+        QStringLiteral("QT_SCALE_FACTOR_ROUNDING_POLICY"), QStringLiteral("QT_FONT_DPI"),
+        QStringLiteral("QT_WAYLAND_DISABLE_WINDOWDECORATION"), QStringLiteral("XCURSOR_THEME"),
+        QStringLiteral("XCURSOR_SIZE"), QStringLiteral("GTK_THEME"), QStringLiteral("GDK_SCALE"),
+        QStringLiteral("GDK_DPI_SCALE"), QStringLiteral("GDK_BACKEND"), QStringLiteral("DESKTOP_SESSION"),
+        QStringLiteral("KDE_FULL_SESSION"), QStringLiteral("KDE_SESSION_VERSION")};
+    return exact.contains(name) || name.startsWith(QLatin1String("XDG_")) || name.startsWith(QLatin1String("LC_"));
 }
 
 // Reads what stdout has; past MaxStdout the helper is stopped.

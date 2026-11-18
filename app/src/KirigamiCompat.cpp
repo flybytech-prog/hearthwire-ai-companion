@@ -2,66 +2,28 @@
 
 #include <QFontDatabase>
 #include <QGuiApplication>
-#include <QHash>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQmlProperty>
+#include <QStyleHints>
+
+static_assert(int(Theme::View) == HwTheme::View && int(Theme::Window) == HwTheme::Window
+                  && int(Theme::Button) == HwTheme::Button && int(Theme::Selection) == HwTheme::Selection
+                  && int(Theme::Tooltip) == HwTheme::Tooltip && int(Theme::Complementary) == HwTheme::Complementary
+                  && int(Theme::Header) == HwTheme::Header,
+              "Theme::ColorSet and HwTheme::Set must match");
 
 namespace {
-// Material-like palettes; the real colors will come from ThemeWatcher.
-const QHash<QByteArray, QColor> &palette(bool dark)
+bool systemDark()
 {
-    static const QHash<QByteArray, QColor> darkColors = {
-        {"textColor", QColor(0xe6, 0xe1, 0xe5)},
-        {"disabledTextColor", QColor(0x93, 0x8f, 0x99)},
-        {"highlightedTextColor", QColor(0x1c, 0x1b, 0x1f)},
-        {"activeTextColor", QColor(0x8a, 0xb4, 0xf8)},
-        {"linkColor", QColor(0x8a, 0xb4, 0xf8)},
-        {"visitedLinkColor", QColor(0xc5, 0x8a, 0xf9)},
-        {"negativeTextColor", QColor(0xf2, 0x8b, 0x82)},
-        {"neutralTextColor", QColor(0xfd, 0xd6, 0x63)},
-        {"positiveTextColor", QColor(0x81, 0xc9, 0x95)},
-        {"backgroundColor", QColor(0x1c, 0x1b, 0x1f)},
-        {"alternateBackgroundColor", QColor(0x2b, 0x29, 0x30)},
-        {"highlightColor", QColor(0x8a, 0xb4, 0xf8)},
-        {"activeBackgroundColor", QColor(0x8a, 0xb4, 0xf8)},
-        {"linkBackgroundColor", QColor(0x2b, 0x39, 0x52)},
-        {"visitedLinkBackgroundColor", QColor(0x3d, 0x2b, 0x52)},
-        {"negativeBackgroundColor", QColor(0x52, 0x2b, 0x2b)},
-        {"neutralBackgroundColor", QColor(0x52, 0x46, 0x2b)},
-        {"positiveBackgroundColor", QColor(0x2b, 0x52, 0x36)},
-        {"focusColor", QColor(0x8a, 0xb4, 0xf8)},
-        {"hoverColor", QColor(0x8a, 0xb4, 0xf8)},
-    };
-    static const QHash<QByteArray, QColor> lightColors = {
-        {"textColor", QColor(0x1c, 0x1b, 0x1f)},
-        {"disabledTextColor", QColor(0x79, 0x74, 0x7e)},
-        {"highlightedTextColor", QColor(0xff, 0xff, 0xff)},
-        {"activeTextColor", QColor(0x1a, 0x73, 0xe8)},
-        {"linkColor", QColor(0x1a, 0x73, 0xe8)},
-        {"visitedLinkColor", QColor(0x7b, 0x1f, 0xa2)},
-        {"negativeTextColor", QColor(0xc5, 0x22, 0x1f)},
-        {"neutralTextColor", QColor(0xb0, 0x60, 0x00)},
-        {"positiveTextColor", QColor(0x18, 0x80, 0x38)},
-        {"backgroundColor", QColor(0xfe, 0xfb, 0xff)},
-        {"alternateBackgroundColor", QColor(0xf1, 0xee, 0xf4)},
-        {"highlightColor", QColor(0x1a, 0x73, 0xe8)},
-        {"activeBackgroundColor", QColor(0x1a, 0x73, 0xe8)},
-        {"linkBackgroundColor", QColor(0xd2, 0xe3, 0xfc)},
-        {"visitedLinkBackgroundColor", QColor(0xe9, 0xd5, 0xf5)},
-        {"negativeBackgroundColor", QColor(0xfc, 0xe8, 0xe6)},
-        {"neutralBackgroundColor", QColor(0xfe, 0xf7, 0xe0)},
-        {"positiveBackgroundColor", QColor(0xe6, 0xf4, 0xea)},
-        {"focusColor", QColor(0x1a, 0x73, 0xe8)},
-        {"hoverColor", QColor(0x1a, 0x73, 0xe8)},
-    };
-    return dark ? darkColors : lightColors;
+    return QGuiApplication::styleHints()->colorScheme() != Qt::ColorScheme::Light;
 }
 }
 
 ThemePalette::ThemePalette()
 {
-    m_dark = qEnvironmentVariable("HEARTHWIRE_THEME") != QLatin1String("light");
+    m_palette = HwTheme::derive(HwTheme::builtIn(systemDark()));
+    connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this, &ThemePalette::update);
 }
 
 ThemePalette *ThemePalette::instance()
@@ -70,15 +32,71 @@ ThemePalette *ThemePalette::instance()
     return shared;
 }
 
-QColor ThemePalette::color(const char *role) const
+void ThemePalette::setTheme(const std::optional<HwTheme::Source> &source)
 {
-    return palette(m_dark).value(QByteArray(role));
+    m_theme = source;
+    update();
+}
+
+void ThemePalette::update()
+{
+    const HwTheme::Palette palette = HwTheme::derive(m_theme ? *m_theme : HwTheme::builtIn(systemDark()));
+    if (palette == m_palette)
+        return;
+    m_palette = palette;
+    Q_EMIT changed();
 }
 
 Theme::Theme(QObject *parent)
     : QObject(parent)
 {
-    connect(ThemePalette::instance(), &ThemePalette::changed, this, &Theme::paletteChanged);
+    // A colour set change anywhere can change what an inheriting item shows.
+    connect(ThemePalette::instance(), &ThemePalette::changed, this, &Theme::refresh);
+    if (auto *item = qobject_cast<QQuickItem *>(parent))
+        connect(item, &QQuickItem::parentChanged, this, &Theme::refresh);
+}
+
+void Theme::refresh()
+{
+    Q_EMIT colorSetChanged();
+    Q_EMIT paletteChanged();
+}
+
+Theme::ColorSet Theme::colorSet() const
+{
+    if (m_ownSet)
+        return m_colorSet;
+    if (!m_inherit)
+        return Window;
+    QObject *object = parent();
+    auto *item = qobject_cast<QQuickItem *>(object);
+    QObject *ancestor = item ? static_cast<QObject *>(item->parentItem()) : (object ? object->parent() : nullptr);
+    while (ancestor) {
+        if (auto *theme = qobject_cast<Theme *>(qmlAttachedPropertiesObject<Theme>(ancestor, false)))
+            return theme->colorSet();
+        auto *ancestorItem = qobject_cast<QQuickItem *>(ancestor);
+        ancestor = ancestorItem ? static_cast<QObject *>(ancestorItem->parentItem()) : ancestor->parent();
+    }
+    return Window;
+}
+
+void Theme::setColorSet(ColorSet set)
+{
+    if (m_ownSet && m_colorSet == set)
+        return;
+    m_ownSet = true;
+    m_colorSet = set;
+    // Items below that inherit change too.
+    Q_EMIT ThemePalette::instance()->changed();
+}
+
+void Theme::setInherit(bool inherit)
+{
+    if (m_inherit == inherit)
+        return;
+    m_inherit = inherit;
+    Q_EMIT inheritChanged();
+    Q_EMIT ThemePalette::instance()->changed();
 }
 
 QFont Theme::defaultFont() const

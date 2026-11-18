@@ -106,15 +106,75 @@ private Q_SLOTS:
         QFETCH(bool, allowed);
         UrlGuard guard({QStringLiteral("qrc:/qt/qml"), m_allowed});
         QCOMPARE(guard.allowed(QUrl(url)), allowed);
+        // An allowed local file comes back as the canonical path that was
+        // checked (the same file here: no link on the way).
+        const QUrl expected = QUrl(url).isLocalFile()
+            ? QUrl::fromLocalFile(QFileInfo(QUrl(url).toLocalFile()).canonicalFilePath()) : QUrl(url);
         for (auto type : {QQmlAbstractUrlInterceptor::QmlFile, QQmlAbstractUrlInterceptor::JavaScriptFile,
                           QQmlAbstractUrlInterceptor::QmldirFile}) {
+            const int before = UrlGuard::refusals();
             if (!allowed)
                 QTest::ignoreMessage(QtWarningMsg, Refused);
-            QCOMPARE(guard.intercept(QUrl(url), type) == QUrl(url), allowed);
+            const QUrl result = guard.intercept(QUrl(url), type);
+            if (allowed) {
+                QCOMPARE(result, expected);
+                QCOMPARE(UrlGuard::refusals(), before);
+            } else {
+                QCOMPARE(result, QUrl(QStringLiteral("qrc:/hearthwire-refused/refused.qml")));
+                QCOMPARE(UrlGuard::refusals(), before + 1);
+            }
         }
         QCOMPARE(guard.intercept(QUrl(), QQmlAbstractUrlInterceptor::QmlFile), QUrl());
         // Images and other plain URLs are not the guard's business.
         QCOMPARE(guard.intercept(QUrl(url), QQmlAbstractUrlInterceptor::UrlString), QUrl(url));
+    }
+
+    // Round R2 (check-vs-use): a link in an allowed folder is checked at
+    // its target, and the engine gets that target, never the link: a link
+    // swapped after the check can't lead to another file.
+    void anAllowedLinkComesBackCanonical()
+    {
+        const QString link = m_allowed + "/Fine/Link.qml";
+        QVERIFY(QFile::link(m_allowed + "/Fine/Fine.qml", link));
+        UrlGuard guard({QStringLiteral("qrc:/qt/qml"), m_allowed});
+        QTest::failOnWarning(QRegularExpression("refused"));
+        const QUrl canonical = QUrl::fromLocalFile(QFileInfo(m_allowed + "/Fine/Fine.qml").canonicalFilePath());
+        const QUrl result = guard.intercept(QUrl::fromLocalFile(link), QQmlAbstractUrlInterceptor::QmlFile);
+        QCOMPARE(result, canonical);
+        QVERIFY(result != QUrl::fromLocalFile(link));
+        // The link now points outside: the URL already handed out still
+        // names the checked file, and a new ask is refused.
+        QVERIFY(QFile::remove(link));
+        QVERIFY(QFile::link(m_outside + "/Planted.qml", link));
+        QCOMPARE(result.toLocalFile(), QFileInfo(m_allowed + "/Fine/Fine.qml").canonicalFilePath());
+        const int before = UrlGuard::refusals();
+        QTest::ignoreMessage(QtWarningMsg, Refused);
+        QCOMPARE(guard.intercept(QUrl::fromLocalFile(link), QQmlAbstractUrlInterceptor::QmlFile),
+                 QUrl(QStringLiteral("qrc:/hearthwire-refused/refused.qml")));
+        QCOMPARE(UrlGuard::refusals(), before + 1);
+        QVERIFY(QFile::remove(link));
+    }
+
+    // A path in an allowed folder that does not exist (the engine probes
+    // qmldir candidates) has nothing to load: refused, but not counted or
+    // logged, so a normal run shows 0 refusals.
+    void aMissingFileInAFolderIsRefusedQuietly()
+    {
+        UrlGuard guard({QStringLiteral("qrc:/qt/qml"), m_allowed});
+        QTest::failOnWarning(QRegularExpression("refused"));
+        const int before = UrlGuard::refusals();
+        for (const QString &path : {m_allowed + "/Nothing/qmldir", m_allowed + "/Fine/Missing.qml"}) {
+            QCOMPARE(guard.intercept(QUrl::fromLocalFile(path), QQmlAbstractUrlInterceptor::QmldirFile),
+                     QUrl(QStringLiteral("qrc:/hearthwire-refused/refused.qml")));
+        }
+        QCOMPARE(UrlGuard::refusals(), before);
+        // An empty URL (a Loader without a source) is not a refusal either.
+        QCOMPARE(guard.intercept(QUrl(), QQmlAbstractUrlInterceptor::QmlFile), QUrl());
+        QCOMPARE(UrlGuard::refusals(), before);
+        // A missing file outside the folders is.
+        QTest::ignoreMessage(QtWarningMsg, Refused);
+        guard.intercept(QUrl::fromLocalFile(m_outside + "/Missing.qml"), QQmlAbstractUrlInterceptor::QmlFile);
+        QCOMPARE(UrlGuard::refusals(), before + 1);
     }
 
     void plantedFilesAreRefused_data()

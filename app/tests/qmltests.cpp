@@ -1,7 +1,7 @@
 // hearthwire-qmltests: qmltestrunner for the plasmoid's tests/qml under the
 // app's stand-ins. The stand-in modules are static (as in the app), so a
 // plain qmltestrunner can't load them; this runner links them in and sets up
-// the engine as the app does: Material style, i18n() as the root context
+// the engine as the app does: the app style (Material behind it), i18n() as the root context
 // object, image://icon, one Plasmoid host whose settings are main.xml's
 // defaults and never saved. Fixture mode is on, so no test can start a
 // helper. Run: hearthwire-qmltests -input <synced test file>.
@@ -27,6 +27,7 @@ Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_Plasma5SupportPlugin)
 Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_KCMUtilsPlugin)
 Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_NotificationPlugin)
 Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_ConfigurationPlugin)
+Q_IMPORT_QML_PLUGIN(Hearthwire_StylePlugin)
 
 class Setup : public QObject
 {
@@ -36,7 +37,9 @@ public Q_SLOTS:
     void applicationAvailable()
     {
         hwDropEnvironmentImportPaths();
-        QQuickStyle::setStyle(QStringLiteral("Material"));
+        // The app's style, as main.cpp sets it.
+        QQuickStyle::setStyle(QStringLiteral("Hearthwire.Style"));
+        QQuickStyle::setFallbackStyle(QStringLiteral("Material"));
         // An empty book: every command gets exit code 127, nothing runs.
         ProcessRunner::useFixtures(QStringLiteral(HW_EMPTY_BOOK));
         m_store = new ConfigStore(this);

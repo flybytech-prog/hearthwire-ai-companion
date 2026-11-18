@@ -25,22 +25,36 @@ hw_test(tst_processrunner hwcompat_Plasma5Support Qt6::Qml)
 hw_test(tst_configstore hwcompat_Plasmoid Qt6::Qml)
 hw_test(tst_plasmoidhost hwcompat_Plasmoidplugin Qt6::Quick)
 hw_test(tst_urlguard hwcompat_Plasmoidplugin Qt6::Quick Qt6::QuickControls2)
+hw_test(tst_themewatcher hwcompat_Kirigamiplugin Qt6::Quick)
 
 # Planted plugins for tst_pluginpaths (never installed, never loaded by the app).
-# Test-only: the planted platform plugin needs qpa/ headers.
+# Test-only: the planted platform plugin needs Qt's private qpa/ headers, which
+# some distributions package separately (qt6-base-private-dev and the like).
+# Without them only the image-format half of tst_pluginpaths runs; the
+# platform half skips.
 set(QT_NO_PRIVATE_MODULE_WARNING ON)
-find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
+find_package(Qt6 QUIET COMPONENTS GuiPrivate)
 set(hw_planted ${CMAKE_CURRENT_BINARY_DIR}/planted)
 add_library(hw_planted_image MODULE planted/ImagePlugin.cpp)
 target_link_libraries(hw_planted_image PRIVATE Qt6::Gui)
 set_target_properties(hw_planted_image PROPERTIES AUTOMOC ON LIBRARY_OUTPUT_DIRECTORY ${hw_planted}/plugins/imageformats)
-add_library(hw_planted_platform MODULE planted/PlatformPlugin.cpp)
-target_link_libraries(hw_planted_platform PRIVATE Qt6::Gui Qt6::GuiPrivate)
-set_target_properties(hw_planted_platform PROPERTIES AUTOMOC ON LIBRARY_OUTPUT_DIRECTORY ${hw_planted}/platforms)
+# A planted GTK module (review-4 LOW-1), found through GTK_PATH/modules.
+add_library(hw_planted_gtk MODULE planted/GtkModule.cpp)
+set_target_properties(hw_planted_gtk PROPERTIES OUTPUT_NAME hwplantedgtk LIBRARY_OUTPUT_DIRECTORY ${hw_planted}/gtk/modules)
 hw_test(tst_pluginpaths Qt6::Gui)
-add_dependencies(tst_pluginpaths hw_planted_image hw_planted_platform)
+add_dependencies(tst_pluginpaths hw_planted_image hw_planted_gtk)
 target_compile_definitions(tst_pluginpaths PRIVATE
-    HW_PLANTED_PLUGINS="${hw_planted}/plugins" HW_PLANTED_PLATFORMS="${hw_planted}/platforms")
+    HW_PLANTED_PLUGINS="${hw_planted}/plugins" HW_PLANTED_PLATFORMS="${hw_planted}/platforms"
+    HW_PLANTED_GTK="${hw_planted}/gtk")
+if(TARGET Qt6::GuiPrivate)
+    add_library(hw_planted_platform MODULE planted/PlatformPlugin.cpp)
+    target_link_libraries(hw_planted_platform PRIVATE Qt6::Gui Qt6::GuiPrivate)
+    set_target_properties(hw_planted_platform PROPERTIES AUTOMOC ON LIBRARY_OUTPUT_DIRECTORY ${hw_planted}/platforms)
+    add_dependencies(tst_pluginpaths hw_planted_platform)
+else()
+    message(STATUS "Qt6 GuiPrivate not found: tst_pluginpaths skips its planted platform plugin half")
+    target_compile_definitions(tst_pluginpaths PRIVATE HW_NO_PLANTED_PLATFORM)
+endif()
 
 # --- tests/qml, import lines pointed at the stand-ins and the synced plasmoid.
 # Left out: tests that need more than the app has today.
@@ -78,7 +92,7 @@ target_link_libraries(hearthwire-qmltests PRIVATE
     Qt6::QuickTest Qt6::Quick Qt6::QuickControls2
     hwcompat_Kirigamiplugin hwcompat_PlasmaComponentsplugin hwcompat_PlasmaExtrasplugin
     hwcompat_PlasmaCoreplugin hwcompat_Plasmoidplugin hwcompat_Plasma5Supportplugin
-    hwcompat_KCMUtilsplugin hwcompat_Notificationplugin hwcompat_Configurationplugin)
+    hwcompat_KCMUtilsplugin hwcompat_Notificationplugin hwcompat_Configurationplugin hwstyleplugin)
 
 string(REPLACE "\n" ";" hw_qml_tests "${hw_qml_tests}")
 foreach(name IN LISTS hw_qml_tests)
@@ -88,6 +102,26 @@ foreach(name IN LISTS hw_qml_tests)
     get_filename_component(base ${name} NAME_WE)
     add_test(NAME qml_${base} COMMAND hearthwire-qmltests -input ${HW_QMLTESTS}/${name})
     set_tests_properties(qml_${base} PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 180)
+endforeach()
+
+# The app's own QML tests of its stand-ins and style (tests/qml here).
+file(GLOB hw_app_qml_tests CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_*.qml)
+foreach(file IN LISTS hw_app_qml_tests)
+    get_filename_component(base ${file} NAME_WE)
+    add_test(NAME app_qml_${base} COMMAND hearthwire-qmltests -input ${file})
+    set_tests_properties(app_qml_${base} PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 120)
+endforeach()
+
+# The app itself refuses -platformpluginpath (review-4 LOW-2): one fixed
+# line, exit 2, before Qt reads the argument.
+set(hw_form 0)
+foreach(form IN ITEMS "-platformpluginpath;/nonexistent" "--platformpluginpath;/nonexistent"
+                      "-platformpluginpath=/nonexistent" "--platformpluginpath=/nonexistent")
+    math(EXPR hw_form "${hw_form} + 1")
+    set(id app_refuses_platformpluginpath_${hw_form})
+    add_test(NAME ${id} COMMAND hearthwire-hyprland ${form})
+    set_tests_properties(${id} PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 30
+        PASS_REGULAR_EXPRESSION "hearthwire-hyprland: -platformpluginpath is not accepted; Qt's plugins come only from Qt's own folder")
 endforeach()
 
 # The synced trees themselves, checked independently of the sync tools.

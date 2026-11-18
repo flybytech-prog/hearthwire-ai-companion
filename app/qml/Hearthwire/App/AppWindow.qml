@@ -8,8 +8,14 @@ import Hearthwire.App
 
 // The app window: the plasmoid's main.qml (unchanged, from the synced
 // Hearthwire.Plasmoid module) lives here without a panel, and its
-// fullRepresentation fills the window. expanded stays true while the
-// window is shown. Settings opens from Plasmoid.internalAction("configure").
+// fullRepresentation fills the window. expanded follows the window: shown
+// = expanded. main.qml's own `expanded = false` (the popup's Minimize
+// button) hides the window only with hideOnCollapse, which stays off until
+// R3 gives a hidden window a way back (single instance, tray): until then
+// a hidden window would leave a process running with no window (review-4
+// S3), so expanded is set back to true and the window stays.
+// `expanded = true` shows and raises a hidden window.
+// Settings opens from Plasmoid.internalAction("configure").
 ApplicationWindow {
     id: window
 
@@ -23,6 +29,9 @@ ApplicationWindow {
     Material.accent: Kirigami.Theme.highlightColor
     Material.background: Kirigami.Theme.backgroundColor
     Material.foreground: Kirigami.Theme.textColor
+
+    // R3 turns this on (with single instance or a tray).
+    readonly property bool hideOnCollapse: false
 
     // main.qml's PlasmoidItem (created at run time, so untyped here).
     property var plasmoidItem: null
@@ -63,6 +72,23 @@ ApplicationWindow {
     onVisibleChanged: {
         if (window.plasmoidItem)
             window.plasmoidItem.expanded = window.visible
+    }
+
+    Connections {
+        target: window.plasmoidItem
+        function onExpandedChanged() {
+            var expanded = window.plasmoidItem.expanded
+            if (expanded && !window.visible) {
+                window.show()
+                window.raise()
+                window.requestActivate()
+            } else if (!expanded && window.visible) {
+                if (window.hideOnCollapse)
+                    window.hide()
+                else
+                    window.plasmoidItem.expanded = true
+            }
+        }
     }
 
     Connections {

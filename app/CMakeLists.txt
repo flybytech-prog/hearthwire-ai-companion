@@ -103,7 +103,7 @@ function(hw_compat name)
     target_link_libraries(hwcompat_${name} PRIVATE Qt6::Quick Qt6::QuickControls2)
 endfunction()
 
-hw_compat(Kirigami src/KirigamiCompat.h src/KirigamiCompat.cpp)
+hw_compat(Kirigami src/KirigamiCompat.h src/KirigamiCompat.cpp src/ThemeWatcher.h src/ThemeWatcher.cpp)
 hw_compat(PlasmaComponents)
 hw_compat(PlasmaExtras)
 hw_compat(PlasmaCore)
@@ -113,6 +113,19 @@ target_compile_definitions(hwcompat_Plasma5Support PRIVATE HW_HELPER_PYTHON="${H
 hw_compat(KCMUtils)
 hw_compat(Notification)
 hw_compat(Configuration)
+
+# --- The app's Qt Quick Controls style: Material, with the few controls that
+# need Kirigami's sizing (QQuickStyle::setStyle in main.cpp).
+set_source_files_properties(qml/Hearthwire/Style/ComboBox.qml PROPERTIES QT_RESOURCE_ALIAS ComboBox.qml)
+# QtQuick.Controls imports the style with its own version and the style
+# passes it on to Material (`auto`), so the module is versioned as Qt is.
+qt_add_qml_module(hwstyle
+    URI Hearthwire.Style
+    VERSION 6.0
+    STATIC
+    QML_FILES qml/Hearthwire/Style/ComboBox.qml
+    IMPORTS QtQuick.Controls.Material/auto)
+target_link_libraries(hwstyle PRIVATE Qt6::Quick Qt6::QuickControls2)
 
 # --- The app.
 qt_add_executable(hearthwire-hyprland
@@ -149,7 +162,7 @@ endif()
 
 target_link_libraries(hearthwire-hyprland PRIVATE
     Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2
-    hwplasmoidplugin
+    hwplasmoidplugin hwstyleplugin
     hwcompat_Kirigamiplugin hwcompat_PlasmaComponentsplugin hwcompat_PlasmaExtrasplugin
     hwcompat_PlasmaCoreplugin hwcompat_Plasmoidplugin hwcompat_Plasma5Supportplugin
     hwcompat_KCMUtilsplugin hwcompat_Notificationplugin hwcompat_Configurationplugin)

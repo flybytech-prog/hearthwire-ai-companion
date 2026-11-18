@@ -45,6 +45,10 @@ public:
     Q_INVOKABLE int fileMode() const;
     Q_INVOKABLE QVariant storedValue(const QString &key) const;
     Q_INVOKABLE void finish(int code) const;
+    // UrlGuard refusals so far (-1 in a release build).
+    Q_INVOKABLE int guardRefusals() const;
+    // Sends a key press and release to the window, as a user would.
+    Q_INVOKABLE bool sendKey(QObject *window, int key) const;
 
     static int s_warnings;
     static int s_qmlWarnings;

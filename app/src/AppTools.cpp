@@ -2,12 +2,14 @@
 
 #include "PlasmoidHost.h"
 #include "ProcessRunner.h"
+#include "UrlGuard.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QQmlEngine>
 #include <QQuickWindow>
 
@@ -106,4 +108,21 @@ void AppTools::finish(int code) const
     std::fprintf(stderr, "hearthwire-hyprland fixtures: warnings %d (QML %d), replies %d\n", s_warnings,
                  s_qmlWarnings, ProcessRunner::answered());
     QCoreApplication::exit(code);
+}
+
+int AppTools::guardRefusals() const
+{
+    return fixtures() ? UrlGuard::refusals() : -1;
+}
+
+bool AppTools::sendKey(QObject *window, int key) const
+{
+    auto *quick = qobject_cast<QQuickWindow *>(window);
+    if (!fixtures() || !quick)
+        return false;
+    QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier);
+    QKeyEvent release(QEvent::KeyRelease, key, Qt::NoModifier);
+    QCoreApplication::sendEvent(quick, &press);
+    QCoreApplication::sendEvent(quick, &release);
+    return true;
 }

@@ -6,10 +6,10 @@
 // Unlike Plasma it never starts a shell and never runs anything but the
 // helper: the source must parse as a HelperCommand, which then runs as
 // <helperProgram()> -P [-s] -m hearthwire ... (an argv list, a fixed absolute
-// python3, no PATH lookup). The child gets the app's environment without any
-// inherited HEARTHWIRE_*, PYTHON*, LD_PRELOAD, LD_LIBRARY_PATH, LD_AUDIT,
-// GCONV_PATH or LOCPATH variable, plus the command's env words and
-// HEARTHWIRE_FRONTEND=app (task 011), its stdin is /dev/null, it gets no
+// python3, no PATH lookup). The child gets only the allow-listed variables
+// of the app's environment (passedToHelper(): no HEARTHWIRE_*, PYTHON*,
+// LD_*, GTK/GIO module or Qt plugin folders), plus the command's env words
+// and HEARTHWIRE_FRONTEND=app (task 011), its stdin is /dev/null, it gets no
 // other open file of the app's, and it dies with the app. A source that
 // does not parse gets exit code 127 and nothing runs.
 //
@@ -78,9 +78,10 @@ public:
     // Tests: one time limit for every command (0 = the normal ones).
     static void setTimeoutOverride(int ms);
     static int timeoutFor(const HelperCommand &command);
-    // An inherited variable the helper never gets (HEARTHWIRE_*, PYTHON*,
-    // LD_PRELOAD, LD_LIBRARY_PATH, LD_AUDIT, GCONV_PATH, LOCPATH).
-    static bool strippedFromHelper(const QString &name);
+    // Whether an inherited variable reaches the helper (an allow-list; see
+    // ProcessRunner.cpp). Never HEARTHWIRE_*, PYTHON*, LD_*, GTK/GIO/Qt
+    // module or plugin folders.
+    static bool passedToHelper(const QString &name);
 
     // Replies sent so far in this process, and helpers running now.
     static int answered();

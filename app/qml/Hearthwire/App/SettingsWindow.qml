@@ -16,6 +16,9 @@ import Hearthwire.Compat.Plasmoid
 // - Cancel, closing the window or picking another page with unsaved
 //   changes asks: Apply, Discard or Cancel.
 // Plasma 6.8 has no Defaults button for applets; neither has this.
+// Keys as in Plasma's dialog: Return/Enter = OK, Escape = Cancel. They act
+// only when the control with focus leaves the key alone (a text area keeps
+// its Return, an open ComboBox list or the prompt its Escape).
 // Like Plasma's ConfigView (deleted once hidden), a hidden dialog destroys
 // its page on a later turn: the page's Component.onDestruction runs (it
 // ends an Automatic backup hold) and its DataSources stop their helpers.
@@ -23,9 +26,13 @@ ApplicationWindow {
     id: dialog
 
     title: i18n("Hearthwire Settings")
-    width: Kirigami.Units.gridUnit * 45
+    // Wide enough by default for General's form in two columns (it needs
+    // about 34 grid units beside the category list); at the minimum the
+    // form is one column and its widest row (Notifications, about 25 grid
+    // units) still fits (review-4 S1; checked by the fixture checks).
+    width: Kirigami.Units.gridUnit * 48
     height: Kirigami.Units.gridUnit * 35
-    minimumWidth: Kirigami.Units.gridUnit * 30
+    minimumWidth: Kirigami.Units.gridUnit * 39
     minimumHeight: Kirigami.Units.gridUnit * 21
     color: Kirigami.Theme.backgroundColor
 
@@ -159,6 +166,12 @@ ApplicationWindow {
             dialog.close()
     }
 
+    function keyAccept(event) {
+        event.accepted = true
+        if (stack.currentItem)
+            dialog.accept()
+    }
+
     function discard() {
         dialog.wasConfigurationChangedSignalSent = false
         if (dialog.pendingItem) {
@@ -218,77 +231,114 @@ ApplicationWindow {
         }
     }
 
-    RowLayout {
-        anchors.fill: parent
-        spacing: 0
-
-        ListView {
-            id: categories
-            objectName: "settingsCategories"
-            Layout.fillHeight: true
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 9
+    // The category list is as wide as its widest entry (within limits).
+    Item {
+        visible: false
+        Repeater {
+            id: measure
             model: dialog.configModel ? dialog.configModel.categories : []
             delegate: ItemDelegate {
+                id: entry
                 required property var modelData
-                width: ListView.view.width
-                visible: modelData.visible
-                text: modelData.name
-                icon.name: modelData.icon
-                highlighted: dialog.currentSource === modelData.source
-                onClicked: dialog.openCategory(modelData)
+                text: entry.modelData.name
+                icon.name: entry.modelData.icon
             }
         }
-        Kirigami.Separator {
-            Layout.fillHeight: true
+    }
+    readonly property real categoriesWidth: {
+        var widest = Kirigami.Units.gridUnit * 9
+        for (var i = 0; i < measure.count; i++) {
+            var item = measure.itemAt(i)
+            if (item)
+                widest = Math.max(widest, item.implicitWidth)
         }
-        ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
+        return Math.min(Math.ceil(widest), Kirigami.Units.gridUnit * 16)
+    }
+
+    FocusScope {
+        id: keys
+        anchors.fill: parent
+        focus: true
+
+        Keys.onReturnPressed: (event) => dialog.keyAccept(event)
+        Keys.onEnterPressed: (event) => dialog.keyAccept(event)
+        Keys.onEscapePressed: (event) => {
+            event.accepted = true
+            dialog.cancel()
+        }
+
+        RowLayout {
+            anchors.fill: parent
             spacing: 0
 
-            Label {
-                Layout.fillWidth: true
-                Layout.margins: Kirigami.Units.largeSpacing
-                text: stack.currentItem ? stack.currentItem.title : ""
-                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.35
-            }
-            StackView {
-                id: stack
-                objectName: "settingsStack"
-                Layout.fillWidth: true
+            ListView {
+                id: categories
+                objectName: "settingsCategories"
                 Layout.fillHeight: true
-                clip: true
+                Layout.preferredWidth: dialog.categoriesWidth
+                model: dialog.configModel ? dialog.configModel.categories : []
+                delegate: ItemDelegate {
+                    required property var modelData
+                    width: ListView.view.width
+                    visible: modelData.visible
+                    text: modelData.name
+                    icon.name: modelData.icon
+                    highlighted: dialog.currentSource === modelData.source
+                    onClicked: dialog.openCategory(modelData)
+                }
             }
             Kirigami.Separator {
-                Layout.fillWidth: true
+                Layout.fillHeight: true
             }
-            RowLayout {
+            ColumnLayout {
                 Layout.fillWidth: true
-                Layout.margins: Kirigami.Units.largeSpacing
-                spacing: Kirigami.Units.smallSpacing
-                Item {
+                Layout.fillHeight: true
+                spacing: 0
+
+                Label {
+                    Layout.fillWidth: true
+                    Layout.margins: Kirigami.Units.largeSpacing
+                    text: stack.currentItem ? stack.currentItem.title : ""
+                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.35
+                }
+                StackView {
+                    id: stack
+                    objectName: "settingsStack"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                }
+                Kirigami.Separator {
                     Layout.fillWidth: true
                 }
-                Button {
-                    objectName: "settingsOk"
-                    icon.name: "dialog-ok"
-                    text: i18n("OK")
-                    onClicked: dialog.accept()
-                }
-                Button {
-                    id: applyButton
-                    objectName: "settingsApply"
-                    enabled: false
-                    icon.name: "dialog-ok-apply"
-                    text: i18n("Apply")
-                    visible: stack.currentItem !== null
-                    onClicked: dialog.apply()
-                }
-                Button {
-                    objectName: "settingsCancel"
-                    icon.name: "dialog-cancel"
-                    text: i18n("Cancel")
-                    onClicked: dialog.cancel()
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.margins: Kirigami.Units.largeSpacing
+                    spacing: Kirigami.Units.smallSpacing
+                    Item {
+                        Layout.fillWidth: true
+                    }
+                    Button {
+                        objectName: "settingsOk"
+                        icon.name: "dialog-ok"
+                        text: i18n("OK")
+                        onClicked: dialog.accept()
+                    }
+                    Button {
+                        id: applyButton
+                        objectName: "settingsApply"
+                        enabled: false
+                        icon.name: "dialog-ok-apply"
+                        text: i18n("Apply")
+                        visible: stack.currentItem !== null
+                        onClicked: dialog.apply()
+                    }
+                    Button {
+                        objectName: "settingsCancel"
+                        icon.name: "dialog-cancel"
+                        text: i18n("Cancel")
+                        onClicked: dialog.cancel()
+                    }
                 }
             }
         }

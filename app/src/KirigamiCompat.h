@@ -2,8 +2,12 @@
 // define: Theme, FormData and SpellCheck, plus FormSupport, which lets the
 // QML FormLayout read the FormData of its children.
 //
-// SPIKE: one app palette (dark unless HEARTHWIRE_THEME=light); colorSet and
-// inherit are kept but do not change the colors yet (ThemeWatcher, later).
+// Theme's colours come from ThemePalette: the Omarchy theme the app's
+// ThemeWatcher hands it (main.cpp), else the built-in palette, dark or
+// light as the system colour scheme says. Every Kirigami colour set has its
+// own colours (ThemeWatcher.cpp, derive()); colorSet and inherit work as in
+// Kirigami: an item's colorSet, once set, is its own, otherwise it follows
+// the nearest ancestor with a Theme (inherit: true) or is Window.
 #pragma once
 
 #include <QColor>
@@ -13,20 +17,29 @@
 #include <QQuickItem>
 #include <QtQml/qqmlregistration.h>
 
+#include <optional>
+
+#include "ThemeWatcher.h"
+
 class ThemePalette : public QObject
 {
     Q_OBJECT
 public:
     static ThemePalette *instance();
-    bool dark() const { return m_dark; }
-    QColor color(const char *role) const;
+    bool dark() const { return m_palette.dark; }
+    QColor color(HwTheme::Set set, HwTheme::Role role) const { return m_palette.color(set, role); }
+    // The Omarchy theme to show, or nullopt for the built-in palette.
+    void setTheme(const std::optional<HwTheme::Source> &source);
 
 Q_SIGNALS:
     void changed();
 
 private:
     ThemePalette();
-    bool m_dark = true;
+    void update();
+
+    std::optional<HwTheme::Source> m_theme;
+    HwTheme::Palette m_palette;
 };
 
 class Theme : public QObject
@@ -35,8 +48,8 @@ class Theme : public QObject
     QML_ELEMENT
     QML_UNCREATABLE("Theme is attached only")
     QML_ATTACHED(Theme)
-    Q_PROPERTY(ColorSet colorSet MEMBER m_colorSet NOTIFY colorSetChanged)
-    Q_PROPERTY(bool inherit MEMBER m_inherit NOTIFY inheritChanged)
+    Q_PROPERTY(ColorSet colorSet READ colorSet WRITE setColorSet NOTIFY colorSetChanged)
+    Q_PROPERTY(bool inherit READ inherit WRITE setInherit NOTIFY inheritChanged)
     Q_PROPERTY(bool dark READ dark NOTIFY paletteChanged)
     Q_PROPERTY(QColor textColor READ textColor NOTIFY paletteChanged)
     Q_PROPERTY(QColor disabledTextColor READ disabledTextColor NOTIFY paletteChanged)
@@ -70,27 +83,33 @@ public:
     explicit Theme(QObject *parent = nullptr);
     static Theme *qmlAttachedProperties(QObject *object) { return new Theme(object); }
 
+    // The set in effect (what QML reads as colorSet).
+    ColorSet colorSet() const;
+    void setColorSet(ColorSet set);
+    bool inherit() const { return m_inherit; }
+    void setInherit(bool inherit);
+
     bool dark() const { return ThemePalette::instance()->dark(); }
-    QColor textColor() const { return ThemePalette::instance()->color("textColor"); }
-    QColor disabledTextColor() const { return ThemePalette::instance()->color("disabledTextColor"); }
-    QColor highlightedTextColor() const { return ThemePalette::instance()->color("highlightedTextColor"); }
-    QColor activeTextColor() const { return ThemePalette::instance()->color("activeTextColor"); }
-    QColor linkColor() const { return ThemePalette::instance()->color("linkColor"); }
-    QColor visitedLinkColor() const { return ThemePalette::instance()->color("visitedLinkColor"); }
-    QColor negativeTextColor() const { return ThemePalette::instance()->color("negativeTextColor"); }
-    QColor neutralTextColor() const { return ThemePalette::instance()->color("neutralTextColor"); }
-    QColor positiveTextColor() const { return ThemePalette::instance()->color("positiveTextColor"); }
-    QColor backgroundColor() const { return ThemePalette::instance()->color("backgroundColor"); }
-    QColor alternateBackgroundColor() const { return ThemePalette::instance()->color("alternateBackgroundColor"); }
-    QColor highlightColor() const { return ThemePalette::instance()->color("highlightColor"); }
-    QColor activeBackgroundColor() const { return ThemePalette::instance()->color("activeBackgroundColor"); }
-    QColor linkBackgroundColor() const { return ThemePalette::instance()->color("linkBackgroundColor"); }
-    QColor visitedLinkBackgroundColor() const { return ThemePalette::instance()->color("visitedLinkBackgroundColor"); }
-    QColor negativeBackgroundColor() const { return ThemePalette::instance()->color("negativeBackgroundColor"); }
-    QColor neutralBackgroundColor() const { return ThemePalette::instance()->color("neutralBackgroundColor"); }
-    QColor positiveBackgroundColor() const { return ThemePalette::instance()->color("positiveBackgroundColor"); }
-    QColor focusColor() const { return ThemePalette::instance()->color("focusColor"); }
-    QColor hoverColor() const { return ThemePalette::instance()->color("hoverColor"); }
+    QColor textColor() const { return color(HwTheme::TextColor); }
+    QColor disabledTextColor() const { return color(HwTheme::DisabledTextColor); }
+    QColor highlightedTextColor() const { return color(HwTheme::HighlightedTextColor); }
+    QColor activeTextColor() const { return color(HwTheme::ActiveTextColor); }
+    QColor linkColor() const { return color(HwTheme::LinkColor); }
+    QColor visitedLinkColor() const { return color(HwTheme::VisitedLinkColor); }
+    QColor negativeTextColor() const { return color(HwTheme::NegativeTextColor); }
+    QColor neutralTextColor() const { return color(HwTheme::NeutralTextColor); }
+    QColor positiveTextColor() const { return color(HwTheme::PositiveTextColor); }
+    QColor backgroundColor() const { return color(HwTheme::BackgroundColor); }
+    QColor alternateBackgroundColor() const { return color(HwTheme::AlternateBackgroundColor); }
+    QColor highlightColor() const { return color(HwTheme::HighlightColor); }
+    QColor activeBackgroundColor() const { return color(HwTheme::ActiveBackgroundColor); }
+    QColor linkBackgroundColor() const { return color(HwTheme::LinkBackgroundColor); }
+    QColor visitedLinkBackgroundColor() const { return color(HwTheme::VisitedLinkBackgroundColor); }
+    QColor negativeBackgroundColor() const { return color(HwTheme::NegativeBackgroundColor); }
+    QColor neutralBackgroundColor() const { return color(HwTheme::NeutralBackgroundColor); }
+    QColor positiveBackgroundColor() const { return color(HwTheme::PositiveBackgroundColor); }
+    QColor focusColor() const { return color(HwTheme::FocusColor); }
+    QColor hoverColor() const { return color(HwTheme::HoverColor); }
     QFont defaultFont() const;
     QFont smallFont() const;
     QFont fixedWidthFont() const;
@@ -101,7 +120,14 @@ Q_SIGNALS:
     void paletteChanged();
 
 private:
+    QColor color(HwTheme::Role role) const
+    {
+        return ThemePalette::instance()->color(HwTheme::Set(colorSet()), role);
+    }
+    void refresh();
+
     ColorSet m_colorSet = Window;
+    bool m_ownSet = false;
     bool m_inherit = true;
 };
 

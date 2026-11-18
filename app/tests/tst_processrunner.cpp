@@ -23,7 +23,7 @@ namespace {
 // The fake helper: prints its argv and environment, or misbehaves on purpose
 // for the helper option given after -m hearthwire.
 const char FakePython[] = R"SH(#!/bin/sh
-dir="$HW_TEST_DIR"
+dir="$HOME"
 : > "$dir/started"
 shift 3
 case "$1" in
@@ -45,7 +45,13 @@ printf 'LD_LIBRARY_PATH=%s\n' "${LD_LIBRARY_PATH-unset}"
 printf 'LD_AUDIT=%s\n' "${LD_AUDIT-unset}"
 printf 'GCONV_PATH=%s\n' "${GCONV_PATH-unset}"
 printf 'LOCPATH=%s\n' "${LOCPATH-unset}"
-printf 'KEPT=%s\n' "${HW_TEST_KEPT-unset}"
+printf 'UNLISTED=%s\n' "${HW_TEST_UNLISTED-unset}"
+printf 'GTK_MODULES=%s\n' "${GTK_MODULES-unset}"
+printf 'GIO_EXTRA_MODULES=%s\n' "${GIO_EXTRA_MODULES-unset}"
+printf 'WAYLAND_DISPLAY=%s\n' "${WAYLAND_DISPLAY-unset}"
+printf 'XDG_RUNTIME_DIR=%s\n' "${XDG_RUNTIME_DIR-unset}"
+printf 'LC_ALL=%s\n' "${LC_ALL-unset}"
+printf 'DBUS=%s\n' "${DBUS_SESSION_BUS_ADDRESS-unset}"
 printf 'CWD=%s\n' "$(pwd)"
 printf 'STDIN=%s\n' "$(readlink /proc/$$/fd/0)"
 printf 'FD9=%s\n' "$(test -e /proc/$$/fd/9 && echo open || echo closed)"
@@ -135,8 +141,7 @@ private Q_SLOTS:
         const int fd = ::open(QFile::encodeName(m_fake).constData(), O_RDONLY);
         QVERIFY(fd >= 0 && ::dup2(fd, 9) == 9);
         QVERIFY(!(::fcntl(9, F_GETFD) & FD_CLOEXEC));
-        qputenv("HW_TEST_DIR", QFile::encodeName(m_dir.path()));
-        // Inherited values the child must never see.
+                // Inherited values the child must never see.
         qputenv("HEARTHWIRE_FRONTEND", "plasma");
         qputenv("HEARTHWIRE_AGENTS_PANEL", "1");
         qputenv("HEARTHWIRE_OTHER", "x");
@@ -148,7 +153,14 @@ private Q_SLOTS:
         qputenv("LD_AUDIT", "/nonexistent/libhw-test-audit.so");
         qputenv("GCONV_PATH", QFile::encodeName(m_dir.path()));
         qputenv("LOCPATH", QFile::encodeName(m_dir.path()));
-        qputenv("HW_TEST_KEPT", "kept");
+        // Not on the allow-list: dropped. On it: kept.
+        qputenv("HW_TEST_UNLISTED", "x");
+        qputenv("GTK_MODULES", "hwplanted");
+        qputenv("GIO_EXTRA_MODULES", QFile::encodeName(m_dir.path()));
+        qputenv("WAYLAND_DISPLAY", "wayland-hw");
+        qputenv("XDG_RUNTIME_DIR", QFile::encodeName(m_dir.path()));
+        qputenv("LC_ALL", "C.UTF-8");
+        qputenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/hw-bus");
         qputenv("HOME", QFile::encodeName(m_dir.path()));
     }
 
@@ -180,7 +192,8 @@ private Q_SLOTS:
             "FRONTEND=app", "AGENTS=unset", "RUN=7", "APPLET=2147483648", "OTHER=unset",
             "PYTHONPATH=unset", "PYTHONSTARTUP=unset", "LD_PRELOAD=unset", "LD_LIBRARY_PATH=unset", "LD_AUDIT=unset",
             "GCONV_PATH=unset", "LOCPATH=unset",
-            "KEPT=kept",
+            "UNLISTED=unset", "GTK_MODULES=unset", "GIO_EXTRA_MODULES=unset", "WAYLAND_DISPLAY=wayland-hw",
+            "XDG_RUNTIME_DIR=" + m_dir.path(), "LC_ALL=C.UTF-8", "DBUS=unix:path=/nonexistent/hw-bus",
             "CWD=" + QDir(m_dir.path()).canonicalPath(), "STDIN=/dev/null", "FD9=closed"}));
         QCOMPARE(ProcessRunner::running(), 0);
     }
@@ -327,8 +340,20 @@ private Q_SLOTS:
                                  "PYTHONSTARTUP", "PYTHONSAFEPATH", "PYTHONUSERBASE", "PYTHONINSPECT", "PYTHON",
                                  "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GCONV_PATH", "LOCPATH"})
             QTest::newRow(name) << QString::fromLatin1(name) << true;
-        for (const char *name : {"PATH", "HOME", "LANG", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "WAYLAND_DISPLAY",
-                                 "MYPYTHONPATH", "hearthwire_x", "LD_BIND_NOW", "LC_ALL", "MYGCONV_PATH"})
+        // Not on the allow-list (review-4 LOW-1): module and plugin
+        // folders of GTK, GIO and Qt, and anything unknown.
+        for (const char *name : {"GTK_PATH", "GTK_MODULES", "GTK3_MODULES", "GTK_EXE_PREFIX", "GTK_IM_MODULE_FILE",
+                                 "GIO_EXTRA_MODULES", "GIO_MODULE_DIR", "GDK_PIXBUF_MODULE_FILE", "GDK_PIXBUF_MODULEDIR",
+                                 "QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "QML_IMPORT_PATH", "QML2_IMPORT_PATH",
+                                 "QML_XHR_ALLOW_FILE_READ", "QT_QUICK_CONTROLS_STYLE_PATH", "LD_BIND_NOW", "MYPYTHONPATH",
+                                 "hearthwire_x", "MYGCONV_PATH", "HW_TEST_DIR", "XDG", "LC", "SSH_AUTH_SOCK", "PATHX"})
+            QTest::newRow(name) << QString::fromLatin1(name) << true;
+        for (const char *name : {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "LC_ALL",
+                                 "LC_MESSAGES", "TZ", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+                                 "XDG_CACHE_HOME", "XDG_DATA_DIRS", "DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY",
+                                 "DISPLAY", "XAUTHORITY", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "https_proxy",
+                                 "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "QT_QPA_PLATFORM", "QT_QPA_PLATFORMTHEME",
+                                 "QT_SCALE_FACTOR", "XCURSOR_SIZE"})
             QTest::newRow(name) << QString::fromLatin1(name) << false;
     }
 
@@ -336,7 +361,7 @@ private Q_SLOTS:
     {
         QFETCH(QString, name);
         QFETCH(bool, stripped);
-        QCOMPARE(ProcessRunner::strippedFromHelper(name), stripped);
+        QCOMPARE(ProcessRunner::passedToHelper(name), !stripped);
     }
 
     // QProcess reports a start that fails for want of descriptors from
