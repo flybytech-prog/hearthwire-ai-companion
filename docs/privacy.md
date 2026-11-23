@@ -780,7 +780,9 @@ With a built-in site's **Edit** button in **Settings → Chat** you can change
 the address it opens, and with **Add site…** you add a site by name and
 address. Only a valid address is saved, when you press Save. Custom and added
 addresses are saved in plain text in your Plasma
-configuration file (`~/.config/plasma-org.kde.plasma.desktop-appletsrc`), which
+configuration file (`~/.config/plasma-org.kde.plasma.desktop-appletsrc`; in the
+hearthwire-hyprland app: its own settings file, see
+[The hearthwire-hyprland app](#the-hearthwire-hyprland-app)), which
 other programs running as your user and your backups can read. Don't put
 passwords, tokens, or other secrets in them. Addresses with a user name or
 password (`https://user:pass@host/`) are refused, and text that isn't a valid

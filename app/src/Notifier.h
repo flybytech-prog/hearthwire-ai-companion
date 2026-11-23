@@ -12,9 +12,14 @@
 // - Never blocks: every call is asynchronous, so a hung daemon can't freeze
 //   the window.
 // - Markup: the body arrives escaped (&lt; &gt; &amp;, main.qml's
-//   markupSafe). GetCapabilities is asked once, on the first send; a daemon
-//   without "body-markup" then gets the body un-escaped (exactly &lt;, &gt;,
-//   then &amp; last). Until it answers, the body goes as it is.
+//   markupSafe). It is un-escaped (exactly &lt;, &gt;, then &amp; last) and
+//   then every <, > and & is dropped, for every daemon (review-7-security
+//   INFO-1): no daemon gets markup, not even one that re-parses escaped
+//   text as quickshell does. The title is sent as it is (plain text by the
+//   spec, and not escaped by main.qml). GetCapabilities is still asked on
+//   the first send and, after a failed call, again on the next send: at
+//   most MaxCapabilityAttempts calls in all, never two at a time (task 012
+//   R4 P2d); its answer no longer changes the body.
 // - Logging: never a title, body, event id or reply. The first failure
 //   logs one fixed line, "notifications are not available"; then nothing.
 //
@@ -53,6 +58,7 @@ public:
     static constexpr const char *AppIcon = "hearthwire";
     static constexpr const char *DesktopEntry = "hearthwire-hyprland";
     static constexpr int CallTimeoutMs = 10000;
+    static constexpr int MaxCapabilityAttempts = 3;
 
     // Bus mode talks on `connection` (the session bus in the app).
     Notifier(Mode mode, const QDBusConnection &connection, QObject *parent = nullptr);
@@ -67,6 +73,9 @@ public:
     // Record mode: {eventId, title, text, urgency} of the last send.
     QVariantMap lastCall() const { return m_last; }
     bool capabilitiesKnown() const { return m_capabilitiesKnown; }
+    // GetCapabilities calls made so far, and whether one is waiting.
+    int capabilityAttempts() const { return m_capabilityAttempts; }
+    bool capabilitiesPending() const { return m_capabilitiesPending; }
     bool bodyMarkup() const { return m_bodyMarkup; }
 
     // urgency: KNotification's (Notification.qml's enum).
@@ -75,7 +84,8 @@ public:
     // KNotification urgency -> the spec's byte: Low 0; Default, Normal,
     // High (and anything unknown) 1; Critical 2.
     static uchar busUrgency(int urgency);
-    // The escaped body as plain text: &lt; and &gt;, then &amp; last.
+    // The escaped body as sent: un-escaped (&lt; and &gt;, then &amp; last),
+    // then without any <, > or &.
     static QString plainBody(const QString &text);
 
 Q_SIGNALS:
@@ -89,7 +99,8 @@ private:
     QDBusConnection m_connection;
     int m_count = 0;
     QVariantMap m_last;
-    bool m_capabilitiesAsked = false;
+    int m_capabilityAttempts = 0;
+    bool m_capabilitiesPending = false;
     bool m_capabilitiesKnown = false;
     bool m_bodyMarkup = false;
     bool m_failed = false;

@@ -16,6 +16,9 @@ import Hearthwire.Compat.Plasmoid
 // - Cancel, closing the window or picking another page with unsaved
 //   changes asks: Apply, Discard or Cancel.
 // Plasma 6.8 has no Defaults button for applets; neither has this.
+// After config.qml's categories comes the app's own About (AboutPage.qml,
+// task 012 R4 P2c), always last: it has no settings, so opening it never
+// enables Apply, leaving it never asks, and OK there only closes.
 // Keys as in Plasma's dialog: Return/Enter = OK, Escape = Cancel. They act
 // only when the control with focus leaves the key alone (a text area keeps
 // its Return, an open ComboBox list or the prompt its Escape).
@@ -50,6 +53,26 @@ ApplicationWindow {
     readonly property bool promptOpen: prompt.visible
     // The category a prompt was opened for; null = the dialog is closing.
     property QtObject pendingItem: null
+
+    // i18n() is the app's context property (LocalizedContext).
+    // qmllint disable unqualified
+    readonly property QtObject aboutCategory: QtObject {
+        readonly property string name: i18n("About")
+        readonly property string icon: "help-about"
+        readonly property string source: "about"
+        readonly property bool visible: true
+    }
+    // qmllint enable unqualified
+    readonly property bool aboutShown: dialog.currentSource === dialog.aboutCategory.source
+    // config.qml's categories, then About.
+    readonly property var categoryList: {
+        var list = []
+        var model = dialog.configModel
+        for (var i = 0; model && i < model.count; i++)
+            list.push(model.get(i))
+        list.push(dialog.aboutCategory)
+        return list
+    }
 
     function load() {
         if (dialog.configModel)
@@ -89,6 +112,9 @@ ApplicationWindow {
     }
 
     function saveConfig() {
+        // About has nothing to save.
+        if (dialog.aboutShown)
+            return
         var config = Plasmoid.configuration
         var page = stack.currentItem
         // The page's own handling first, so it can still set cfg_ values.
@@ -127,17 +153,26 @@ ApplicationWindow {
 
     function open(item) {
         dialog.currentSource = item.source
-        var config = Plasmoid.configuration
         var props = { "title": item.name }
-        config.keys().forEach(function (key) {
-            props["cfg_" + key] = config[key]
-        })
-        var url = Qt.resolvedUrl(dialog.packageBase + item.source)
+        // About: the app's own page, no cfg_ properties.
+        var page = aboutComponent
+        if (item !== dialog.aboutCategory) {
+            var config = Plasmoid.configuration
+            config.keys().forEach(function (key) {
+                props["cfg_" + key] = config[key]
+            })
+            page = Qt.resolvedUrl(dialog.packageBase + item.source)
+        }
         if (stack.depth === 0)
-            stack.push(url, props)
+            stack.push(page, props)
         else
-            stack.replace(url, props)
+            stack.replace(page, props)
         applyButton.enabled = false
+    }
+
+    Component {
+        id: aboutComponent
+        AboutPage {}
     }
 
     function openCategory(item) {
@@ -246,7 +281,7 @@ ApplicationWindow {
         visible: false
         Repeater {
             id: measure
-            model: dialog.configModel ? dialog.configModel.categories : []
+            model: dialog.categoryList
             delegate: ItemDelegate {
                 id: entry
                 required property var modelData
@@ -286,7 +321,7 @@ ApplicationWindow {
                 objectName: "settingsCategories"
                 Layout.fillHeight: true
                 Layout.preferredWidth: dialog.categoriesWidth
-                model: dialog.configModel ? dialog.configModel.categories : []
+                model: dialog.categoryList
                 delegate: ItemDelegate {
                     required property var modelData
                     width: ListView.view.width

@@ -80,6 +80,27 @@ Item {
         return null
     }
 
+    // The first item under item with this objectName.
+    function findByName(item, name) {
+        if (!item)
+            return null
+        if (item.objectName === name)
+            return item
+        for (var i = 0; i < item.children.length; i++) {
+            var found = checks.findByName(item.children[i], name)
+            if (found)
+                return found
+        }
+        if (item.contentItem && item.contentItem !== item && item.contentItem.parent !== item)
+            return checks.findByName(item.contentItem, name)
+        return null
+    }
+
+    function shownText(name) {
+        var item = checks.findByName(page, name)
+        return item ? item.text : undefined
+    }
+
     Connections {
         target: checks.config
         function onValueChanged(key, value) {
@@ -381,6 +402,85 @@ Item {
             Plasmoid.internalAction("configure").trigger()
             return 800
         },
+        // R4 P2c: About, the last category, with no settings.
+        function () {
+            var list = settings.categoryList
+            check("About is the last category, after config.qml's",
+                  list.length === settings.configModel.count + 1 && list[list.length - 1] === settings.aboutCategory
+                  && settings.aboutCategory.name === "About", list.length + " categories")
+            page.cfg_refreshInterval = 121
+            settings.openCategory(settings.aboutCategory)
+            return 200
+        },
+        function () {
+            check("switching to About with unsaved changes asks first",
+                  settings.promptOpen === true && settings.currentSource === "configGeneral.qml")
+            settings.discard()
+            return 800
+        },
+        function () {
+            var about = App.about
+            check("About opens, titled About, Apply off", settings.currentSource === "about" && settings.aboutShown
+                  && page !== null && page.title === "About" && settings.applyEnabled === false
+                  && config.refreshInterval === 120)
+            check("About has no cfg_ properties",
+                  Object.keys(page).filter(function (key) { return key.indexOf("cfg_") === 0 }).length === 0)
+            check("About shows App.about's values",
+                  shownText("aboutName") === "Hearthwire"
+                  && shownText("aboutAppVersion") === "hearthwire-hyprland " + about.version
+                  && shownText("aboutComment") === about.comment && shownText("aboutLicense") === "MIT"
+                  && shownText("aboutAuthors") === about.authors && shownText("aboutWebsite") === about.website
+                  && shownText("aboutBugReportUrl") === about.bugReportUrl
+                  && /^https:\/\//.test(about.website) && /^https:\/\//.test(about.bugReportUrl)
+                  && about.version !== "" && about.comment !== "" && about.authors !== "",
+                  "website " + about.website)
+            // review-7 I2: the label follows the number of authors.
+            var authorsLabel = checks.findByName(page, "aboutAuthorsLabel")
+            var shownLabel = authorsLabel ? authorsLabel.text : ""
+            page.about = Object.assign({}, about, {authorCount: 2, authors: "A, B"})
+            var manyLabel = authorsLabel ? authorsLabel.text : ""
+            page.about = Object.assign({}, about, {authorCount: 1})
+            var oneLabel = authorsLabel ? authorsLabel.text : ""
+            page.about = Qt.binding(function () { return App.about })
+            check("About says Author: for one author and Authors: for more",
+                  about.authorCount >= 1 && shownLabel === (about.authorCount === 1 ? "Author:" : "Authors:")
+                  && manyLabel === "Authors:" && oneLabel === "Author:" && shownText("aboutAuthors") === about.authors,
+                  "count " + about.authorCount + ": " + shownLabel + ", " + manyLabel + ", " + oneLabel)
+            shot(settings, "settings-about.png")
+            checks.findByName(page, "aboutCopyWebsite").clicked()
+            check("Copy puts the website on the clipboard", App.clipboardText() === about.website)
+            checks.findByName(page, "aboutCopyBugReportUrl").clicked()
+            check("Copy puts the bug report address on the clipboard", App.clipboardText() === about.bugReportUrl)
+            check("only the two links can be copied", App.copyAbout("comment") === false && App.copyAbout("") === false
+                  && App.clipboardText() === about.bugReportUrl)
+            check("About's links are plain read-only text", checks.findByName(page, "aboutWebsite").readOnly === true
+                  && checks.findByName(page, "aboutWebsite").textFormat === TextEdit.PlainText)
+            check("opening About leaves Apply off", settings.applyEnabled === false)
+            settings.openCategory(settings.configModel.get(0))
+            return 800
+        },
+        function () {
+            check("leaving About never asks", settings.promptOpen === false && settings.currentSource === "configGeneral.qml"
+                  && page !== null && settings.applyEnabled === false,
+                  "prompt " + settings.promptOpen + ", " + settings.currentSource + ", apply " + settings.applyEnabled)
+            settings.openCategory(settings.aboutCategory)
+            return 800
+        },
+        function () {
+            check("About opens again without asking", settings.promptOpen === false && settings.aboutShown)
+            checks.reemitsBefore = config.reemitCount
+            settings.accept()
+            return 300
+        },
+        function () {
+            check("OK on About only closes: nothing written, no re-emit",
+                  settings.visible === false && config.reemitCount === checks.reemitsBefore,
+                  (config.reemitCount - checks.reemitsBefore) + " re-emits")
+            check("no QML warning on the About steps", App.qmlWarnings() === checks.qmlWarningsBefore,
+                  (App.qmlWarnings() - checks.qmlWarningsBefore) + " new")
+            Plasmoid.internalAction("configure").trigger()
+            return 800
+        },
         // R3.4: closing the window quits, Settings and its changes go too.
         function () {
             page.cfg_refreshInterval = 333
@@ -427,6 +527,11 @@ Item {
         },
         function () {
             shot(settings, "settings-chat.png")
+            settings.openCategory(settings.aboutCategory)
+            return 1500
+        },
+        function () {
+            shot(settings, "settings-about.png")
             return -1
         }
     ]

@@ -7,6 +7,7 @@ import org.kde.plasma.plasmoid
 import "ChatSites.js" as ChatSites
 import "ChatStorage.js" as ChatStorage
 import "OllamaChat.js" as OllamaChat
+import "Host.js" as Host
 
 KCM.SimpleKCM {
     id: page
@@ -725,7 +726,9 @@ KCM.SimpleKCM {
         QQC2.Label {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
-            text: i18n("Custom and added addresses are saved in your Plasma configuration file: don't put passwords, tokens or other secrets in them.")
+            text: Host.isApp
+                ? i18n("Custom and added addresses are saved in the app's settings file (~/.config/hearthwire-hyprland/settings.json): don't put passwords, tokens or other secrets in them.")
+                : i18n("Custom and added addresses are saved in your Plasma configuration file: don't put passwords, tokens or other secrets in them.")
             opacity: 0.72
         }
 

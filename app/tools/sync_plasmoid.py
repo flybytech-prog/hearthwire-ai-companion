@@ -3,7 +3,8 @@
 
 Only whole import lines of the KDE modules in IMPORTS change; they point at
 the app's private Hearthwire.Compat.* stand-ins instead (aliases kept).
-Everything else, every .js file included, is copied byte for byte.
+Everything else is copied byte for byte, every .js file too except
+ui/Host.js.
 
 The sync stops (SyncError), so nothing of KDE's can slip into the app:
 - on an org.kde import it does not know;
@@ -11,7 +12,11 @@ The sync stops (SyncError), so nothing of KDE's can slip into the app:
   ';'-joined import, a Qt.createQmlObject string, a .js ".import"), except
   whole-line // comments and the KNOWN_TEXT below;
 - on a string import (import "...") other than one of the plasmoid's own
-  .js files by its bare name, and on any .js ".import".
+  .js files by its bare name, and on any .js ".import";
+- when ui/Host.js is missing, left out or not exactly PLASMA_HOST.
+The one file that changes beyond import lines is ui/Host.js: the app gets
+APP_HOST (`var isApp = true`), a fixed text, never anything derived from
+the source (task 012 R4 P2a).
 Stdlib only; writes only into --dest.
 """
 
@@ -50,6 +55,18 @@ JS_NAME = re.compile(r"[A-Za-z_]\w*\.js")
 # Text that names org.kde but can't import anything: Plasma's own settings
 # file, named in a configGeneral.qml message.
 KNOWN_TEXT = ("plasma-org.kde.plasma.desktop-appletsrc",)
+
+# ui/Host.js: which front end runs the pages. The plasmoid's must be exactly
+# PLASMA_HOST; the app's copy is exactly APP_HOST.
+HOST_JS = "Host.js"
+PLASMA_HOST = (
+    b".pragma library\n"
+    b"// Which front end runs these files: false in the Plasma widget. The\n"
+    b"// hearthwire-hyprland app's build (app/tools/sync_plasmoid.py) writes this\n"
+    b"// file with \"var isApp = true\" instead; nothing else may change here.\n"
+    b"var isApp = false\n"
+)
+APP_HOST = PLASMA_HOST[: -len(b"false\n")] + b"true\n"
 
 
 class SyncError(Exception):
@@ -129,14 +146,28 @@ def plan(source):
     return pairs
 
 
+def host_js(data):
+    """APP_HOST for the plasmoid's Host.js bytes; SyncError unless they are exactly PLASMA_HOST."""
+    if data != PLASMA_HOST:
+        raise SyncError("ui/" + HOST_JS + " is not the expected file (only its exact text is synced)")
+    return APP_HOST
+
+
 def sync(source, dest, exclude=()):
     source = Path(source).resolve()
     dest = Path(dest).resolve()
     if dest == source or source in dest.parents:
         raise SyncError("--dest must be outside the plasmoid folder")
+    pairs = plan(source)
+    # Checked before anything is written.
+    hosts = [path for path, name in pairs if name == HOST_JS and path.parent.name == "ui"]
+    if not hosts:
+        raise SyncError("missing: ui/" + HOST_JS)
+    if HOST_JS in exclude:
+        raise SyncError(HOST_JS + " can't be left out")
+    host_js(hosts[0].read_bytes())
     dest.mkdir(parents=True, exist_ok=True)
     written = []
-    pairs = plan(source)
     js_names = {name for path, name in pairs if path.suffix == ".js" and path.parent.name == "ui"}
     for path, name in pairs:
         if name in exclude:
@@ -146,6 +177,8 @@ def sync(source, dest, exclude=()):
             data = rewrite_qml(data.decode("utf-8"), js_names).encode("utf-8")
         elif path.suffix == ".js":
             check_js(data.decode("utf-8"))
+            if name == HOST_JS:
+                data = host_js(data)
         target = dest / name
         # Rewrite only on a change, so the build doesn't redo unchanged files.
         if not target.is_file() or target.read_bytes() != data:

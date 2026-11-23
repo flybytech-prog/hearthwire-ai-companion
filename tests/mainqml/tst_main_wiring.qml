@@ -710,6 +710,34 @@ TestCase {
         compare(page.cfg_middleClickOpens, "chat", "untouched until a pick")
     }
 
+    // Task 012 R4: the app hides the shortcut row and words the address note
+    // for its own settings file. The widget keeps both as they were; the
+    // app run (tests/qml/tst_host_rows.qml) only checks the app's branch.
+    function textInPage(item, text) {
+        if (item.text === text)
+            return item
+        var kids = item.children || []
+        for (var index = 0; index < kids.length; index++) {
+            var found = textInPage(kids[index], text)
+            if (found)
+                return found
+        }
+        return item.contentItem ? textInPage(item.contentItem, text) : null
+    }
+
+    function test_widgetKeepsTheShortcutRow() {
+        var page = load(testCase.generalPageFile, {})
+        var choice = choiceBox(page, "shortcutOpensChoice")
+        verify(choice.visible, "the shortcut box is visible")
+        verify(choice.parent.visible, "its row is visible")
+    }
+
+    function test_widgetChatAddressNoteIsThePlasmaText() {
+        var chat = load(testCase.chatPageFile, {})
+        verify(textInPage(chat, "Custom and added addresses are saved in your Plasma configuration file: don't put passwords, tokens or other secrets in them.") !== null, "Plasma text")
+        compare(textInPage(chat, "Custom and added addresses are saved in the app's settings file (~/.config/hearthwire-hyprland/settings.json): don't put passwords, tokens or other secrets in them."), null, "no app text")
+    }
+
     // --- Usage history ------------------------------------------------------
 
     // A settings page keeps its sources deeper down than main.qml does.

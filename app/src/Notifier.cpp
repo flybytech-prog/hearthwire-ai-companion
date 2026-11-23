@@ -57,6 +57,11 @@ QString Notifier::plainBody(const QString &text)
     plain.replace(QLatin1String("&lt;"), QLatin1String("<"));
     plain.replace(QLatin1String("&gt;"), QLatin1String(">"));
     plain.replace(QLatin1String("&amp;"), QLatin1String("&"));
+    // Then none of the three is left, for any daemon (review-7-security
+    // INFO-1): a daemon that re-parses escaped text gets no markup either.
+    plain.remove(QLatin1Char('<'));
+    plain.remove(QLatin1Char('>'));
+    plain.remove(QLatin1Char('&'));
     return plain;
 }
 
@@ -68,7 +73,8 @@ void Notifier::send(const QString &eventId, const QString &title, const QString 
         return;
     }
     const uchar level = busUrgency(urgency);
-    const QString body = m_capabilitiesKnown && !m_bodyMarkup ? plainBody(text) : text;
+    // The same for every daemon, before and after GetCapabilities' answer.
+    const QString body = plainBody(text);
     if (m_mode == Mode::Record) {
         m_last = QVariantMap{{QStringLiteral("eventId"), eventId},
                              {QStringLiteral("title"), title},
@@ -82,7 +88,7 @@ void Notifier::send(const QString &eventId, const QString &title, const QString 
         failed();
         return;
     }
-    if (!m_capabilitiesAsked)
+    if (!m_capabilitiesKnown && !m_capabilitiesPending && m_capabilityAttempts < MaxCapabilityAttempts)
         askCapabilities();
 
     QDBusMessage call = QDBusMessage::createMethodCall(QLatin1String(Service), QLatin1String(Path),
@@ -102,13 +108,16 @@ void Notifier::send(const QString &eventId, const QString &title, const QString 
 
 void Notifier::askCapabilities()
 {
-    m_capabilitiesAsked = true;
+    ++m_capabilityAttempts;
+    m_capabilitiesPending = true;
     const QDBusMessage call = QDBusMessage::createMethodCall(QLatin1String(Service), QLatin1String(Path),
                                                              QLatin1String(Interface), QStringLiteral("GetCapabilities"));
     auto *watcher = new QDBusPendingCallWatcher(m_connection.asyncCall(call, CallTimeoutMs), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *done) {
         const QDBusPendingReply<QStringList> reply = *done;
+        m_capabilitiesPending = false;
         if (reply.isError()) {
+            // Asked again on the next send (while attempts are left).
             failed();
         } else {
             m_bodyMarkup = reply.value().contains(QStringLiteral("body-markup"));

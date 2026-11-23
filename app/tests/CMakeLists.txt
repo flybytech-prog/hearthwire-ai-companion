@@ -83,6 +83,29 @@ if(HW_FIXTURES)
     target_compile_definitions(tst_secondlaunch PRIVATE HW_APP_FIXTURES)
 endif()
 
+# AppTools (R4 P2b/P2c): present()'s steps and token order, About's values
+# against plasmoid/metadata.json and the .desktop file. No bus.
+hw_test(tst_apptools hwcompat_Plasmoidplugin hwcompat_Plasma5Support Qt6::Quick Qt6::QuickControls2 Qt6::DBus)
+target_sources(tst_apptools PRIVATE ${hw_src}/AppTools.h ${hw_src}/AppTools.cpp
+    ${hw_src}/SingleInstance.h ${hw_src}/SingleInstance.cpp)
+target_include_directories(tst_apptools PRIVATE ${HW_GENERATED})
+target_compile_definitions(tst_apptools PRIVATE
+    HW_METADATA="${HW_PLASMOID}/metadata.json"
+    HW_DESKTOP="${CMAKE_CURRENT_SOURCE_DIR}/../data/hearthwire-hyprland.desktop"
+    HW_PROJECT_VERSION="${PROJECT_VERSION}")
+
+# No way to open a URL or start another program from the app's own code or
+# the QML it runs (decision-1 Q2: only the helper is started, and only
+# through ProcessRunner).
+add_test(NAME app_starts_nothing_else COMMAND ${Python3_EXECUTABLE} -I -B ${CMAKE_CURRENT_SOURCE_DIR}/check_no_opener.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src ${CMAKE_CURRENT_SOURCE_DIR}/../qml ${HW_SYNCED})
+set_tests_properties(app_starts_nothing_else PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 60)
+# Its own rows (review-7-security LOW-1): every pattern, fed from a scratch
+# folder, is found; a clean control is not.
+add_test(NAME app_starts_nothing_else_selftest COMMAND ${Python3_EXECUTABLE} -I -B ${CMAKE_CURRENT_SOURCE_DIR}/check_no_opener.py
+    --self-test)
+set_tests_properties(app_starts_nothing_else_selftest PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 60)
+
 # Planted plugins for tst_pluginpaths (never installed, never loaded by the app).
 # Test-only: the planted platform plugin needs Qt's private qpa/ headers, which
 # some distributions package separately (qt6-base-private-dev and the like).
@@ -162,6 +185,17 @@ endforeach()
 
 # The app's own QML tests of its stand-ins and style (tests/qml here).
 file(GLOB hw_app_qml_tests CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_*.qml)
+# Tests of the synced files themselves run from a copy next to the synced
+# folder, so their "../synced/..." imports are the app's copies.
+set(HW_APP_SYNCED_QML_TESTS tst_host.qml)
+set(hw_app_synced_tests_dir ${CMAKE_BINARY_DIR}/apptests)
+foreach(name IN LISTS HW_APP_SYNCED_QML_TESTS)
+    list(REMOVE_ITEM hw_app_qml_tests ${CMAKE_CURRENT_SOURCE_DIR}/qml/${name})
+    configure_file(qml/${name} ${hw_app_synced_tests_dir}/${name} COPYONLY)
+    get_filename_component(base ${name} NAME_WE)
+    add_test(NAME app_qml_${base} COMMAND hearthwire-qmltests -input ${hw_app_synced_tests_dir}/${name})
+    set_tests_properties(app_qml_${base} PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 120)
+endforeach()
 foreach(file IN LISTS hw_app_qml_tests)
     get_filename_component(base ${file} NAME_WE)
     add_test(NAME app_qml_${base} COMMAND hearthwire-qmltests -input ${file})

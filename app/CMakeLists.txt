@@ -142,6 +142,51 @@ qt_add_qml_module(hwstyle
     IMPORTS QtQuick.Controls.Material/auto)
 target_link_libraries(hwstyle PRIVATE Qt6::Quick Qt6::QuickControls2)
 
+# --- The About page's values (task 012 R4 P2c), read once at configure time:
+# plasmoid/metadata.json (Website, BugReportUrl, License, Authors[].Name) and
+# the .desktop file's Comment, into the generated AboutInfo.h. Every value
+# must match a fixed character set (URLs: https only), so nothing in them can
+# end a C++ string or carry anything else.
+set(hw_metadata ${HW_PLASMOID}/metadata.json)
+set(hw_desktop_file ${CMAKE_CURRENT_SOURCE_DIR}/data/hearthwire-hyprland.desktop)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${hw_metadata} ${hw_desktop_file})
+file(READ ${hw_metadata} hw_metadata_json)
+string(JSON hw_about_website GET "${hw_metadata_json}" KPlugin Website)
+string(JSON hw_about_bugs GET "${hw_metadata_json}" KPlugin BugReportUrl)
+string(JSON hw_about_license GET "${hw_metadata_json}" KPlugin License)
+string(JSON hw_authors_count LENGTH "${hw_metadata_json}" KPlugin Authors)
+if(NOT hw_authors_count MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR "metadata.json: no KPlugin.Authors")
+endif()
+set(hw_about_authors "")
+math(EXPR hw_authors_last "${hw_authors_count} - 1")
+foreach(index RANGE ${hw_authors_last})
+    string(JSON hw_author GET "${hw_metadata_json}" KPlugin Authors ${index} Name)
+    if(hw_about_authors STREQUAL "")
+        set(hw_about_authors "${hw_author}")
+    else()
+        string(APPEND hw_about_authors ", ${hw_author}")
+    endif()
+endforeach()
+file(STRINGS ${hw_desktop_file} hw_desktop_comment REGEX "^Comment=")
+list(LENGTH hw_desktop_comment hw_comment_count)
+if(NOT hw_comment_count EQUAL 1)
+    message(FATAL_ERROR "${hw_desktop_file}: needs exactly one Comment= line")
+endif()
+string(REGEX REPLACE "^Comment=" "" hw_about_comment "${hw_desktop_comment}")
+foreach(var IN ITEMS hw_about_website hw_about_bugs)
+    if(NOT "${${var}}" MATCHES "^https://[A-Za-z0-9./_-]+$")
+        message(FATAL_ERROR "About: ${var} is not a plain https URL")
+    endif()
+endforeach()
+foreach(var IN ITEMS hw_about_license hw_about_authors hw_about_comment)
+    if(NOT "${${var}}" MATCHES "^[A-Za-z0-9][A-Za-z0-9 .,()_+-]*$")
+        message(FATAL_ERROR "About: ${var} has characters outside [A-Za-z0-9 .,()_+-]")
+    endif()
+endforeach()
+set(HW_GENERATED ${CMAKE_BINARY_DIR}/generated)
+configure_file(src/AboutInfo.h.in ${HW_GENERATED}/AboutInfo.h @ONLY)
+
 # --- The app.
 qt_add_executable(hearthwire-hyprland
     src/main.cpp
@@ -165,7 +210,7 @@ qt_add_qml_module(hearthwire-hyprland
     DEPENDENCIES Hearthwire.Compat.Plasmoid
     QML_FILES ${hw_app_qml}
     SOURCES src/AppTools.h src/AppTools.cpp src/SingleInstance.h src/SingleInstance.cpp)
-target_include_directories(hearthwire-hyprland PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(hearthwire-hyprland PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${HW_GENERATED})
 target_compile_definitions(hearthwire-hyprland PRIVATE HW_VERSION="${PROJECT_VERSION}")
 
 if(HW_FIXTURES)

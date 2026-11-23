@@ -5,7 +5,9 @@ An independent check of what sync_plasmoid.py and sync_qml_tests.py wrote:
 no line (whole-line // comments aside) names org.kde anywhere, except
 Plasma's own settings file name in a message; every string import is a
 bare <Name>.js of the same folder or the synced folder (or one of its .js
-files); a .js file has no .import. Stdlib only; reads, never writes.
+files); a .js file has no .import; the synced Host.js is exactly APP_HOST
+(the app's text, written by sync_plasmoid.py; kept here on its own so the
+two can't drift together). Stdlib only; reads, never writes.
 Usage: check_synced.py <synced folder> [<qml tests folder>]
 """
 
@@ -16,6 +18,22 @@ from pathlib import Path
 APPLETSRC = "plasma-org.kde.plasma.desktop-appletsrc"
 KDE = re.compile(r"\borg\.kde\.")
 STRING_IMPORT = re.compile(r"\bimport\s+[\"']([^\"']*)")
+APP_HOST = (
+    b".pragma library\n"
+    b"// Which front end runs these files: false in the Plasma widget. The\n"
+    b"// hearthwire-hyprland app's build (app/tools/sync_plasmoid.py) writes this\n"
+    b"// file with \"var isApp = true\" instead; nothing else may change here.\n"
+    b"var isApp = true\n"
+)
+
+
+def host_problems(synced):
+    host = synced / "Host.js"
+    if host.is_symlink() or not host.is_file():
+        return ["Host.js: missing"]
+    if host.read_bytes() != APP_HOST:
+        return ["Host.js: not the app's text (var isApp = true)"]
+    return []
 
 
 def problems(folder, synced):
@@ -47,7 +65,7 @@ def main(argv):
         print(__doc__.splitlines()[-1], file=sys.stderr)
         return 2
     synced = Path(argv[1]).resolve()
-    found = []
+    found = host_problems(synced)
     for folder in argv[1:]:
         found += problems(Path(folder).resolve(), synced)
     for line in found:

@@ -77,15 +77,15 @@ TestCase {
         tryVerify(function () { return root.held === null })
     }
 
-    // Title and text go on as main.qml built them (markup handling is the
-    // Notifier's, on the bus only).
-    function test_titleAndTextUnchanged() {
+    // The title goes on as main.qml built it; the text as the Notifier
+    // sends it: un-escaped, then without <, > and & (review-7-security INFO-1).
+    function test_titleUnchangedTextWithoutMarkup() {
         var notification = make({eventId: "settingsBackup", title: "Settings backed up",
                                  text: "Codex &amp; Claude: &lt;b&gt;"})
         notification.sendEvent()
         compare(Notifier.lastCall.eventId, "settingsBackup")
         compare(Notifier.lastCall.title, "Settings backed up")
-        compare(Notifier.lastCall.text, "Codex &amp; Claude: &lt;b&gt;")
+        compare(Notifier.lastCall.text, "Codex  Claude: b")
         notification.destroy()
     }
 }

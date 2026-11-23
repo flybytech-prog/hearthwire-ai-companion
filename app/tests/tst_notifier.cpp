@@ -51,6 +51,11 @@ public:
     QStringList capabilities;
     bool hold = false;
     int capabilitiesAsked = 0;
+    // GetCapabilities: the next `failCapabilities` calls get an error; with
+    // holdCapabilities a call is kept unanswered in heldCapabilities.
+    int failCapabilities = 0;
+    bool holdCapabilities = false;
+    QList<QDBusMessage> heldCapabilities;
     QList<Call> calls;
     QList<QDBusMessage> held;
 
@@ -61,6 +66,16 @@ public Q_SLOTS:
     QStringList GetCapabilities()
     {
         ++capabilitiesAsked;
+        if (holdCapabilities) {
+            setDelayedReply(true);
+            heldCapabilities.append(message());
+            return {};
+        }
+        if (failCapabilities > 0) {
+            --failCapabilities;
+            sendErrorReply(QDBusError::Failed, QStringLiteral("hw-test: no capabilities"));
+            return {};
+        }
         return capabilities;
     }
 
@@ -185,6 +200,9 @@ private Q_SLOTS:
         m_fake.calls.clear();
         m_fake.capabilities = {QStringLiteral("body")};
         m_fake.capabilitiesAsked = 0;
+        m_fake.failCapabilities = 0;
+        m_fake.holdCapabilities = false;
+        m_fake.heldCapabilities.clear();
         m_fake.hold = false;
     }
 
@@ -251,10 +269,12 @@ private Q_SLOTS:
     {
         QTest::addColumn<QStringList>("capabilities");
         QTest::addColumn<QString>("later");
-        const QString escaped = QStringLiteral("a &lt;b&gt; &amp;lt; &quot;");
-        QTest::newRow("no body-markup: un-escaped, &amp; last")
-            << QStringList{QStringLiteral("body")} << QStringLiteral("a <b> &lt; &quot;");
-        QTest::newRow("body-markup: kept") << QStringList{QStringLiteral("body"), QStringLiteral("body-markup")} << escaped;
+        // review-7-security INFO-1: un-escaped, then no <, > or &, whatever
+        // the daemon says.
+        const QString plain = QStringLiteral("a b lt; quot;");
+        QTest::newRow("no body-markup: no markup characters") << QStringList{QStringLiteral("body")} << plain;
+        QTest::newRow("body-markup: no markup characters either")
+            << QStringList{QStringLiteral("body"), QStringLiteral("body-markup")} << plain;
     }
 
     void markup()
@@ -266,8 +286,8 @@ private Q_SLOTS:
         const auto notifier = busNotifier();
         notifier->send(QStringLiteral("e"), QStringLiteral("t"), escaped, 50);
         QTRY_COMPARE(m_fake.calls.size(), 1);
-        // Sent before the daemon answered: as it is.
-        QCOMPARE(m_fake.calls.at(0).body, escaped);
+        // Sent before the daemon answered: the same.
+        QCOMPARE(m_fake.calls.at(0).body, later);
         QTRY_VERIFY(notifier->capabilitiesKnown());
         notifier->send(QStringLiteral("e"), QStringLiteral("t"), escaped, 50);
         notifier->send(QStringLiteral("e"), QStringLiteral("t"), escaped, 50);
@@ -280,11 +300,118 @@ private Q_SLOTS:
         QCOMPARE(m_fake.calls.at(2).summary, QStringLiteral("t"));
     }
 
+    // R4 P2d: a failed GetCapabilities is asked again on the next send;
+    // the body never has a <, > or & (before, after or without an answer).
+    void capabilitiesRetry_data()
+    {
+        QTest::addColumn<QStringList>("capabilities");
+        QTest::addColumn<QString>("later");
+        const QString plain = QStringLiteral("a b lt; quot;");
+        QTest::newRow("error, then body-markup: no markup characters")
+            << QStringList{QStringLiteral("body"), QStringLiteral("body-markup")} << plain;
+        QTest::newRow("error, then no body-markup: no markup characters") << QStringList{QStringLiteral("body")} << plain;
+    }
+
+    void capabilitiesRetry()
+    {
+        QFETCH(QStringList, capabilities);
+        QFETCH(QString, later);
+        m_fake.capabilities = capabilities;
+        m_fake.failCapabilities = 1;
+        s_messages.clear();
+        const QString escaped = QStringLiteral("a &lt;b&gt; &amp;lt; &quot;");
+        const auto notifier = busNotifier();
+        notifier->send(QStringLiteral("e"), QStringLiteral("hw-secret-title"), escaped, 50);
+        QTRY_COMPARE(m_fake.calls.size(), 1);
+        QTRY_VERIFY(!notifier->capabilitiesPending());
+        QCOMPARE(notifier->capabilityAttempts(), 1);
+        QVERIFY(!notifier->capabilitiesKnown());
+        QCOMPARE(m_fake.calls.at(0).body, later);
+        // The failed call: one fixed line, nothing of the notification.
+        QTRY_COMPARE(s_messages.size(), 1);
+        QCOMPARE(s_messages.first(), QStringLiteral("hearthwire-hyprland: notifications are not available"));
+        // The next send asks again (the body the same, before the answer).
+        notifier->send(QStringLiteral("e"), QStringLiteral("hw-secret-title"), escaped, 50);
+        QTRY_COMPARE(m_fake.calls.size(), 2);
+        QCOMPARE(m_fake.calls.at(1).body, later);
+        QCOMPARE(notifier->capabilityAttempts(), 2);
+        QTRY_VERIFY(notifier->capabilitiesKnown());
+        notifier->send(QStringLiteral("e"), QStringLiteral("hw-secret-title"), escaped, 50);
+        QTRY_COMPARE(m_fake.calls.size(), 3);
+        QCOMPARE(m_fake.calls.at(2).body, later);
+        // Answered: not asked again.
+        QCOMPARE(m_fake.capabilitiesAsked, 2);
+        QCOMPARE(notifier->capabilityAttempts(), 2);
+        QCOMPARE(s_messages.size(), 1);
+    }
+
+    // At most three GetCapabilities calls, however many sends fail.
+    void capabilitiesAtMostThreeAttempts()
+    {
+        m_fake.capabilities = {QStringLiteral("body")};
+        m_fake.failCapabilities = 100;
+        s_messages.clear();
+        const QString escaped = QStringLiteral("x &lt;y&gt;");
+        const auto notifier = busNotifier();
+        for (int i = 0; i < 6; ++i) {
+            notifier->send(QStringLiteral("e"), QStringLiteral("hw-secret-title"), escaped, 50);
+            QTRY_COMPARE(m_fake.calls.size(), i + 1);
+            QTRY_VERIFY(!notifier->capabilitiesPending());
+            QCOMPARE(notifier->capabilityAttempts(), qMin(i + 1, int(Notifier::MaxCapabilityAttempts)));
+        }
+        QTest::qWait(200);
+        QCOMPARE(m_fake.capabilitiesAsked, 3);
+        QCOMPARE(notifier->capabilityAttempts(), 3);
+        QVERIFY(!notifier->capabilitiesKnown());
+        // Never answered: every body went without markup characters.
+        for (const FakeNotifications::Call &call : std::as_const(m_fake.calls))
+            QCOMPARE(call.body, QStringLiteral("x y"));
+        QCOMPARE(s_messages.size(), 1);
+        QCOMPARE(s_messages.first(), QStringLiteral("hearthwire-hyprland: notifications are not available"));
+    }
+
+    // Never two GetCapabilities calls at a time: while one waits, sends
+    // don't ask; after its error the next send does.
+    void capabilitiesOneCallInFlight()
+    {
+        m_fake.capabilities = {QStringLiteral("body")};
+        m_fake.holdCapabilities = true;
+        const QString escaped = QStringLiteral("x &lt;y&gt;");
+        const auto notifier = busNotifier();
+        for (int i = 0; i < 3; ++i)
+            notifier->send(QStringLiteral("e"), QStringLiteral("hw-secret-title"), escaped, 50);
+        // Calls on one connection arrive in order: a second GetCapabilities
+        // would be here before the third Notify.
+        QTRY_COMPARE(m_fake.calls.size(), 3);
+        QCOMPARE(m_fake.capabilitiesAsked, 1);
+        QCOMPARE(m_fake.heldCapabilities.size(), 1);
+        QVERIFY(notifier->capabilitiesPending());
+        QCOMPARE(notifier->capabilityAttempts(), 1);
+        m_fake.holdCapabilities = false;
+        QVERIFY(m_server->send(m_fake.heldCapabilities.first().createErrorReply(QDBusError::Failed,
+                                                                             QStringLiteral("hw-test: no capabilities"))));
+        QTRY_VERIFY(!notifier->capabilitiesPending());
+        QVERIFY(!notifier->capabilitiesKnown());
+        notifier->send(QStringLiteral("e"), QStringLiteral("hw-secret-title"), escaped, 50);
+        QTRY_COMPARE(m_fake.calls.size(), 4);
+        QCOMPARE(m_fake.calls.at(3).body, QStringLiteral("x y"));
+        QTRY_VERIFY(notifier->capabilitiesKnown());
+        QCOMPARE(m_fake.capabilitiesAsked, 2);
+        notifier->send(QStringLiteral("e"), QStringLiteral("hw-secret-title"), escaped, 50);
+        QTRY_COMPARE(m_fake.calls.size(), 5);
+        QCOMPARE(m_fake.calls.at(4).body, QStringLiteral("x y"));
+    }
+
     void plainBody()
     {
-        QCOMPARE(Notifier::plainBody(QStringLiteral("&amp;gt;")), QStringLiteral("&gt;"));
-        QCOMPARE(Notifier::plainBody(QStringLiteral("&lt;&gt;&amp;")), QStringLiteral("<>&"));
-        QCOMPARE(Notifier::plainBody(QStringLiteral("&quot;&#60;")), QStringLiteral("&quot;&#60;"));
+        // Un-escaped (&amp; last), then no <, > or & at all.
+        QCOMPARE(Notifier::plainBody(QStringLiteral("&amp;gt;")), QStringLiteral("gt;"));
+        QCOMPARE(Notifier::plainBody(QStringLiteral("&lt;&gt;&amp;")), QString());
+        QCOMPARE(Notifier::plainBody(QStringLiteral("&quot;&#60;")), QStringLiteral("quot;#60;"));
+        QCOMPARE(Notifier::plainBody(QStringLiteral("&lt;a href=\"https://x\"&gt;go&lt;/a&gt;")),
+                 QStringLiteral("a href=\"https://x\"go/a"));
+        QCOMPARE(Notifier::plainBody(QStringLiteral("<b>A & B</b>")), QStringLiteral("bA  B/b"));
+        QCOMPARE(Notifier::plainBody(QStringLiteral("Session: 20% left")), QStringLiteral("Session: 20% left"));
     }
 
     // A daemon that never answers can't hold up send(). It runs on its own

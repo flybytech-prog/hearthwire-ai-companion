@@ -14,6 +14,7 @@ import "OllamaChat.js" as OllamaChat
 import "SettingsLogic.js" as SettingsLogic
 import "ProviderCatalog.js" as Catalog
 import "InstallInfo.js" as InstallInfo
+import "Host.js" as Host
 
 KCM.SimpleKCM {
     id: page
@@ -718,6 +719,9 @@ KCM.SimpleKCM {
     }
 
     function backupText(code) {
+        // The app has no Plasma configuration file; its settings file is named instead.
+        if (Host.isApp && code === "settings-unreadable")
+            return i18n("The app's settings file couldn't be read safely, so nothing was exported. Check that ~/.config/hearthwire-hyprland/settings.json is a file of yours that only you can read and change, in a folder only you can open.")
         switch (code) {
         case "":
             return ""
@@ -1066,6 +1070,7 @@ KCM.SimpleKCM {
 
         RowLayout {
             Kirigami.FormData.label: i18n("Keyboard shortcut opens:")
+            visible: !Host.isApp
             spacing: Kirigami.Units.smallSpacing
 
             QQC2.ComboBox {

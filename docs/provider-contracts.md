@@ -1744,13 +1744,24 @@ These belong to the app itself (task 012 R3, `app/src/SingleInstance.h`,
   (`--tab` alone) or with one it does not take (`--toggle=x`), or an extra
   argument. `--help` and `--version` exit 0 and never use the bus. The first copy starts shown
   (on the `--tab` tab). The second copy reads no settings and starts no helper.
+- Activation token (first copy): the token of a later launch is handed to Qt once, in
+  `XDG_ACTIVATION_TOKEN` set just before the window is shown and removed right after, for
+  exactly one activation; it is never logged or passed to the helper. The first copy's own
+  startup token is Qt's (used on the first show where the compositor supports activation). It
+  may stay readable in the app's own `/proc/<pid>/environ` after it is unset (the kernel keeps
+  the start-up environment block; readable only by the same user), and on X11 or without
+  xdg_activation it is never used at all; it is single use, and the helper never gets it.
 - Notifications: `org.freedesktop.Notifications.Notify` (asynchronous),
   app_name `Hearthwire`, replaces_id 0, app_icon `hearthwire`, summary =
   title, body = text, no actions, expire_timeout -1, hints `transient` (b
   true), `urgency` (y: Low 0; Default, Normal, High 1; Critical 2) and
-  `desktop-entry` `hearthwire-hyprland`. `GetCapabilities` is asked once;
-  without `body-markup` the body is sent un-escaped (`&lt;`, `&gt;`, then
-  `&amp;`).
+  `desktop-entry` `hearthwire-hyprland`. The body arrives escaped; it is
+  un-escaped (`&lt;`, `&gt;`, then `&amp;`) and then every `<`, `>` and `&`
+  is dropped, for every daemon, so none gets markup (not even one that
+  re-parses escaped text). The title is sent as it is (plain text).
+  `GetCapabilities` is asked on the first notification, and again on the
+  next one after a failed call (at most 3 times, one call at a time); its
+  answer does not change the body.
 - Desktop file: `hearthwire-hyprland.desktop`; its name is the app id (the
   Wayland app id from `setDesktopFileName`, `StartupWMClass` and the
   notifications' `desktop-entry`). No D-Bus activation, no actions.

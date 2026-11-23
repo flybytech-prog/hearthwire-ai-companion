@@ -3,7 +3,8 @@
 Every generated file must equal its source except import lines of the KDE
 modules in IMPORTS, which point at Hearthwire.Compat.* with the alias kept.
 The .js files (the protected ones too) and main.xml must be byte-identical,
-and no generated file may still import an org.kde module.
+except ui/Host.js (exactly PLASMA_HOST in, exactly APP_HOST out), and no
+generated file may still import an org.kde module.
 """
 
 import importlib.util
@@ -73,6 +74,8 @@ def test_js_protected_and_schema_files_are_byte_identical(synced):
     tool, dest, names = synced
     sources = _sources(tool)
     for name in names:
+        if name == "Host.js":
+            continue
         if name.endswith(".js") or name == "main.xml":
             assert (dest / name).read_bytes() == sources[name].read_bytes(), name
     for name in PROTECTED:
@@ -201,17 +204,107 @@ def test_js_files_never_import_or_name_kde(text):
     tool.check_js(".pragma library\nvar OPERATIONS = [\"status\", \"import\"]\n// org.kde in a comment\n")
 
 
-def test_a_bad_js_file_stops_the_whole_sync(tmp_path):
-    tool = _tool()
+def _tmp_plasmoid(tmp_path, host):
+    """A minimal plasmoid folder; host: the bytes of ui/Host.js (None: no Host.js)."""
     source = tmp_path / "plasmoid"
     (source / "contents" / "ui").mkdir(parents=True)
     (source / "contents" / "config").mkdir()
     (source / "contents" / "config" / "config.qml").write_text("import QtQuick\n")
     (source / "contents" / "config" / "main.xml").write_text("<kcfg/>\n")
+    (source / "contents" / "ui" / "Page.qml").write_text('import QtQuick\nimport "Host.js" as Host\nItem {}\n')
+    if host is not None:
+        (source / "contents" / "ui" / "Host.js").write_bytes(host)
+    return source
+
+
+def test_a_bad_js_file_stops_the_whole_sync(tmp_path):
+    tool = _tool()
+    source = _tmp_plasmoid(tmp_path, tool.PLASMA_HOST)
     (source / "contents" / "ui" / "A.js").write_text(".import org.kde.kirigami 2.0 as K\n")
     with pytest.raises(tool.SyncError):
         tool.sync(source, tmp_path / "out")
     assert tool.main(["--source", str(source), "--dest", str(tmp_path / "out2")]) == 1
+
+
+# Task 012 R4 P2a: ui/Host.js is the one .js file the app gets changed, from
+# exactly PLASMA_HOST to exactly APP_HOST.
+HOST_TEXT = (
+    ".pragma library\n"
+    "// Which front end runs these files: false in the Plasma widget. The\n"
+    "// hearthwire-hyprland app's build (app/tools/sync_plasmoid.py) writes this\n"
+    "// file with \"var isApp = true\" instead; nothing else may change here.\n"
+    "var isApp = %s\n"
+)
+
+
+def test_host_js_constants_are_the_plan_bytes():
+    tool = _tool()
+    assert tool.PLASMA_HOST == (HOST_TEXT % "false").encode()
+    assert tool.APP_HOST == (HOST_TEXT % "true").encode()
+
+
+def test_host_js_source_is_plasma_and_the_copy_is_app(synced):
+    tool, dest, names = synced
+    assert "Host.js" in names
+    assert (UI / "Host.js").read_bytes() == tool.PLASMA_HOST
+    assert (dest / "Host.js").read_bytes() == tool.APP_HOST
+
+
+def test_host_js_is_the_only_js_file_that_changes(synced):
+    tool, dest, names = synced
+    sources = _sources(tool)
+    changed = [name for name in names if name.endswith(".js")
+               and (dest / name).read_bytes() != sources[name].read_bytes()]
+    assert changed == ["Host.js"]
+
+
+def test_a_good_tmp_plasmoid_syncs_host_js(tmp_path):
+    tool = _tool()
+    source = _tmp_plasmoid(tmp_path, tool.PLASMA_HOST)
+    names = tool.sync(source, tmp_path / "out")
+    assert "Host.js" in names
+    assert (tmp_path / "out" / "Host.js").read_bytes() == tool.APP_HOST
+
+
+@pytest.mark.parametrize("host", [
+    None,                                                       # no Host.js
+    (HOST_TEXT % "false").encode() + b"var x = 1\n",            # an extra line
+    (HOST_TEXT % "true").encode(),                              # the value changed
+    (HOST_TEXT % "false").encode()[:-1],                        # no last newline
+    (HOST_TEXT % "false").replace("\n", "\r\n").encode(),       # CRLF
+    (HOST_TEXT % "false").encode() + b"\n",                     # a trailing empty line
+    b"\xef\xbb\xbf" + (HOST_TEXT % "false").encode(),           # a BOM
+    (HOST_TEXT % "false").replace("// file", "//  file").encode(),  # a comment changed
+    (HOST_TEXT % "1").encode(),
+    b"",
+])
+def test_any_other_host_js_stops_the_sync(tmp_path, host):
+    tool = _tool()
+    source = _tmp_plasmoid(tmp_path, host)
+    with pytest.raises(tool.SyncError):
+        tool.sync(source, tmp_path / "out")
+    # Nothing was written, and the command line says so without a traceback.
+    assert not (tmp_path / "out").exists()
+    assert tool.main(["--source", str(source), "--dest", str(tmp_path / "out2")]) == 1
+    assert not (tmp_path / "out2").exists()
+
+
+def test_a_host_js_symlink_stops_the_sync(tmp_path):
+    tool = _tool()
+    source = _tmp_plasmoid(tmp_path, None)
+    real = tmp_path / "real.js"
+    real.write_bytes(tool.PLASMA_HOST)
+    (source / "contents" / "ui" / "Host.js").symlink_to(real)
+    with pytest.raises(tool.SyncError):
+        tool.sync(source, tmp_path / "out")
+
+
+def test_host_js_can_not_be_left_out(tmp_path):
+    tool = _tool()
+    source = _tmp_plasmoid(tmp_path, tool.PLASMA_HOST)
+    with pytest.raises(tool.SyncError):
+        tool.sync(source, tmp_path / "out", exclude={"Host.js"})
+    assert not (tmp_path / "out").exists()
 
 
 def test_dest_inside_the_plasmoid_is_refused(tmp_path):

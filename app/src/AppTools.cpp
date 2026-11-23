@@ -1,9 +1,11 @@
 #include "AppTools.h"
 
+#include "AboutInfo.h"
 #include "PlasmoidHost.h"
 #include "ProcessRunner.h"
 #include "UrlGuard.h"
 
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QGuiApplication>
 #include <QDir>
@@ -13,6 +15,7 @@
 #include <QKeyEvent>
 #include <QQmlEngine>
 #include <QQuickWindow>
+#include <QScopedValueRollback>
 
 #include <cstdio>
 #include <sys/stat.h>
@@ -31,23 +34,64 @@ AppTools::AppTools(PlasmoidHost *host, SingleInstance *instance, QObject *parent
 {
 }
 
+QList<AppTools::Step> AppTools::presentSteps(bool hasToken, bool wasVisible, bool isWayland)
+{
+    QList<Step> steps;
+    // Before show(): on Wayland, showing a hidden window activates it with
+    // whatever token XDG_ACTIVATION_TOKEN holds then (AppTools.h).
+    if (hasToken)
+        steps << Step::SetToken;
+    steps << Step::Show << Step::Raise;
+    if (needsRequestActivate(wasVisible, isWayland))
+        steps << Step::Activate;
+    // Always: the token is never kept past this call.
+    steps << Step::UnsetToken;
+    return steps;
+}
+
+bool AppTools::needsRequestActivate(bool wasVisible, bool isWayland)
+{
+    return wasVisible || !isWayland;
+}
+
+bool AppTools::platformIsWayland()
+{
+    return QGuiApplication::platformName().startsWith(QLatin1String("wayland"));
+}
+
 void AppTools::present(QObject *window)
 {
     auto *quick = qobject_cast<QQuickWindow *>(window);
-    if (!quick)
+    // Re-entered from a show handler: ignored (AppTools.h).
+    if (!quick || m_presenting)
         return;
+    const QScopedValueRollback<bool> presenting(m_presenting, true);
     ++m_presents;
-    quick->show();
-    quick->raise();
+    const bool wasVisible = quick->isVisible();
     const QString token = m_instance ? SingleInstance::filterToken(m_instance->takeToken()) : QString();
-    if (token.isEmpty()) {
-        quick->requestActivate();
-        return;
+    // Only the steps' order matters here; presentSteps() has the rules
+    // (qtbase 6.12.0 references in AppTools.h).
+    const QList<Step> steps = presentSteps(!token.isEmpty(), wasVisible, platformIsWayland());
+    for (const Step step : steps) {
+        switch (step) {
+        case Step::SetToken:
+            qputenv("XDG_ACTIVATION_TOKEN", token.toLatin1());
+            break;
+        case Step::Show:
+            quick->show();
+            break;
+        case Step::Raise:
+            quick->raise();
+            break;
+        case Step::Activate:
+            quick->requestActivate();
+            break;
+        case Step::UnsetToken:
+            // On Wayland Qt has used and unset it; elsewhere it is still ours.
+            qunsetenv("XDG_ACTIVATION_TOKEN");
+            break;
+        }
     }
-    qputenv("XDG_ACTIVATION_TOKEN", token.toLatin1());
-    quick->requestActivate();
-    // qtwayland has used and unset it; without Wayland it is still ours.
-    qunsetenv("XDG_ACTIVATION_TOKEN");
 }
 
 void AppTools::dropToken()
@@ -63,6 +107,33 @@ void AppTools::quit()
         return;
     }
     QCoreApplication::quit();
+}
+
+QVariantMap AppTools::about()
+{
+    return QVariantMap{
+        {QStringLiteral("name"), QStringLiteral("Hearthwire")},
+        {QStringLiteral("appId"), QStringLiteral("hearthwire-hyprland")},
+        {QStringLiteral("version"), QStringLiteral(HW_ABOUT_VERSION)},
+        {QStringLiteral("comment"), QStringLiteral(HW_ABOUT_COMMENT)},
+        {QStringLiteral("license"), QStringLiteral(HW_ABOUT_LICENSE)},
+        {QStringLiteral("authors"), QStringLiteral(HW_ABOUT_AUTHORS)},
+        {QStringLiteral("authorCount"), int(HW_ABOUT_AUTHOR_COUNT)},
+        {QStringLiteral("website"), QStringLiteral(HW_ABOUT_WEBSITE)},
+        {QStringLiteral("bugReportUrl"), QStringLiteral(HW_ABOUT_BUG_REPORT_URL)},
+        {QStringLiteral("icon"), QStringLiteral("hearthwire")},
+    };
+}
+
+bool AppTools::copyAbout(const QString &key) const
+{
+    if (key != QLatin1String("website") && key != QLatin1String("bugReportUrl"))
+        return false;
+    QClipboard *clipboard = QGuiApplication::clipboard();
+    if (!clipboard)
+        return false;
+    clipboard->setText(about().value(key).toString());
+    return true;
 }
 
 AppTools *AppTools::create(QQmlEngine *, QJSEngine *)
@@ -195,6 +266,12 @@ void AppTools::holdQuit(bool hold)
 int AppTools::quitRequests() const
 {
     return fixtures() ? m_quitRequests : -1;
+}
+
+QString AppTools::clipboardText() const
+{
+    QClipboard *clipboard = QGuiApplication::clipboard();
+    return fixtures() && clipboard ? clipboard->text() : QString();
 }
 
 bool AppTools::sendKey(QObject *window, int key) const
