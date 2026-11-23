@@ -991,8 +991,18 @@ def test_wait_raises_stopped_only_while_the_child_runs():
     assert not termination.requested()
 
 
+@pytest.fixture
+def default_stop_signals():
+    """Explicit start state: the stop signals at SIG_DFL (a background job starts pytest with SIGINT ignored)."""
+    saved = {number: signal.signal(number, signal.SIG_DFL) for number in (*termination.SIGNALS, signal.SIGQUIT)}
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    yield
+    for number, handler in saved.items():
+        signal.signal(number, handler)
+
+
 @main_thread_only
-def test_handling_restores_the_handlers_and_keeps_ignored_signals_ignored():
+def test_handling_restores_the_handlers_and_keeps_ignored_signals_ignored(default_stop_signals):
     before = {number: signal.getsignal(number) for number in termination.SIGNALS}
     previous_hup = signal.signal(signal.SIGHUP, signal.SIG_IGN)
     previous_chld = signal.signal(signal.SIGCHLD, signal.SIG_IGN)

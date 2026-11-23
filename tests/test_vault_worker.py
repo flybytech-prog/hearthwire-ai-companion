@@ -648,6 +648,11 @@ FRONT = textwrap.dedent(r'''
     spec = json.load(open(sys.argv[1]))
     sys.path.insert(0, spec["src"])
     from hearthwire.core import termination, worker
+    # Explicit start state, whatever the parent ignored (a background job ignores SIGINT/SIGQUIT).
+    for number in (*termination.SIGNALS, signal.SIGQUIT):
+        signal.signal(number, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.default_int_handler)  # What Python installs when SIGINT is not ignored.
+    signal.pthread_sigmask(signal.SIG_SETMASK, [])
     if spec["mutations"]:
         source = open(worker.__file__).read()
         for old, new in spec["mutations"]:
@@ -787,3 +792,21 @@ def test_proof_the_stop_signals_are_blocked_before_the_fork(tmp_path):
         ("    mask = signal.pthread_sigmask(signal.SIG_BLOCK, termination.SIGNALS)\n",
          "    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])\n")])
     assert "KeyboardInterrupt" in err
+
+
+def test_the_front_scenarios_pass_with_sigint_and_sigquit_ignored_in_the_parent(tmp_path):
+    """R4: pytest started as a background job (SIGINT/SIGQUIT ignored) must not break the fork-signal tests."""
+    def ignore():
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGQUIT, signal.SIG_IGN)
+
+    here = Path(__file__).resolve()
+    done = subprocess.run(
+        [sys.executable, "-I", "-m", "pytest", "-o", "addopts=", "-v", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "inner"),
+         f"{here}::test_a_signal_right_after_the_fork_is_forwarded",
+         f"{here}::test_proof_the_stop_signals_are_blocked_before_the_fork",
+         f"{here.parent / 'test_vault_signals.py'}::test_handling_restores_the_handlers_and_keeps_ignored_signals_ignored"],
+        preexec_fn=ignore, capture_output=True, text=True, timeout=120, cwd=str(here.parent.parent),
+        env={**os.environ, "PYTEST_ADDOPTS": ""})
+    assert done.returncode == 0, done.stdout[-1500:]
+    assert done.stdout.count(" PASSED") == 3, done.stdout[-1500:]
