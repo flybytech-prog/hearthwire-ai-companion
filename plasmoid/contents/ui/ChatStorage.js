@@ -17,7 +17,7 @@ var METHOD_OPERATIONS = ["unlock", "add-key", "remove-key"]
 var VAULT_STATES = ["absent", "locked", "unlocked", "unavailable", "damaged"]
 // The wallet key slot, as status reports it with locked and unlocked.
 var WALLET_STATES = ["set-up", "off", "unavailable"]
-var MISSING_TOOLS = ["gocryptfs", "gocryptfs-v2", "kdialog", "fusermount3"]
+var MISSING_TOOLS = ["gocryptfs", "gocryptfs-v2", "kdialog", "hearthwire-askpass", "fusermount3"]
 // Tools only the KDE Wallet unlock needs (reported with locked/unlocked).
 var WALLET_TOOLS = ["kwallet-query", "qdbus6", "openssl"]
 // The packages that provide each missing tool, per distro family as
@@ -30,6 +30,7 @@ var TOOL_PACKAGES = {
         "gocryptfs": "gocryptfs",
         "gocryptfs-v2": "gocryptfs",
         "kdialog": "kdialog",
+        "hearthwire-askpass": "hearthwire-hyprland",
         "fusermount3": "fuse3",
         "kwallet-query": "kwallet",
         "qdbus6": "qt6-tools",
@@ -39,6 +40,7 @@ var TOOL_PACKAGES = {
         "gocryptfs": "gocryptfs",
         "gocryptfs-v2": "gocryptfs",
         "kdialog": "kdialog",
+        "hearthwire-askpass": "hearthwire-askpass",
         "fusermount3": "fuse3",
         "kwallet-query": "kf6-kwallet",
         "qdbus6": "qt6-qttools",
@@ -48,6 +50,7 @@ var TOOL_PACKAGES = {
         "gocryptfs": "gocryptfs",
         "gocryptfs-v2": "gocryptfs",
         "kdialog": "kdialog",
+        "hearthwire-askpass": "hearthwire-askpass",
         "fusermount3": "fuse3",
         "kwallet-query": "kwallet6",
         "qdbus6": "qdbus-qt6",
@@ -57,6 +60,7 @@ var TOOL_PACKAGES = {
         "gocryptfs": "gocryptfs",
         "gocryptfs-v2": "gocryptfs",
         "kdialog": "kdialog",
+        "hearthwire-askpass": "hearthwire-askpass",
         "fusermount3": "fusermount3",
         "kwallet-query": "kwallet-query",
         "qdbus6": "qdbus6",
@@ -74,7 +78,7 @@ var HELPER_ERRORS = [
     "absent", "cancelled", "wrong-passphrase", "empty-passphrase", "init-failed",
     "mount-failed", "not-verified", "stale-mount", "busy", "not-locked", "no-runtime-dir",
     "damaged", "not-set-up", "wallet-disabled", "wallet-closed", "wallet-failed",
-    "wallet-mismatch", "wallet-write-failed", "legacy-data"
+    "wallet-mismatch", "wallet-write-failed", "legacy-data", "bad-frontend"
 ]
 
 // Only the exact word "wallet" means KDE Wallet; anything else (including
@@ -341,7 +345,15 @@ function parseReply(stdout) {
     return result
 }
 
+// The helper exits 0 with a reply, except that it refuses with exit 2 and
+// {"ok":false,"error":"bad-frontend"} (a mismatched app/helper pair). That
+// one reply is read at exit 2; every other nonzero exit stays bad-reply.
 function replyFor(exitCode, stdout) {
+    if (exitCode === 2) {
+        var refused = parseReply(stdout)
+        if (refused.ok === false && refused.error === "bad-frontend")
+            return {ok: false, error: "bad-frontend"}
+    }
     if (exitCode !== 0)
         return {ok: false, error: "bad-reply"}
     return parseReply(stdout)
@@ -434,6 +446,8 @@ function messageFor(error) {
     case "wallet-write-failed":
     // Saved data of the previous version is still waiting for the installer.
     case "legacy-data":
+    // The helper refused the app's frontend request (versions differ).
+    case "bad-frontend":
         return error
     // Plasma start found the wallet closed: the card just offers Unlock.
     case "wallet-closed":

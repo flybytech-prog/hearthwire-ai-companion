@@ -1,3 +1,6 @@
 [
-  {"match": "^env HEARTHWIRE_RUN=\\d+ python3 -P -m hearthwire --json --providers=", "exitCode": 0, "stdoutFile": "snapshot.json"}
+  {"match": "^env HEARTHWIRE_RUN=\\d+ python3 -P -m hearthwire --json --providers=", "exitCode": 0, "stdoutFile": "snapshot.json"},
+  {"match": "^env HEARTHWIRE_RUN=\\d+ HEARTHWIRE_APPLET=2147483648 python3 -P -m hearthwire --vault status$", "exitCode": 0, "stdout": "{\"ok\": true, \"state\": \"unavailable\", \"missing\": [\"hearthwire-askpass\"]}\n"},
+  {"match": "^env HEARTHWIRE_RUN=\\d+ HEARTHWIRE_APPLET=2147483648 python3 -P -m hearthwire --vault lock$", "exitCode": 2, "stdout": "{\"ok\": false, \"error\": \"bad-frontend\"}\n"},
+  {"match": "^env HEARTHWIRE_RUN=\\d+ HEARTHWIRE_APPLET=2147483648 python3 -P -m hearthwire --web-data remove --store encrypted --applet 2147483648$", "exitCode": 2, "stdout": "{\"ok\": false, \"error\": \"bad-frontend\"}\n"}
 ]

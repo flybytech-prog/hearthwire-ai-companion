@@ -13,10 +13,15 @@ The sync stops (SyncError), so nothing of KDE's can slip into the app:
   whole-line // comments and the KNOWN_TEXT below;
 - on a string import (import "...") other than one of the plasmoid's own
   .js files by its bare name, and on any .js ".import";
-- when ui/Host.js is missing, left out or not exactly PLASMA_HOST.
+- when ui/Host.js is missing, left out or not exactly PLASMA_HOST;
+- when ui/LinkOut.js is missing, left out or not exactly PLASMA_LINK_OUT.
 The one file that changes beyond import lines is ui/Host.js: the app gets
 APP_HOST (`var isApp = true`), a fixed text, never anything derived from
 the source (task 012 R4 P2a).
+ui/LinkOut.js holds the plasmoid's one Qt.openUrlExternally (a chat link
+the user confirmed, task 013): the app takes it unchanged, but only as the
+exact reviewed bytes, so app/tests/check_no_opener.py can allow that one
+file and nothing else.
 Stdlib only; writes only into --dest.
 """
 
@@ -67,6 +72,20 @@ PLASMA_HOST = (
     b"var isApp = false\n"
 )
 APP_HOST = PLASMA_HOST[: -len(b"false\n")] + b"true\n"
+
+# ui/LinkOut.js: the one place a chat link opens in the system browser. The
+# reviewed bytes, synced unchanged; any other text stops the sync. The same
+# file's sha256 is pinned on its own in app/tests/check_no_opener.py and
+# check_synced.py (tests/test_app_sync.py checks the three agree).
+LINK_OUT_JS = "LinkOut.js"
+PLASMA_LINK_OUT = (
+    b".pragma library\n"
+    b"// Where a link the user chose goes: the system browser, through Qt. Only\n"
+    b"// ChatWebView calls it, and only for an https address the user confirmed.\n"
+    b"// The Plasma widget and the hearthwire-hyprland app use this same file\n"
+    b"// unchanged (the app build refuses any other bytes).\n"
+    b"function open(url) { Qt.openUrlExternally(url) }\n"
+)
 
 
 class SyncError(Exception):
@@ -153,6 +172,17 @@ def host_js(data):
     return APP_HOST
 
 
+def link_out_js(data):
+    """The plasmoid's LinkOut.js bytes as they are; SyncError unless they are exactly PLASMA_LINK_OUT."""
+    if data != PLASMA_LINK_OUT:
+        raise SyncError("ui/" + LINK_OUT_JS + " is not the reviewed file (only its exact text is synced)")
+    return data
+
+
+# The ui/ files that must be there, exactly as pinned, and can't be left out.
+PINNED = {HOST_JS: host_js, LINK_OUT_JS: link_out_js}
+
+
 def sync(source, dest, exclude=()):
     source = Path(source).resolve()
     dest = Path(dest).resolve()
@@ -160,12 +190,13 @@ def sync(source, dest, exclude=()):
         raise SyncError("--dest must be outside the plasmoid folder")
     pairs = plan(source)
     # Checked before anything is written.
-    hosts = [path for path, name in pairs if name == HOST_JS and path.parent.name == "ui"]
-    if not hosts:
-        raise SyncError("missing: ui/" + HOST_JS)
-    if HOST_JS in exclude:
-        raise SyncError(HOST_JS + " can't be left out")
-    host_js(hosts[0].read_bytes())
+    for pinned, check in PINNED.items():
+        found = [path for path, name in pairs if name == pinned and path.parent.name == "ui"]
+        if not found:
+            raise SyncError("missing: ui/" + pinned)
+        if pinned in exclude:
+            raise SyncError(pinned + " can't be left out")
+        check(found[0].read_bytes())
     dest.mkdir(parents=True, exist_ok=True)
     written = []
     js_names = {name for path, name in pairs if path.suffix == ".js" and path.parent.name == "ui"}
@@ -177,8 +208,8 @@ def sync(source, dest, exclude=()):
             data = rewrite_qml(data.decode("utf-8"), js_names).encode("utf-8")
         elif path.suffix == ".js":
             check_js(data.decode("utf-8"))
-            if name == HOST_JS:
-                data = host_js(data)
+            if name in PINNED:
+                data = PINNED[name](data)
         target = dest / name
         # Rewrite only on a change, so the build doesn't redo unchanged files.
         if not target.is_file() or target.read_bytes() != data:

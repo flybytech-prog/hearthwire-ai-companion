@@ -24,6 +24,11 @@
 //
 // The look follows the Omarchy theme (ThemeWatcher.h) through the app's
 // Qt Quick Controls style, Hearthwire.Style (Material behind it).
+//
+// The Chat tab runs in Qt WebEngine (task 013) with Chromium's sandbox on:
+// Chromium switches on the command line end with exit 2, and every
+// QTWEBENGINE* variable is dropped before QtWebEngineQuick::initialize(),
+// which runs before QGuiApplication (WebEngineEnv.h).
 #include <QCommandLineParser>
 #include <QDBusConnection>
 #include <QDir>
@@ -52,6 +57,7 @@
 #include "SingleInstance.h"
 #include "ThemeWatcher.h"
 #include "UrlGuard.h"
+#include "WebEngineEnv.h"
 
 Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_KirigamiPlugin)
 Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_PlasmaComponentsPlugin)
@@ -86,6 +92,10 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "hearthwire-hyprland: -platformpluginpath is not accepted; Qt's plugins come only from Qt's own folder\n");
         return 2;
     }
+    if (hwRefusedChromiumArgument(argc, argv)) {
+        std::fprintf(stderr, "hearthwire-hyprland: Chromium switches are not accepted; Qt WebEngine always runs with its sandbox on\n");
+        return 2;
+    }
     hwDropEnvironmentImportPaths();
     hwDropEnvironmentPluginPaths();
     hwDropEnvironmentModulePaths();
@@ -100,6 +110,10 @@ int main(int argc, char *argv[])
     // Desktop sizes, not touch sizes, unless the user chose otherwise.
     if (qEnvironmentVariableIsEmpty("QT_QUICK_CONTROLS_MATERIAL_VARIANT"))
         qputenv("QT_QUICK_CONTROLS_MATERIAL_VARIANT", "Dense");
+    // Qt WebEngine: its variables dropped, then initialize(), before
+    // QGuiApplication exists (no WebEngine process starts here; the first
+    // profile, made by the Chat tab, starts them).
+    hwStartWebEngine();
     QGuiApplication app(argc, argv);
     // Some platforms (offscreen, a bare Wayland session) give no icon
     // folders; add the XDG ones so theme icons resolve.

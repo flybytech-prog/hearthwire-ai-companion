@@ -83,6 +83,8 @@ KCM.SimpleKCM {
     // Apply never writes back an old value.
     property string cfg_chatSiteZoom: "{}"
     property string cfg_chatSiteZoomDefault: "{}"
+    property var cfg_chatHttpWarnedSites: []
+    property var cfg_chatHttpWarnedSitesDefault: []
     property bool cfg_alertLowEnabled: false
     property bool cfg_alertLowEnabledDefault: false
     property int cfg_alertLowPercent: 20

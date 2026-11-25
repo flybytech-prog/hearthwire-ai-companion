@@ -7,6 +7,7 @@ import org.kde.kirigami as Kirigami
 import org.kde.plasma.components as PlasmaComponents
 import "ChatSites.js" as ChatSites
 import "ChatStorage.js" as ChatStorage
+import "LinkOut.js" as LinkOut
 import "SettingsLogic.js" as SettingsLogic
 
 // The only file that touches Qt WebEngine. Every chat site has its own
@@ -50,7 +51,7 @@ Item {
     // (ChatStorage.siteProfilePath / siteProfileName).
     property bool staySignedIn: false
     property string runtimeDir: ""
-    property int storageApplet: -1
+    property double storageApplet: -1
     property int storageGeneration: -1
     // Sites whose folder main.qml prepared in this generation; a saved
     // profile is made only for these.
@@ -76,7 +77,7 @@ Item {
     // before siteId too; every ChatSites call gets them.
     property var userSites: []
     // Only makes the owner check's helper source name unique.
-    property int appletId: 0
+    property double appletId: 0
     // Per-site zoom {siteId: factor}; a sign-in window uses its site's.
     property var zoomMap: ({})
 
@@ -119,6 +120,7 @@ Item {
     readonly property bool pageFailed: !!chatWeb.activeView && chatWeb.activeView.failed
     readonly property bool pageCrashed: !!chatWeb.activeView && chatWeb.activeView.crashed
     readonly property bool canOpenExternally: !!chatWeb.activeView
+        && ChatSites.isWebUrl(chatWeb.activeView.url.toString())
         && ChatSites.isPageUrl(
             ChatSites.effectiveSite(chatWeb.activeView.site, chatWeb.customUrls, chatWeb.userSites),
             chatWeb.activeView.url.toString())
@@ -166,6 +168,16 @@ Item {
     // for Open or Cancel: the address and its ASCII host, "" when none.
     property string externalUrl: ""
     property string externalHost: ""
+    // The waiting address is plain http of a site not yet acknowledged: the
+    // prompt says it is not secure, and Open acknowledges the site.
+    property bool externalInsecure: false
+    // Origins (http://host:port) whose insecure warning the user already
+    // confirmed: main.qml's chatHttpWarnedSites, plus the ones confirmed in
+    // this view (so a failed save still warns only once).
+    property var httpWarnedSites: []
+    property var warnedNow: []
+    // Open on the warning: main.qml stores the site's origin.
+    signal httpSiteAcknowledged(string origin)
     // Requests sooner than this (ms) after the last prompt was shown or
     // answered are dropped; overridable by tests only.
     property int externalPromptGap: 3000
@@ -216,39 +228,70 @@ Item {
         chatWeb.paneView.url = url
     }
 
+    function siteWarned(url) {
+        return ChatSites.isWarnedSite(chatWeb.httpWarnedSites, url)
+            || ChatSites.isWarnedSite(chatWeb.warnedNow, url)
+    }
+
     // The toolbar's Open in browser: the user's own click, for a page of
-    // the current site only.
+    // the current site only. An https page opens; an http page opens only
+    // after the insecure warning was confirmed for its site.
     function openExternally() {
-        if (chatWeb.canOpenExternally)
-            Qt.openUrlExternally(chatWeb.activeView.url)
+        if (!chatWeb.canOpenExternally)
+            return
+        var url = String(chatWeb.activeView.url)
+        if (url.length > 4096)
+            return
+        if (ChatSites.isHttpUrl(url) && !chatWeb.siteWarned(url))
+            chatWeb.showExternal(url, true)
+        else
+            chatWeb.openHttps(url)
+    }
+
+    // The only way to LinkOut: an https address, or an http one of a site
+    // the user acknowledged, of at most 4096 characters.
+    function openHttps(url) {
+        if (typeof url === "string" && url.length <= 4096 && ChatSites.isWebUrl(url)
+                && (!ChatSites.isHttpUrl(url) || chatWeb.siteWarned(url)))
+            LinkOut.open(url)
+    }
+
+    // Puts url on the prompt; the host must be readable.
+    function showExternal(url, replace) {
+        var host = ChatSites.shortHost(ChatSites.displayHost(url))
+        if (host === "" || (!replace && chatWeb.externalUrl !== ""))
+            return
+        chatWeb.externalQuietUntil = Date.now() + chatWeb.externalPromptGap
+        chatWeb.externalHost = host
+        chatWeb.externalInsecure = ChatSites.isHttpUrl(url) && !chatWeb.siteWarned(url)
+        chatWeb.externalUrl = url
     }
 
     // A page wants url in the system browser: only asks. Dropped while
     // another prompt waits, right after one, or without a readable host.
     function askExternal(url) {
-        var now = Date.now()
-        if (chatWeb.externalUrl !== "" || now < chatWeb.externalQuietUntil
-                || !ChatSites.isHttpsUrl(url))
+        if (typeof url !== "string" || url.length > 4096 || chatWeb.externalUrl !== ""
+                || Date.now() < chatWeb.externalQuietUntil || !ChatSites.isWebUrl(url))
             return
-        var host = ChatSites.shortHost(ChatSites.displayHost(url))
-        if (host === "")
-            return
-        chatWeb.externalQuietUntil = now + chatWeb.externalPromptGap
-        chatWeb.externalHost = host
-        chatWeb.externalUrl = url
+        chatWeb.showExternal(url, false)
     }
 
-    // Open on the prompt: the user's answer, the only other way out.
+    // Open on the prompt: the user's answer, the only other way out. An
+    // http site is acknowledged first (once per site).
     function acceptExternal() {
         var url = chatWeb.externalUrl
         chatWeb.clearExternal()
-        if (ChatSites.isHttpsUrl(url))
-            Qt.openUrlExternally(url)
+        if (url.length <= 4096 && ChatSites.isHttpUrl(url)) {
+            chatWeb.warnedNow = ChatSites.addWarnedSite(chatWeb.warnedNow, url)
+            chatWeb.httpSiteAcknowledged(ChatSites.httpWarnOrigin(url))
+        }
+        chatWeb.openHttps(url)
     }
 
     function clearExternal() {
         chatWeb.externalUrl = ""
         chatWeb.externalHost = ""
+        chatWeb.externalInsecure = false
         chatWeb.externalQuietUntil = Date.now() + chatWeb.externalPromptGap
     }
 
@@ -1100,7 +1143,7 @@ Item {
                 // browser (external or nested sign-in); script-opened ones
                 // are dropped.
                 else if (verdict !== "block" && request.userInitiated
-                         && ChatSites.isHttpsUrl(url))
+                         && ChatSites.isWebUrl(url))
                     chatWeb.askExternal(url)
             }
 

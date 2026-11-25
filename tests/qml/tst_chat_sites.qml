@@ -1529,6 +1529,65 @@ TestCase {
         verify(!ChatSites.isPageUrl(null, "https://claude.ai/"))
     }
 
+    function test_isHttpUrlAndIsWebUrl_data() {
+        return [
+            {tag: "http", url: "http://example.org/a", http: true, https: false},
+            {tag: "https", url: "https://example.org/a", http: false, https: true},
+            {tag: "http upper", url: "HTTP://Example.ORG:8080/", http: true, https: false},
+            {tag: "user info", url: "http://user@example.org/", http: false, https: false},
+            {tag: "backslash", url: "http://example.org\\@evil.example/", http: false, https: false},
+            {tag: "percent host", url: "http://ev%69l.example/", http: false, https: false},
+            {tag: "no host", url: "http:///x", http: false, https: false},
+            {tag: "bad port", url: "http://example.org:99999/", http: false, https: false},
+            {tag: "no slashes", url: "http:example.org", http: false, https: false},
+            {tag: "ftp", url: "ftp://example.org/", http: false, https: false},
+            {tag: "file", url: "file:///etc/passwd", http: false, https: false},
+            {tag: "javascript", url: "javascript:alert(1)", http: false, https: false},
+            {tag: "blank", url: "about:blank", http: false, https: false},
+            {tag: "empty", url: "", http: false, https: false},
+            {tag: "null", url: null, http: false, https: false}
+        ]
+    }
+
+    function test_isHttpUrlAndIsWebUrl(data) {
+        compare(ChatSites.isHttpUrl(data.url), data.http)
+        compare(ChatSites.isHttpsUrl(data.url), data.https)
+        compare(ChatSites.isWebUrl(data.url), data.http || data.https)
+    }
+
+    function test_httpWarnedSites() {
+        compare(ChatSites.httpWarnOrigin("http://Example.ORG/a?b#c"), "http://example.org:80")
+        compare(ChatSites.httpWarnOrigin("http://example.org:8080/"), "http://example.org:8080")
+        compare(ChatSites.httpWarnOrigin("http://[::1]:3000/"), "http://[::1]:3000")
+        compare(ChatSites.httpWarnOrigin("https://example.org/"), "")
+        compare(ChatSites.httpWarnOrigin("junk"), "")
+        // Only canonical http origins are kept, once each.
+        var clean = ChatSites.cleanWarnedSites(["http://a.example:80", "http://a.example:80",
+            "http://A.example:80", "https://b.example:443", "a.example", 5, null, "http://c.example",
+            "http://d.example:81"])
+        compare(clean, ["http://a.example:80", "http://d.example:81"])
+        compare(ChatSites.cleanWarnedSites("http://a.example:80"), [])
+        compare(ChatSites.cleanWarnedSites(null), [])
+        compare(ChatSites.cleanWarnedSites(undefined), [])
+        var added = ChatSites.addWarnedSite(["http://a.example:80"], "http://b.example/x")
+        compare(added, ["http://a.example:80", "http://b.example:80"])
+        compare(ChatSites.addWarnedSite(added, "http://b.example:80/y"), added)
+        compare(ChatSites.addWarnedSite(added, "https://c.example/"), added)
+        compare(ChatSites.addWarnedSite(added, "ftp://c.example/"), added)
+        compare(ChatSites.addWarnedSite(null, "http://z.example/"), ["http://z.example:80"])
+        verify(ChatSites.isWarnedSite(added, "http://b.example/else"))
+        verify(!ChatSites.isWarnedSite(added, "http://b.example:81/"))
+        verify(!ChatSites.isWarnedSite(added, "https://b.example/"))
+        // Capped: the oldest go first.
+        var many = []
+        for (var index = 0; index < 205; index++)
+            many = ChatSites.addWarnedSite(many, "http://h" + index + ".example/")
+        compare(many.length, 200)
+        compare(many[0], "http://h5.example:80")
+        compare(many[199], "http://h204.example:80")
+        compare(ChatSites.cleanWarnedSites(many).length, 200)
+    }
+
     function test_isHttpsUrl() {
         verify(ChatSites.isHttpsUrl("https://claude.ai/new"))
         verify(!ChatSites.isHttpsUrl("http://claude.ai/"))

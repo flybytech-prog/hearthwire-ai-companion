@@ -501,3 +501,40 @@ def test_each_front_end_exports_its_own_settings(config, monkeypatch):
 ])
 def test_proof_the_export_source_rule_catches(config, monkeypatch, old, new):
     assert export_sources(mutant(backup, old, new), config, monkeypatch) != [900, 60]
+
+
+# --- task 013: chatHttpWarnedSites, a StringList (a JSON array of strings, at most 1000 x 512) ---------
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ([], []),
+    (["http://a.example:80", "http://10.0.0.1:8080"], ["http://a.example:80", "http://10.0.0.1:8080"]),
+    (["x" * 512] * 1000, ["x" * 512] * 1000),
+    (["x" * 513], UNREADABLE),
+    (["x"] * 1001, UNREADABLE),
+    (["a", 1], UNREADABLE),
+    (["a", None], UNREADABLE),
+    ("http://a.example:80", UNREADABLE),
+    ({"a": "b"}, UNREADABLE),
+    (("a",), UNREADABLE),
+    (None, UNREADABLE),
+])
+def test_the_string_list_key_keeps_only_the_shape_the_app_writes(value, expected):
+    assert appconfig.typed_value("StringList", value) == expected
+    assert appconfig.applied_from({"chatHttpWarnedSites": value}, ["chatHttpWarnedSites"]) == \
+        {"chatHttpWarnedSites": expected}
+
+
+def test_the_string_list_default_is_a_fresh_empty_list_and_the_table_is_not_shared():
+    first = appconfig.applied_from({}, ["chatHttpWarnedSites"])["chatHttpWarnedSites"]
+    assert first == []
+    first.append("http://a.example:80")
+    assert appconfig.applied_from({}, ["chatHttpWarnedSites"])["chatHttpWarnedSites"] == []
+    assert appletconfig.CONFIG_ENTRIES["chatHttpWarnedSites"] == ("StringList", [])
+    given = ["http://a.example:80"]
+    assert appconfig.typed_value("StringList", given) is not given
+
+
+def test_the_string_list_key_is_not_in_the_backup():
+    assert "chatHttpWarnedSites" in backup.EXCLUDED_KEYS
+    assert "chatHttpWarnedSites" not in backup.BACKUP_KEYS

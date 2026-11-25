@@ -4096,6 +4096,23 @@ TestCase {
         compare(main.chatWantedSites, [])
     }
 
+    // Task 013: Open on the insecure-http warning stores the site's origin.
+    function test_httpSiteAcknowledgedStoresOnlyValidOrigins() {
+        var main = unlockedMain()
+        compare(main.chatHttpWarnedSites, [])
+        ;["", "https://a.example:443", "http://A.example:80", "http://a.example", "javascript:1",
+          "http://a.example:80/x", null, 5].forEach(function (origin) { main.chatHttpSiteAcknowledged(origin) })
+        compare(main.chatHttpWarnedSites, [])
+        main.chatHttpSiteAcknowledged("http://a.example:80")
+        main.chatHttpSiteAcknowledged("http://a.example:80")
+        main.chatHttpSiteAcknowledged("http://b.example:8080")
+        compare(main.chatHttpWarnedSites, ["http://a.example:80", "http://b.example:8080"])
+        compare(Plasmoid.configuration.chatHttpWarnedSites, ["http://a.example:80", "http://b.example:8080"])
+        // Junk already stored is read as nothing.
+        Plasmoid.configuration.chatHttpWarnedSites = ["x", "http://a.example:80", "https://c.example:443"]
+        compare(main.chatHttpWarnedSites, ["http://a.example:80"])
+    }
+
     // The real Chat tab forwards its web view's request, only with saved
     // sign-ins open.
     function test_chatTabForwardsTheSiteRequest() {

@@ -1,7 +1,9 @@
 import QtQuick
 import QtQuick.Controls
 import Hearthwire.Compat.Plasmoid
+import Hearthwire.Compat.Plasma5Support as Plasma5Support
 import Hearthwire.App
+import "qrc:/qt/qml/Hearthwire/Plasmoid/ChatStorage.js" as ChatStorage
 
 // FIXTURE BUILDS ONLY (task 012; HW_FIXTURES=ON): with --checks, drives the
 // app through the Usage tab and the settings dialog and prints one
@@ -9,6 +11,10 @@ import Hearthwire.App
 // then quits; the last checks prove the URL guard is installed and refused
 // nothing else. With --shots only, saves the Usage tab and every settings
 // page. Without either option it does nothing.
+// Task 013: the run starts on the Chat tab, which must load the plasmoid's
+// ChatWebView (Qt WebEngine) without a QML warning; then the vault status
+// with hearthwire-askpass missing and the helper's bad-frontend refusal,
+// both from the fixture book (applet id 2147483648 in every command).
 Item {
     id: checks
 
@@ -96,6 +102,28 @@ Item {
         return null
     }
 
+    // Fixture-book commands answered with {"ok":false,"error":"bad-frontend"}.
+    readonly property var badFrontendCommands: [
+        "env HEARTHWIRE_RUN=7 HEARTHWIRE_APPLET=2147483648 python3 -P -m hearthwire --vault lock",
+        "env HEARTHWIRE_RUN=8 HEARTHWIRE_APPLET=2147483648 python3 -P -m hearthwire --web-data remove --store encrypted --applet 2147483648"
+    ]
+    property var helperReplies: ({})
+
+    Plasma5Support.DataSource {
+        id: probe
+        engine: "executable"
+        onNewData: (source, data) => {
+            var replies = Object.assign({}, checks.helperReplies)
+            replies[source] = ChatStorage.replyFor(data["exit code"], data["stdout"])
+            checks.helperReplies = replies
+            probe.disconnectSource(source)
+        }
+    }
+
+    function chatView() {
+        return checks.findByName(appWindow.full, "chatView")
+    }
+
     function shownText(name) {
         var item = checks.findByName(page, name)
         return item ? item.text : undefined
@@ -110,6 +138,75 @@ Item {
 
     // Each step returns how long to wait before the next, in ms.
     readonly property var steps: [
+        // Task 013: the Chat tab with Qt WebEngine.
+        function () {
+            appWindow.plasmoidItem.popupTab = "chat"
+            return 4000
+        },
+        function () {
+            var chat = checks.chatView()
+            var web = chat ? chat.web : null
+            check("the Chat tab loads the plasmoid's ChatWebView (Qt WebEngine)",
+                  chat !== null && chat.current === true && web !== null && web.siteIds !== undefined
+                  && web.activeView !== null && web.activeView !== undefined,
+                  chat ? "current " + chat.current + ", web " + (web !== null) : "no chatView")
+            // The web view gets storageApplet only for saved sign-ins (-1 in
+            // memory mode), so the stored id is checked on ChatView.
+            check("the Chat views keep the app id 2147483648 (double, not int)",
+                  web !== null && web.appletId === 2147483648 && chat.appletId === 2147483648
+                  && chat.storageApplet === 2147483648 && web.storageApplet === -1,
+                  web ? "appletId " + web.appletId + "/" + chat.appletId + ", storageApplet " + chat.storageApplet
+                        + "/" + web.storageApplet : "")
+            check("no QML warning from the start through the Chat tab", App.qmlWarnings() === 0,
+                  App.qmlWarnings() + " QML warning(s)")
+            config.chatSignInStorage = "encrypted"
+            return 1500
+        },
+        function () {
+            var root = appWindow.plasmoidItem
+            var chat = checks.chatView()
+            check("vault status: hearthwire-askpass is reported missing",
+                  root.chatVaultState === "unavailable"
+                  && JSON.stringify(root.chatVaultMissing) === "[\"hearthwire-askpass\"]",
+                  "state '" + root.chatVaultState + "', missing " + JSON.stringify(root.chatVaultMissing))
+            check("the Chat tab shows the install card for it",
+                  chat !== null && chat.card.view === "install"
+                  && ChatStorage.installCommand(root.chatVaultMissing, root.installDistro).indexOf("hearthwire-") >= 0,
+                  chat ? "view " + chat.card.view : "")
+            config.chatSignInStorage = "memory"
+            for (var i = 0; i < checks.badFrontendCommands.length; i++)
+                probe.connectSource(checks.badFrontendCommands[i])
+            return 800
+        },
+        function () {
+            var chat = checks.chatView()
+            for (var i = 0; i < checks.badFrontendCommands.length; i++) {
+                var command = checks.badFrontendCommands[i]
+                var reply = checks.helperReplies[command]
+                var code = reply ? ChatStorage.messageFor(reply.error) : ""
+                var text = chat && code !== "" ? chat.storageText(code) : ""
+                check("bad-frontend reply " + (i + 1) + " gives the version message",
+                      reply !== undefined && reply.ok === false && reply.error === "bad-frontend"
+                      && code === "bad-frontend" && text.indexOf("of the same version") >= 0,
+                      reply ? "error '" + reply.error + "', text '" + text + "'" : "no reply")
+            }
+            check("no QML warning in the Chat steps", App.qmlWarnings() === 0, App.qmlWarnings() + " QML warning(s)")
+            // Task 013 F2: the http acknowledgement goes main.qml ->
+            // Plasmoid.configuration -> settings.json, and back into the view.
+            appWindow.plasmoidItem.chatHttpSiteAcknowledged("http://example.org:8080/not-an-origin")
+            appWindow.plasmoidItem.chatHttpSiteAcknowledged("http://example.org:8080")
+            return 300
+        },
+        function () {
+            var chat = checks.chatView()
+            var stored = App.storedValue("chatHttpWarnedSites")
+            check("an http acknowledgement is saved to settings.json (0600) and reaches the Chat view",
+                  JSON.stringify(stored) === "[\"http://example.org:8080\"]" && App.fileMode() === 384
+                  && chat !== null && JSON.stringify(chat.httpWarnedSites) === "[\"http://example.org:8080\"]",
+                  "stored " + JSON.stringify(stored) + ", mode " + App.fileMode().toString(8)
+                  + ", view " + (chat ? JSON.stringify(chat.httpWarnedSites) : "none"))
+            return 100
+        },
         function () {
             checks.showUsage()
             return 1500
@@ -500,6 +597,11 @@ Item {
     // --shots without --checks: the Usage tab and every settings page.
     readonly property var shotSteps: [
         function () {
+            appWindow.plasmoidItem.popupTab = "chat"
+            return 4000
+        },
+        function () {
+            shot(appWindow, "chat.png")
             checks.showUsage()
             return 1500
         },

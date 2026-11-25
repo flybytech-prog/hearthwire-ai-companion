@@ -52,7 +52,8 @@ def test_every_main_xml_default_reads_back_as_itself():
 
 def test_main_xml_types_are_the_ones_the_reader_knows():
     for kind, default in xml_entries().values():
-        assert appconfig.typed_value(kind, default) is default
+        value = appconfig.typed_value(kind, default)
+        assert value == default and type(value) is type(default)
 
 
 def test_proof_a_main_xml_key_the_reader_does_not_know_is_caught():
@@ -60,9 +61,9 @@ def test_proof_a_main_xml_key_the_reader_does_not_know_is_caught():
 
 
 @pytest.mark.parametrize(("old", "new"), [
-    ("        result[key] = typed_value(kind, settings[key]) if key in settings else default\n",
+    ("        result[key] = typed_value(kind, settings[key]) if key in settings else (\n            list(default) if isinstance(default, list) else default)\n",
      "        result[key] = typed_value(kind, settings[key]) if key in settings else None\n"),
-    ("        result[key] = typed_value(kind, settings[key]) if key in settings else default\n",
+    ("        result[key] = typed_value(kind, settings[key]) if key in settings else (\n            list(default) if isinstance(default, list) else default)\n",
      "        result[key] = settings.get(key, default) if kind != \"Int\" else str(settings.get(key, default))\n"),
     ('    if kind == "Bool":\n        return value if type(value) is bool else UNREADABLE\n',
      '    if kind == "Bool":\n        return UNREADABLE\n'),
@@ -71,3 +72,10 @@ def test_proof_a_reader_that_misreads_main_xml_is_caught(old, new):
     from test_frontend import mutant
 
     assert app_sync_problems(xml_entries(), mutant(appconfig, old, new))
+
+
+def test_proof_a_reader_that_drops_the_string_list_type_is_caught():
+    from test_frontend import mutant
+
+    assert app_sync_problems(xml_entries(), mutant(
+        appconfig, '    if kind == "StringList":\n', '    if kind == "NoSuchKind":\n'))

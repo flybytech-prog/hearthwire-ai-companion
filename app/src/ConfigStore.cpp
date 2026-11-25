@@ -3,6 +3,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJSValue>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRandomGenerator>
@@ -155,6 +157,8 @@ bool ConfigStore::loadSchema(const QString &path)
                 defaults.insert(name, 0);
             else if (type == QLatin1String("Bool"))
                 defaults.insert(name, false);
+            else if (type == QLatin1String("StringList"))
+                defaults.insert(name, QStringList());
             else
                 return false;
             order.append(name);
@@ -165,6 +169,8 @@ bool ConfigStore::loadSchema(const QString &path)
                 defaults.insert(name, text.toInt());
             else if (type == QLatin1String("Bool"))
                 defaults.insert(name, text == QLatin1String("true"));
+            else if (type == QLatin1String("StringList"))
+                defaults.insert(name, text.split(QLatin1Char(','), Qt::SkipEmptyParts));
             else
                 defaults.insert(name, text);
         }
@@ -294,6 +300,20 @@ bool ConfigStore::fromFile(const QString &key, const QJsonValue &value, QVariant
         *out = value.toBool();
         return true;
     }
+    if (type == QLatin1String("StringList") && value.isArray()) {
+        // An array of strings, within the caps; anything else is dropped whole.
+        const QJsonArray array = value.toArray();
+        if (array.size() > MaxListEntries)
+            return false;
+        QStringList list;
+        for (const QJsonValue &item : array) {
+            if (!item.isString() || item.toString().size() > MaxListEntryChars)
+                return false;
+            list.append(item.toString());
+        }
+        *out = list;
+        return true;
+    }
     if (type == QLatin1String("Int")) {
         // A JSON integer (no fraction or exponent) in 32-bit range.
         const QVariant number = value.toVariant();
@@ -321,6 +341,28 @@ QVariant ConfigStore::coerce(const QString &key, const QVariant &value, bool *ok
         *ok = true;
         return value.toBool();
     }
+    if (type == QLatin1String("StringList") && (id == QMetaType::QStringList || id == QMetaType::QVariantList)) {
+        // From QML an array of strings (a QVariantList); the same caps as a read.
+        QStringList list;
+        const QVariantList items = value.toList();
+        if (id == QMetaType::QStringList)
+            list = value.toStringList();
+        else {
+            for (const QVariant &item : items) {
+                if (item.typeId() != QMetaType::QString)
+                    return QVariant();
+                list.append(item.toString());
+            }
+        }
+        if (list.size() > MaxListEntries)
+            return QVariant();
+        for (const QString &entry : std::as_const(list)) {
+            if (entry.size() > MaxListEntryChars)
+                return QVariant();
+        }
+        *ok = true;
+        return list;
+    }
     if (type == QLatin1String("Int")
         && (id == QMetaType::Int || id == QMetaType::LongLong || id == QMetaType::Double
             || id == QMetaType::UInt || id == QMetaType::ULongLong)) {
@@ -339,7 +381,11 @@ QVariant ConfigStore::updateValue(const QString &key, const QVariant &input)
     if (!m_types.contains(key))
         return value(key);
     bool ok = false;
-    QVariant typed = coerce(key, input, &ok);
+    // A JS array from QML arrives as a QJSValue: its elements as a QVariantList.
+    const QVariant plain = input.canConvert<QJSValue>() && m_types.value(key) == QLatin1String("StringList")
+        ? input.value<QJSValue>().toVariant()
+        : input;
+    QVariant typed = coerce(key, plain, &ok);
     if (!ok) {
         // KConfig converts what it can; a QML string for an Int key is the
         // one case the pages have (TextField text).

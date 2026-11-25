@@ -1705,6 +1705,17 @@ PlasmoidItem {
         zoomWriteTimer.restart()
     }
 
+    // The http sites whose insecure warning the user confirmed (origins).
+    readonly property var chatHttpWarnedSites: ChatSites.cleanWarnedSites(Plasmoid.configuration.chatHttpWarnedSites)
+
+    // Open on the insecure-http warning (ChatWebView): remember the site so
+    // it is not asked again. Only a valid http origin is stored, at most 200.
+    function chatHttpSiteAcknowledged(origin) {
+        if (typeof origin !== "string" || ChatSites.httpWarnOrigin(origin) !== origin)
+            return
+        Plasmoid.configuration.chatHttpWarnedSites = ChatSites.addWarnedSite(root.chatHttpWarnedSites, origin)
+    }
+
     // direction: +1 bigger, -1 smaller, 0 back to 100%.
     function stepSiteZoom(siteId, direction) {
         root.setSiteZoom(siteId, SettingsLogic.zoomStep(

@@ -51,13 +51,18 @@ public:
     Q_ENUM(Status)
 
     static constexpr qint64 MaxFileBytes = 1024 * 1024;
+    // A StringList key (chatHttpWarnedSites): at most this many entries of
+    // at most this many characters; a stored list beyond that is dropped
+    // whole (the default stays), a QML write beyond it is refused.
+    static constexpr qsizetype MaxListEntries = 1000;
+    static constexpr qsizetype MaxListEntryChars = 512;
 
     explicit ConfigStore(QObject *parent = nullptr);
 
     // <XDG config home>/hearthwire-hyprland/settings.json, as the helper finds it.
     static QString defaultFile();
 
-    // main.xml as KConfigXT reads it: entries with String, Int or Bool type.
+    // main.xml as KConfigXT reads it: entries with String, Int, Bool or StringList type.
     bool loadSchema(const QString &path);
     // Reads `file` (missing = all defaults) and saves there from now on
     // unless it was unreadable. True unless unreadable or damaged.

@@ -153,6 +153,8 @@ private:
             return text.toInt();
         if (type == QLatin1String("Bool"))
             return text == QLatin1String("true");
+        if (type == QLatin1String("StringList"))
+            return text.isEmpty() ? QStringList() : text.split(QLatin1Char(','));
         return QVariant();
     }
 

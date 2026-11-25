@@ -165,6 +165,27 @@ TestCase {
         compare(ChatStorage.replyFor(0, "{\"ok\":true}"), {ok: true})
     }
 
+    // The helper refuses a mismatched pair with exit 2 and bad-frontend (M2):
+    // only that exact reply is read at a nonzero exit.
+    function test_replyForReadsOnlyBadFrontendAtExitTwo() {
+        var bad = {ok: false, error: "bad-reply"}
+        var refused = "{\"ok\":false,\"error\":\"bad-frontend\"}\n"
+        compare(ChatStorage.replyFor(2, refused), {ok: false, error: "bad-frontend"})
+        compare(ChatStorage.replyFor(0, refused), {ok: false, error: "bad-frontend"})
+        compare(ChatStorage.replyFor(2, "{\"ok\":false,\"error\":\"legacy-data\"}"), bad)
+        compare(ChatStorage.replyFor(2, "{\"ok\":false,\"error\":\"nonsense\"}"), bad)
+        compare(ChatStorage.replyFor(2, "{\"ok\":false}"), bad)
+        compare(ChatStorage.replyFor(2, "{\"ok\":true,\"error\":\"bad-frontend\"}"), bad)
+        compare(ChatStorage.replyFor(2, "not json"), bad)
+        compare(ChatStorage.replyFor(2, ""), bad)
+        // Other nonzero exits never read it.
+        compare(ChatStorage.replyFor(1, refused), bad)
+        compare(ChatStorage.replyFor(3, refused), bad)
+        compare(ChatStorage.replyFor(-1, refused), bad)
+        compare(ChatStorage.replyFor("2", refused), bad)
+        compare(ChatStorage.replyFor(undefined, refused), bad)
+    }
+
     function test_localPath() {
         compare(ChatStorage.localPath("file:///run/user/1000"), "/run/user/1000")
         compare(ChatStorage.localPath("/run/user/1000/"), "/run/user/1000")
@@ -211,6 +232,16 @@ TestCase {
                 "sudo apt install gocryptfs kdialog fuse3 kwallet6 qdbus-qt6 openssl")
         compare(ChatStorage.installCommand(every, "other"),
                 "gocryptfs kdialog fusermount3 kwallet-query qdbus6 openssl")
+        // The app's passphrase window (hearthwire-hyprland on Arch).
+        compare(ChatStorage.MISSING_TOOLS, ["gocryptfs", "gocryptfs-v2", "kdialog", "hearthwire-askpass", "fusermount3"])
+        var app = ["hearthwire-askpass"]
+        compare(ChatStorage.installCommand(app, "arch"), "sudo pacman -S --needed hearthwire-hyprland")
+        compare(ChatStorage.installCommand(app, "fedora"), "sudo dnf install hearthwire-askpass")
+        compare(ChatStorage.installCommand(app, "debian"), "sudo apt install hearthwire-askpass")
+        compare(ChatStorage.installCommand(app, "other"), "hearthwire-askpass")
+        compare(ChatStorage.parseReply(
+            "{\"ok\":true,\"state\":\"unavailable\",\"missing\":[\"hearthwire-askpass\",\"gocryptfs\"]}"),
+            {ok: true, state: "unavailable", missing: ["gocryptfs", "hearthwire-askpass"]})
         compare(ChatStorage.installCommand(["qdbus6"], "fedora"), "sudo dnf install qt6-qttools")
         compare(ChatStorage.installCommand(["qdbus6"], "debian"), "sudo apt install qdbus-qt6")
         compare(ChatStorage.installCommand([], "fedora"), "sudo dnf install gocryptfs")
@@ -268,6 +299,11 @@ TestCase {
         compare(ChatStorage.replyFor(0, "{\"ok\":false,\"error\":\"legacy-data\"}\n"),
                 {ok: false, error: "legacy-data"})
         compare(ChatStorage.messageFor("legacy-data"), "legacy-data")
+        // The helper refused the app's frontend request (011).
+        compare(ChatStorage.parseReply("{\"ok\":false,\"error\":\"bad-frontend\"}"),
+                {ok: false, error: "bad-frontend"})
+        compare(ChatStorage.messageFor("bad-frontend"), "bad-frontend")
+        compare(card({state: "locked", error: "bad-frontend"}), {view: "unlock", message: "bad-frontend"})
         compare(card({state: "absent", error: "legacy-data"}), {view: "create", message: "legacy-data"})
         compare(card({state: "locked", error: "legacy-data"}), {view: "unlock", message: "legacy-data"})
         compare(card({state: "unlocked", error: "legacy-data"}), {view: "retry", message: "legacy-data"})

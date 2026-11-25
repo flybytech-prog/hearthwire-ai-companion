@@ -96,9 +96,10 @@ target_compile_definitions(tst_apptools PRIVATE
 
 # No way to open a URL or start another program from the app's own code or
 # the QML it runs (decision-1 Q2: only the helper is started, and only
-# through ProcessRunner).
+# through ProcessRunner), except the one reviewed chat-link opener: the
+# synced LinkOut.js, exactly its bytes, directly in --synced (task 013 Q1 = B).
 add_test(NAME app_starts_nothing_else COMMAND ${Python3_EXECUTABLE} -I -B ${CMAKE_CURRENT_SOURCE_DIR}/check_no_opener.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src ${CMAKE_CURRENT_SOURCE_DIR}/../qml ${HW_SYNCED})
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src ${CMAKE_CURRENT_SOURCE_DIR}/../qml --synced ${HW_SYNCED})
 set_tests_properties(app_starts_nothing_else PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 60)
 # Its own rows (review-7-security LOW-1): every pattern, fed from a scratch
 # folder, is found; a clean control is not.
@@ -136,9 +137,8 @@ else()
 endif()
 
 # --- tests/qml, import lines pointed at the stand-ins and the synced plasmoid.
-# Left out: tests that need more than the app has today.
-#   tst_chat_web_view.qml  needs QtWebEngine (ChatWebView.qml; task 013).
-set(HW_QML_TEST_EXCLUDES tst_chat_web_view.qml)
+# All of them (tst_chat_web_view.qml with Qt WebEngine since task 013).
+set(HW_QML_TEST_EXCLUDES)
 set(HW_QMLTESTS ${CMAKE_BINARY_DIR}/qmltests)
 set(hw_exclude_args)
 foreach(name IN LISTS HW_QML_TEST_EXCLUDES)
@@ -162,13 +162,13 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${hw_qml_test_inp
 file(COPY ${HW_PLASMOID}/contents/images DESTINATION ${CMAKE_BINARY_DIR})
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/empty-book.json "[]\n")
 qt_add_executable(hearthwire-qmltests qmltests.cpp ${hw_src}/LocalizedContext.h ${hw_src}/LocalizedContext.cpp
-    ${hw_src}/IconProvider.h)
+    ${hw_src}/IconProvider.h ${hw_src}/WebEngineEnv.h)
 target_include_directories(hearthwire-qmltests PRIVATE ${hw_src})
 target_compile_definitions(hearthwire-qmltests PRIVATE
     HW_MAIN_XML="${HW_SYNCED}/main.xml"
     HW_EMPTY_BOOK="${CMAKE_CURRENT_BINARY_DIR}/empty-book.json")
 target_link_libraries(hearthwire-qmltests PRIVATE
-    Qt6::QuickTest Qt6::Quick Qt6::QuickControls2 Qt6::DBus
+    Qt6::QuickTest Qt6::Quick Qt6::QuickControls2 Qt6::DBus Qt6::WebEngineQuick
     hwcompat_Kirigamiplugin hwcompat_PlasmaComponentsplugin hwcompat_PlasmaExtrasplugin
     hwcompat_PlasmaCoreplugin hwcompat_Plasmoidplugin hwcompat_Plasma5Supportplugin
     hwcompat_KCMUtilsplugin hwcompat_Notificationplugin hwcompat_Configurationplugin hwstyleplugin)
@@ -216,6 +216,17 @@ foreach(form IN ITEMS "-platformpluginpath;/nonexistent" "--platformpluginpath;/
     set_tests_properties(${id} PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 30
         PASS_REGULAR_EXPRESSION "hearthwire-hyprland: -platformpluginpath is not accepted; Qt's plugins come only from Qt's own folder")
 endforeach()
+
+# Qt WebEngine (task 013): every QTWEBENGINE* variable is gone when
+# initialize() runs, and Chromium switches on the app's command line end
+# with exit 2 before anything of WebEngine starts (src/WebEngineEnv.h).
+qt_add_executable(tst_webengineenv tst_webengineenv.cpp ${hw_src}/WebEngineEnv.h)
+target_include_directories(tst_webengineenv PRIVATE ${hw_src})
+target_link_libraries(tst_webengineenv PRIVATE Qt6::Test Qt6::Gui Qt6::WebEngineQuick)
+add_dependencies(tst_webengineenv hearthwire-hyprland)
+target_compile_definitions(tst_webengineenv PRIVATE HW_APP_BINARY="$<TARGET_FILE:hearthwire-hyprland>")
+add_test(NAME tst_webengineenv COMMAND tst_webengineenv)
+set_tests_properties(tst_webengineenv PROPERTIES ENVIRONMENT "${hw_test_env}" TIMEOUT 120)
 
 # The synced trees themselves, checked independently of the sync tools.
 add_test(NAME synced_tree_has_no_kde

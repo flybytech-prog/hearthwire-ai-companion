@@ -5,6 +5,9 @@
 // object, image://icon, one Plasmoid host whose settings are main.xml's
 // defaults and never saved. Fixture mode is on, so no test can start a
 // helper; the Notifier sends nothing (Off, or Record for tst_notification).
+// Qt WebEngine starts as in the app (WebEngineEnv.h: every QTWEBENGINE*
+// variable dropped, then initialize(), before QGuiApplication), for
+// tst_chat_web_view.qml and the Chat views.
 // Run: hearthwire-qmltests -input <synced test file>.
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -19,6 +22,7 @@
 #include "Notifier.h"
 #include "PlasmoidHost.h"
 #include "ProcessRunner.h"
+#include "WebEngineEnv.h"
 
 Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_KirigamiPlugin)
 Q_IMPORT_QML_PLUGIN(Hearthwire_Compat_PlasmaComponentsPlugin)
@@ -67,6 +71,13 @@ private:
     PlasmoidHost *m_host = nullptr;
 };
 
-QUICK_TEST_MAIN_WITH_SETUP(hearthwire_qmltests, Setup)
+// QUICK_TEST_MAIN_WITH_SETUP, with Qt WebEngine started first.
+int main(int argc, char **argv)
+{
+    hwStartWebEngine();
+    QTEST_SET_MAIN_SOURCE_PATH
+    Setup setup;
+    return quick_test_main_with_setup(argc, argv, "hearthwire_qmltests", nullptr, &setup);
+}
 
 #include "qmltests.moc"

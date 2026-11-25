@@ -493,3 +493,30 @@ def test_the_module_imports_only_the_standard_library_and_no_network():
         elif isinstance(node, ast.ImportFrom):
             assert node.module == "webdata", node.module
     assert imported <= {"__future__", "collections", "errno", "os", "re", "stat", "typing"}, imported
+
+
+# --- task 013: chatHttpWarnedSites in Plasma's rc file (a KConfig StringList) -------------------------
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    (b"", []),
+    (b"http://a.example:80", ["http://a.example:80"]),
+    (b"http://a.example:80,http://b.example:8080", ["http://a.example:80", "http://b.example:8080"]),
+    (b"a\\,b,c", ["a,b", "c"]),
+    (b"a\\\\,b", ["a\\", "b"]),
+    (b",", ["", ""]),
+    (b"\xff", UNREADABLE),
+    (b",".join([b"x"] * 1001), UNREADABLE),
+    (b",".join([b"x"] * 1000), ["x"] * 1000),
+    (b"x" * 513, UNREADABLE),
+    (b"x" * 512, ["x" * 512]),
+])
+def test_a_string_list_reads_as_kconfig_writes_it(raw, expected):
+    assert appletconfig.typed_value("StringList", raw) == expected
+
+
+def test_a_string_list_that_is_absent_is_a_fresh_empty_list():
+    first = appletconfig.applied_from({}, ["chatHttpWarnedSites"])["chatHttpWarnedSites"]
+    assert first == []
+    first.append("x")
+    assert appletconfig.applied_from({}, ["chatHttpWarnedSites"])["chatHttpWarnedSites"] == []

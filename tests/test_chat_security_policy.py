@@ -76,6 +76,10 @@ CHAT_CONFIG_KEYS = {
     "chatKeepOpen": ("Bool", "false"),
     # Per-site zoom, JSON {siteId: factor}; written only by main.qml (plan R1).
     "chatSiteZoom": ("String", "{}"),
+    # Task 013: origins (http://host:port) whose insecure-http warning the
+    # user confirmed; written only by FullRepresentation.qml (the app maps it
+    # in its settings.json). The empty default reads as None.
+    "chatHttpWarnedSites": ("StringList", None),
     # Unlock with: passphrase | wallet (plan R3); written only by configGeneral.qml.
     "chatVaultUnlock": ("String", "passphrase"),
     # Task 004, both written only by main.qml and never backed up: the
@@ -748,7 +752,7 @@ def test_no_plasmoid_file_uses_forbidden_webengine_storage():
 
 
 WEB_VIEW_INPUTS = (("staySignedIn", "bool", "false"), ("runtimeDir", "string", '""'),
-                   ("storageApplet", "int", "-1"), ("storageGeneration", "int", "-1"),
+                   ("storageApplet", "double", "-1"), ("storageGeneration", "int", "-1"),
                    ("preparedSites", "var", "[]"))
 
 
@@ -2060,7 +2064,8 @@ def test_proof_unlisted_main_xml_key_is_caught(key):
 # The chat keys main.qml may write: the profile generation, the zoom map
 # (only from zoomWriteTimer, see _zoom_write_problems), and task 004's
 # migration marker and owed site deletes (see _main_site_key_write_problems).
-MAIN_WRITABLE_CHAT_KEYS = {"chatProfileGeneration", "chatSiteZoom", "chatProfileLayout", "chatPendingSiteClears"}
+MAIN_WRITABLE_CHAT_KEYS = {"chatProfileGeneration", "chatSiteZoom", "chatProfileLayout", "chatPendingSiteClears",
+                           "chatHttpWarnedSites"}
 
 
 def _main_config_write_offenders(code):
@@ -2138,7 +2143,7 @@ def test_config_pages_declare_every_chat_key_and_never_write_config(page):
     code = _read_code(page)
     expected = _chat_config_keys()
     for key, (kind, default) in expected.items():
-        qml_type = {"String": "string", "Int": "int", "Bool": "bool"}[kind]
+        qml_type = {"String": "string", "Int": "int", "Bool": "bool", "StringList": "var"}[kind]
         for name in (f"cfg_{key}", f"cfg_{key}Default"):
             declared = re.findall(rf"(?m)^\s*property\s+(\w+)\s+{name}\s*:\s*(.+)$", code)
             assert len(declared) == 1 and declared[0][0] == qml_type, (
@@ -2146,7 +2151,7 @@ def test_config_pages_declare_every_chat_key_and_never_write_config(page):
             )
     literals = {"chatSignInStorage": '"memory"', "chatProfileGeneration": "0", "chatAutoLockMinutes": "0",
                 "chatKeepOpen": "false", "chatSiteZoom": '"{}"', "chatVaultUnlock": '"passphrase"',
-                "chatProfileLayout": "0", "chatPendingSiteClears": '""'}
+                "chatProfileLayout": "0", "chatPendingSiteClears": '""', "chatHttpWarnedSites": "[]"}
     if "chatOllamaUrl" in expected:
         literals["chatOllamaUrl"] = f'"{OLLAMA_CONFIG_KEYS["chatOllamaUrl"][1]}"'
     for key, literal in literals.items():
@@ -2215,7 +2220,7 @@ def test_config_qml_lists_the_pages_in_order():
         assert page.is_file(), f"{_rel(page)} is missing"
 
 
-_QML_TYPES = {"String": "string", "Int": "int", "Bool": "bool"}
+_QML_TYPES = {"String": "string", "Int": "int", "Bool": "bool", "StringList": "var"}
 
 
 def _page_key_problems(code, entries):
@@ -2258,7 +2263,7 @@ def test_proof_missing_page_key_is_caught():
 MAIN_WRITABLE_KEYS = {
     "chatProfileGeneration", "configSchemaVersion", "initialSetupComplete", "refreshInterval", "usageMode",
     "chatSiteZoom", "tooltipMetrics", "providerMetrics", "usageHistoryClearOwed",
-    "chatProfileLayout", "chatPendingSiteClears", "backupRestoreAt",
+    "chatProfileLayout", "chatPendingSiteClears", "backupRestoreAt", "chatHttpWarnedSites",
 }
 
 
@@ -4197,46 +4202,142 @@ def test_proof_hidden_chars_rule_catches(path, old, new):
 
 
 # N1 A page never opens the system browser by itself. Qt.openUrlExternally
-# appears only in ChatWebView.openExternally (the toolbar's Open in browser,
-# for a page of the current site) and ChatWebView.acceptExternal (Open on the
-# "Open <host> in your browser?" prompt). Page-driven navigations and windows
+# appears only in LinkOut.js (exact bytes); ChatWebView reaches it through
+# openHttps (https, or http of an acknowledged site; at most 4096 characters;
+# user decision M1) from ChatWebView.openExternally
+# (the toolbar's Open in browser, for a page of the current site) and
+# ChatWebView.acceptExternal (Open on the "Open <host> in your browser?"
+# prompt, which for http is the once-per-site insecure warning). The prompt's
+# Open stays disabled ~700 ms each time it shows (arming). Page-driven navigations and windows
 # only call askExternal, which keeps one prompt at a time and rate limits.
 # Open and Open in browser are reached only from a button click.
+
+LINK_OUT = UI / "LinkOut.js"
+LINK_OUT_CODE = ".pragma library function open(url) { Qt.openUrlExternally(url) }"
+
 
 def _external_open_problems(sources):
     problems = []
     web_name = _rel(CHAT_WEB_VIEW)
     web = sources.get(web_name, "")
-    opens = [(name, match.start()) for name, code in sources.items()
-             for match in re.finditer(r"\bopenUrlExternally\b", code)]
-    allowed = []
-    for function in ("openExternally", "acceptExternal"):
-        body = _function_body(web, function)
-        if body is None:
-            problems.append(f"ChatWebView.qml: `function {function}(` must be defined once")
+    # The one place with the system browser call is LinkOut.js, with exactly
+    # these bytes (the app's sync checks the same bytes). ChatWebView is the
+    # only user of LinkOut, through openHttps alone.
+    link_name = _rel(LINK_OUT)
+    for name, code in sources.items():
+        for match in re.finditer(r"\bopenUrlExternally\b", code):
+            if name != link_name:
+                problems.append(f"{name}:{_line_of(code, match.start())}: openUrlExternally outside "
+                                "LinkOut.js")
+        for match in re.finditer(r"\bLinkOut\b", code):
+            if name not in (web_name, link_name):
+                problems.append(f"{name}:{_line_of(code, match.start())}: LinkOut used outside ChatWebView.qml")
+    link = sources.get(link_name)
+    if link is None or LINK_OUT_CODE != re.sub(r"\s+", " ", link).strip():
+        problems.append("LinkOut.js must hold exactly `.pragma library` and "
+                        "`function open(url) { Qt.openUrlExternally(url) }`")
+    if len(re.findall(r"\bLinkOut\s*\.\s*open\s*\(", web)) != 1:
+        problems.append("ChatWebView.qml must call LinkOut.open once")
+    if len(re.findall(r'(?m)^import\s+"LinkOut\.js"\s+as\s+LinkOut\s*$', web)) != 1:
+        problems.append('ChatWebView.qml must `import "LinkOut.js" as LinkOut`')
+    # LinkOut has exactly two tokens in ChatWebView: the import and the one
+    # `LinkOut.open(url)` inside openHttps. An alias (`import ... as X`,
+    # `var o = LinkOut`, `LinkOut["open"]`, `LinkOut.open` without the call)
+    # is another token, or another import of the file, and is refused.
+    web_open = _function_body(web, "openHttps")
+    allowed_use = None
+    if web_open is not None:
+        use = re.search(r"\bLinkOut\s*\.\s*open\s*\(\s*url\s*\)", web_open)
+        if use:
+            allowed_use = web.find(web_open) + use.start()
+    for match in re.finditer(r"\bLinkOut\b", web):
+        line_start = web.rfind("\n", 0, match.start()) + 1
+        line = web[line_start:web.find("\n", match.start())]
+        if re.fullmatch(r'import\s+"LinkOut\.js"\s+as\s+LinkOut\s*', line):
             continue
-        start = web.find(body)
-        allowed.append((start, start + len(body)))
-        if len(re.findall(r"\bQt\s*\.\s*openUrlExternally\s*\(", body)) != 1:
-            problems.append(f"ChatWebView.{function} must call Qt.openUrlExternally once")
-    for name, offset in opens:
-        if name != web_name or not any(low <= offset < high for low, high in allowed):
-            problems.append(f"{name}:{_line_of(sources[name], offset)}: openUrlExternally outside "
-                            "ChatWebView.openExternally / acceptExternal")
+        if allowed_use is not None and match.start() == allowed_use:
+            continue
+        problems.append(f"{web_name}:{_line_of(web, match.start())}: LinkOut used other than as "
+                        "`LinkOut.open(url)` in openHttps")
+    for name, code in sources.items():
+        for match in re.finditer(r"LinkOut\s*\.\s*js", code):
+            line_start = code.rfind("\n", 0, match.start()) + 1
+            line = code[line_start:code.find("\n", match.start())]
+            if not (name == web_name and re.fullmatch(r'import\s+"LinkOut\.js"\s+as\s+LinkOut\s*', line)):
+                problems.append(f"{name}:{_line_of(code, match.start())}: LinkOut.js imported or named elsewhere")
+    https_only = web_open
+    if https_only is None or not re.fullmatch(
+            r"\{\s*if\s*\(\s*typeof\s+url\s*===\s*\"string\"\s*&&\s*url\s*\.\s*length\s*<=\s*4096\s*&&\s*"
+            r"ChatSites\s*\.\s*isWebUrl\s*\(\s*url\s*\)\s*&&\s*\(\s*!\s*ChatSites\s*\.\s*isHttpUrl\s*\(\s*url\s*\)"
+            r"\s*\|\|\s*chatWeb\s*\.\s*siteWarned\s*\(\s*url\s*\)\s*\)\s*\)\s*LinkOut\s*\.\s*open\s*\(\s*url\s*\)\s*\}",
+            https_only):
+        problems.append("ChatWebView.openHttps must open only a string of at most 4096 characters "
+                        "that ChatSites.isWebUrl accepts, and an http one only of an acknowledged site")
     opener = _function_body(web, "openExternally") or ""
-    if not re.match(r"\{\s*if\s*\(\s*chatWeb\s*\.\s*canOpenExternally\s*\)\s*Qt\s*\.\s*openUrlExternally\s*\(",
-                    opener):
-        problems.append("ChatWebView.openExternally must open only `if (chatWeb.canOpenExternally)`")
+    if not re.fullmatch(
+            r"\{\s*if\s*\(\s*!\s*chatWeb\s*\.\s*canOpenExternally\s*\)\s*return\s*"
+            r"var\s+url\s*=\s*String\s*\(\s*chatWeb\s*\.\s*activeView\s*\.\s*url\s*\)\s*"
+            r"if\s*\(\s*url\s*\.\s*length\s*>\s*4096\s*\)\s*return\s*"
+            r"if\s*\(\s*ChatSites\s*\.\s*isHttpUrl\s*\(\s*url\s*\)\s*&&\s*!\s*chatWeb\s*\.\s*siteWarned\s*\(\s*url\s*\)\s*\)\s*"
+            r"chatWeb\s*\.\s*showExternal\s*\(\s*url\s*,\s*true\s*\)\s*"
+            r"else\s*chatWeb\s*\.\s*openHttps\s*\(\s*url\s*\)\s*\}", opener):
+        problems.append("ChatWebView.openExternally must open only `if (chatWeb.canOpenExternally)`, via openHttps, "
+                        "and ask first for an http page of a site not acknowledged")
+    can_open = re.search(r"readonly\s+property\s+bool\s+canOpenExternally\s*:(.*?)\n\s*\n", web, re.S)
+    if not can_open or not re.search(r"ChatSites\s*\.\s*isWebUrl\s*\(\s*chatWeb\s*\.\s*activeView\s*\.\s*url\s*\.\s*toString",
+                                     can_open.group(1)):
+        problems.append("ChatWebView.canOpenExternally must need ChatSites.isWebUrl of the current address")
     accept = _function_body(web, "acceptExternal") or ""
-    if not re.search(r"chatWeb\s*\.\s*clearExternal\s*\(\s*\)\s*if\s*\(\s*ChatSites\s*\.\s*isHttpsUrl\s*\(\s*url\s*\)"
-                     r"\s*\)\s*Qt\s*\.\s*openUrlExternally\s*\(\s*url\s*\)", accept):
-        problems.append("ChatWebView.acceptExternal must clear the prompt, then open only an https url")
+    if not re.fullmatch(
+            r"\{\s*var\s+url\s*=\s*chatWeb\s*\.\s*externalUrl\s*chatWeb\s*\.\s*clearExternal\s*\(\s*\)\s*"
+            r"if\s*\(\s*url\s*\.\s*length\s*<=\s*4096\s*&&\s*ChatSites\s*\.\s*isHttpUrl\s*\(\s*url\s*\)\s*\)\s*\{\s*"
+            r"chatWeb\s*\.\s*warnedNow\s*=\s*ChatSites\s*\.\s*addWarnedSite\s*\(\s*chatWeb\s*\.\s*warnedNow\s*,\s*url\s*\)\s*"
+            r"chatWeb\s*\.\s*httpSiteAcknowledged\s*\(\s*ChatSites\s*\.\s*httpWarnOrigin\s*\(\s*url\s*\)\s*\)\s*\}\s*"
+            r"chatWeb\s*\.\s*openHttps\s*\(\s*url\s*\)\s*\}", accept):
+        problems.append("ChatWebView.acceptExternal must clear the prompt, acknowledge an http site, "
+                        "then open through openHttps")
+    # The acknowledgement is only ever made there.
+    for needle in (r"\bwarnedNow\s*=(?!=)", r"(?<!signal )\bhttpSiteAcknowledged\s*\("):
+        for match in re.finditer(needle, web):
+            if not (web.find(accept) <= match.start() < web.find(accept) + len(accept)) or not accept:
+                problems.append(f"{web_name}:{_line_of(web, match.start())}: an http site is acknowledged "
+                                "outside acceptExternal")
+    for function in ("openExternally", "acceptExternal"):
+        body = _function_body(web, function) or ""
+        if len(re.findall(r"\bchatWeb\s*\.\s*openHttps\s*\(", body)) != 1:
+            problems.append(f"ChatWebView.{function} must call openHttps once")
+    for name, code in sources.items():
+        for match in re.finditer(r"\bopenHttps\s*\(", code):
+            line = code[:match.end()].splitlines()[-1]
+            if name == web_name and re.search(r"\bfunction\s+openHttps\s*\($", line):
+                continue
+            if name == web_name and re.search(r"\bchatWeb\s*\.\s*openHttps\s*\($", line) \
+                    and any((body := _function_body(web, function)) and web.find(body) <= match.start()
+                            < web.find(body) + len(body) for function in ("openExternally", "acceptExternal")):
+                continue
+            problems.append(f"{name}:{_line_of(code, match.start())}: openHttps outside ChatWebView")
+    for name, code in sources.items():
+        for match in re.finditer(r"\bshowExternal\s*\(", code):
+            line = code[:match.end()].splitlines()[-1]
+            if name == web_name and re.search(r"\bfunction\s+showExternal\s*\($", line):
+                continue
+            if name == web_name and re.search(r"\bchatWeb\s*\.\s*showExternal\s*\($", line) \
+                    and any((body := _function_body(web, function)) and web.find(body) <= match.start()
+                            < web.find(body) + len(body) for function in ("openExternally", "askExternal")):
+                continue
+            problems.append(f"{name}:{_line_of(code, match.start())}: showExternal outside openExternally and askExternal")
     ask = _function_body(web, "askExternal") or ""
-    if not re.search(r'chatWeb\s*\.\s*externalUrl\s*!==\s*""\s*\|\|\s*now\s*<\s*chatWeb\s*\.\s*externalQuietUntil', ask) \
-            or not re.search(r"chatWeb\s*\.\s*externalQuietUntil\s*=\s*now\s*\+\s*chatWeb\s*\.\s*externalPromptGap", ask) \
-            or not re.search(r'if\s*\(\s*host\s*===\s*""\s*\)\s*return', ask):
-        problems.append("ChatWebView.askExternal must drop requests while one waits, during the quiet time "
-                        "and without a host, and start the quiet time")
+    if not re.search(r'chatWeb\s*\.\s*externalUrl\s*!==\s*""\s*\|\|\s*Date\s*\.\s*now\s*\(\s*\)\s*<\s*chatWeb\s*\.\s*externalQuietUntil', ask) \
+            or not re.search(r"ChatSites\s*\.\s*isWebUrl\s*\(\s*url\s*\)", ask) \
+            or not re.search(r"chatWeb\s*\.\s*showExternal\s*\(\s*url\s*,\s*false\s*\)", ask):
+        problems.append("ChatWebView.askExternal must drop requests while one waits and during the quiet time, "
+                        "accept only http(s), and go through showExternal(url, false)")
+    show = _function_body(web, "showExternal") or ""
+    if not re.search(r'if\s*\(\s*host\s*===\s*""\s*\|\|\s*\(\s*!\s*replace\s*&&\s*chatWeb\s*\.\s*externalUrl\s*!==\s*""\s*\)\s*\)\s*return', show) \
+            or not re.search(r"chatWeb\s*\.\s*externalQuietUntil\s*=\s*Date\s*\.\s*now\s*\(\s*\)\s*\+\s*chatWeb\s*\.\s*externalPromptGap", show) \
+            or not re.search(r"chatWeb\s*\.\s*externalInsecure\s*=\s*ChatSites\s*\.\s*isHttpUrl\s*\(\s*url\s*\)\s*&&\s*!\s*chatWeb\s*\.\s*siteWarned\s*\(\s*url\s*\)", show):
+        problems.append("ChatWebView.showExternal must need a host (and no waiting prompt unless replacing), "
+                        "start the quiet time and mark an unacknowledged http address insecure")
     clear = _function_body(web, "clearExternal") or ""
     if not re.search(r"chatWeb\s*\.\s*externalQuietUntil\s*=\s*Date\s*\.\s*now\s*\(\s*\)\s*\+\s*"
                      r"chatWeb\s*\.\s*externalPromptGap", clear):
@@ -4248,10 +4349,10 @@ def _external_open_problems(sources):
                                        navs[0] if navs else ""):
         problems.append('onNavigationRequested: an "external" verdict must only call chatWeb.askExternal(...)')
     windows = [body for _, body in _blocks(web, r"\bonNewWindowRequested\s*:\s*\(\s*request\s*\)\s*=>\s*\{")]
-    if len(windows) != 1 or not re.search(r"request\s*\.\s*userInitiated\s*&&\s*ChatSites\s*\.\s*isHttpsUrl\s*\(\s*url\s*\)"
+    if len(windows) != 1 or not re.search(r"request\s*\.\s*userInitiated\s*&&\s*ChatSites\s*\.\s*isWebUrl\s*\(\s*url\s*\)"
                                           r"\s*\)\s*chatWeb\s*\.\s*askExternal\s*\(\s*url\s*\)",
                                           windows[0] if windows else ""):
-        problems.append("onNewWindowRequested: only a clicked https window may call chatWeb.askExternal(url)")
+        problems.append("onNewWindowRequested: only a clicked http(s) window may call chatWeb.askExternal(url)")
     # Open and the toolbar button are only ever a click away.
     accepts = [(name, match.start()) for name, code in sources.items()
                for match in re.finditer(r"\bacceptExternal\s*\(", code)]
@@ -4268,6 +4369,33 @@ def _external_open_problems(sources):
     if len(prompts) != 1 or "acceptExternal" not in prompts[0] \
             or not re.search(r"onClicked\s*:\s*chatView\s*\.\s*web\s*\.\s*clearExternal\s*\(\s*\)", prompts[0]):
         problems.append("ChatView.qml: one externalPrompt with Open (acceptExternal) and Cancel (clearExternal)")
+    # Open is armed only by a timer of at least half a second that restarts
+    # whenever the prompt shows or its address changes (audit L1); the
+    # insecure wording exists for http.
+    prompt = prompts[0] if prompts else ""
+    delay = re.search(r"property\s+int\s+armDelay\s*:\s*(\d+)\b", prompt)
+    open_buttons = [body for _, body in _blocks(prompt, r"PlasmaComponents\s*\.\s*ToolButton\s*\{")
+                    if "acceptExternal" in body]
+    if not delay or int(delay.group(1)) < 500 \
+            or not re.search(r"property\s+bool\s+armed\s*:\s*false\b", prompt) \
+            or len(re.findall(r"\barmed\s*=\s*true\b", prompt)) != 1 \
+            or not re.search(r"Timer\s*\{[^{}]*interval\s*:\s*externalPrompt\s*\.\s*armDelay\b[^{}]*"
+                             r"onTriggered\s*:\s*externalPrompt\s*\.\s*armed\s*=\s*true", prompt, re.S) \
+            or not re.search(r"onVisibleChanged\s*:\s*externalPrompt\s*\.\s*rearm\s*\(\s*\)", prompt) \
+            or not re.search(r"onUrlChanged\s*:\s*externalPrompt\s*\.\s*rearm\s*\(\s*\)", prompt) \
+            or not re.search(r"function\s+rearm\s*\(\s*\)\s*\{\s*externalPrompt\s*\.\s*armed\s*=\s*false\b[^}]*"
+                             r"armTimer\s*\.\s*restart\s*\(", prompt, re.S) \
+            or len(open_buttons) != 1 \
+            or not re.search(r"\benabled\s*:\s*externalPrompt\s*\.\s*armed\s*\n", _top_level(open_buttons[0])):
+        problems.append("ChatView.qml: the externalPrompt's Open must stay disabled (armed) for at least "
+                        "500 ms after the prompt shows or its address changes")
+    if "not secure" not in prompt or not re.search(r"externalPrompt\s*\.\s*insecure\s*\?", prompt) \
+            or not re.search(r"insecure\s*:\s*!!chatView\s*\.\s*web\s*&&\s*chatView\s*\.\s*web\s*\.\s*externalInsecure\b", prompt):
+        problems.append("ChatView.qml: the externalPrompt must say an http address is not secure")
+    full = sources.get(_rel(FULL_REPRESENTATION), "")
+    if not re.search(r"enabled\s*:\s*chatView\s*\.\s*canOpenExternally\s*\n\s*onClicked\s*:\s*chatView\s*\.\s*openExternally",
+                     full):
+        problems.append("FullRepresentation.qml: Open in browser must be enabled only by chatView.canOpenExternally")
     for name, code in sources.items():
         for match in re.finditer(r"\bopenExternally\s*\(", code):
             line = code[:match.end()].splitlines()[-1]
@@ -4303,19 +4431,37 @@ EXTERNAL_MUTATIONS = [
     (CHAT_WEB_VIEW, "chatWeb.askExternal(url)", "Qt.openUrlExternally(url)"),
     (CHAT_WEB_VIEW, "        chatWeb.externalUrl = url\n    }",
      "        chatWeb.externalUrl = url\n        chatWeb.acceptExternal()\n    }"),
-    (CHAT_WEB_VIEW, '        if (chatWeb.externalUrl !== "" || now < chatWeb.externalQuietUntil',
-     "        if (now < chatWeb.externalQuietUntil"),
-    (CHAT_WEB_VIEW, "        chatWeb.externalQuietUntil = now + chatWeb.externalPromptGap\n", ""),
-    (CHAT_WEB_VIEW, '        if (host === "")\n            return\n', ""),
+    (CHAT_WEB_VIEW, '        if (typeof url !== "string" || url.length > 4096 || chatWeb.externalUrl !== ""\n                || Date.now()',
+     '        if (typeof url !== "string" || url.length > 4096\n                || Date.now()'),
+    (CHAT_WEB_VIEW, "        chatWeb.externalQuietUntil = Date.now() + chatWeb.externalPromptGap\n        chatWeb.externalHost = host",
+     "        chatWeb.externalHost = host"),
+    (CHAT_WEB_VIEW, '        if (host === "" || (!replace && chatWeb.externalUrl !== ""))\n            return\n', ""),
+    (CHAT_WEB_VIEW, '(!replace && chatWeb.externalUrl !== "")', "false"),
     (CHAT_WEB_VIEW, "        chatWeb.externalQuietUntil = Date.now() + chatWeb.externalPromptGap\n", ""),
-    (CHAT_WEB_VIEW, "        if (ChatSites.isHttpsUrl(url))\n            Qt.openUrlExternally(url)",
-     "        Qt.openUrlExternally(url)"),
-    (CHAT_WEB_VIEW, "        if (chatWeb.canOpenExternally)\n            Qt.openUrlExternally(chatWeb.activeView.url)",
-     "        Qt.openUrlExternally(chatWeb.activeView.url)"),
+    (CHAT_WEB_VIEW, "        }\n        chatWeb.openHttps(url)",
+     "        }\n        LinkOut.open(url)"),
+    (CHAT_WEB_VIEW, "        }\n        chatWeb.openHttps(url)",
+     "        }\n        Qt.openUrlExternally(url)"),
+    (CHAT_WEB_VIEW, "        if (!chatWeb.canOpenExternally)\n            return\n", ""),
+    (CHAT_WEB_VIEW, "        else\n            chatWeb.openHttps(url)\n    }", "        else\n            LinkOut.open(url)\n    }"),
+    (CHAT_WEB_VIEW, "        else\n            chatWeb.openHttps(url)\n    }", "        else\n            Qt.openUrlExternally(url)\n    }"),
+    (CHAT_WEB_VIEW, " && ChatSites.isWebUrl(url)\n                && (!ChatSites.isHttpUrl(url) || chatWeb.siteWarned(url)))\n            LinkOut.open(url)",
+     ")\n            LinkOut.open(url)"),
+    (CHAT_WEB_VIEW, " && ChatSites.isWebUrl(url)\n                && (!ChatSites.isHttpUrl(url) || chatWeb.siteWarned(url)))\n            LinkOut.open(url)",
+     " && ChatSites.isWebUrl(url))\n            LinkOut.open(url)"),
+    (CHAT_WEB_VIEW, "ChatSites.isWebUrl(url)\n                && (!ChatSites.isHttpUrl", "ChatSites.isHttpUrl(url)\n                && (!ChatSites.isHttpUrl"),
+    (CHAT_WEB_VIEW, "chatWeb.siteWarned(url)))\n            LinkOut.open(url)", "true))\n            LinkOut.open(url)"),
+    (CHAT_WEB_VIEW, "url.length <= 4096 && ", ""),
+    (CHAT_WEB_VIEW, "url.length <= 4096", "url.length <= 40960"),
+    (CHAT_WEB_VIEW, 'import "LinkOut.js" as LinkOut\n', ""),
+    (CHAT_WEB_VIEW, "    function focusView() {\n", "    function focusView() {\n        chatWeb.openHttps(\"https://x.example/\")\n"),
+    (LINK_OUT, "Qt.openUrlExternally(url)", "Qt.openUrlExternally(String(url).trim())"),
+    (LINK_OUT, "function open(url) {", "function open(url) { Qt.openUrlExternally(\"https://x.example/\")"),
+    (CHAT_VIEW, "    function focusView() {\n", "    function focusView() {\n        LinkOut.open(\"https://x.example/\")\n"),
     (CHAT_WEB_VIEW, "        chatWeb.syncCurrentViews()\n    }\n\n    // A changed address moves",
      "        chatWeb.syncCurrentViews()\n        chatWeb.acceptExternal()\n    }\n\n    // A changed address moves"),
-    (CHAT_WEB_VIEW, "                         && ChatSites.isHttpsUrl(url))\n                    chatWeb.askExternal(url)",
-     "                         && ChatSites.isHttpsUrl(url))\n                    chatWeb.acceptExternal(url)"),
+    (CHAT_WEB_VIEW, "                         && ChatSites.isWebUrl(url))\n                    chatWeb.askExternal(url)",
+     "                         && ChatSites.isWebUrl(url))\n                    chatWeb.acceptExternal(url)"),
     (CHAT_WEB_VIEW, "                else if (verdict !== \"block\" && request.userInitiated\n",
      "                else if (verdict !== \"block\"\n"),
     (CHAT_VIEW, "onClicked: chatView.web.clearExternal()", "onClicked: chatView.web.acceptExternal()"),
@@ -4330,6 +4476,45 @@ EXTERNAL_MUTATIONS = [
      "    Kirigami.InlineMessage { text: chatView.web.externalHost }\n"
      "    Kirigami.InlineMessage {\n        Layout.fillWidth: true\n        visible: !!chatView.web && chatView.web.pendingDownloadName"),
     (FULL_REPRESENTATION, "onClicked: chatView.openExternally()", "onClicked: Qt.openUrlExternally(\"https://x.example/\")"),
+    # M1: http needs the acknowledgement; the gates stay where they are.
+    (CHAT_WEB_VIEW, "        if (ChatSites.isHttpUrl(url) && !chatWeb.siteWarned(url))\n            chatWeb.showExternal(url, true)\n        else\n",
+     ""),
+    (CHAT_WEB_VIEW, "ChatSites.isHttpUrl(url) && !chatWeb.siteWarned(url))\n            chatWeb.showExternal",
+     "ChatSites.isHttpUrl(url) && false)\n            chatWeb.showExternal"),
+    (CHAT_WEB_VIEW, "        chatWeb.warnedNow = ChatSites.addWarnedSite(chatWeb.warnedNow, url)\n", ""),
+    (CHAT_WEB_VIEW, "        chatWeb.clearExternal()\n        if (url.length <= 4096",
+     "        if (url.length <= 4096"),
+    (CHAT_WEB_VIEW, "    function focusView() {\n",
+     "    function focusView() {\n        chatWeb.httpSiteAcknowledged(\"http://x.example:80\")\n"),
+    (CHAT_WEB_VIEW, "    function focusView() {\n",
+     "    function focusView() {\n        chatWeb.showExternal(\"http://x.example/\", true)\n"),
+    (CHAT_WEB_VIEW, "        && ChatSites.isWebUrl(chatWeb.activeView.url.toString())\n", ""),
+    (CHAT_WEB_VIEW, "        if (url.length > 4096)\n            return\n        if (ChatSites.isHttpUrl", "        if (ChatSites.isHttpUrl"),
+    (CHAT_WEB_VIEW, "chatWeb.externalInsecure = ChatSites.isHttpUrl(url) && !chatWeb.siteWarned(url)",
+     "chatWeb.externalInsecure = false"),
+    (CHAT_VIEW, "                text: externalPrompt.insecure\n", "                text: false\n"),
+    (FULL_REPRESENTATION, "enabled: chatView.canOpenExternally\n                    onClicked: chatView.openExternally()",
+     "enabled: true\n                    onClicked: chatView.openExternally()"),
+    # Audit L1: Open is disabled for a moment each time the prompt shows.
+    (CHAT_VIEW, "                enabled: externalPrompt.armed\n", ""),
+    (CHAT_VIEW, "enabled: externalPrompt.armed", "enabled: true"),
+    (CHAT_VIEW, "property int armDelay: 700", "property int armDelay: 0"),
+    (CHAT_VIEW, "property int armDelay: 700", "property int armDelay: 100"),
+    (CHAT_VIEW, "property bool armed: false", "property bool armed: true"),
+    (CHAT_VIEW, "        onVisibleChanged: externalPrompt.rearm()\n", ""),
+    (CHAT_VIEW, "        onUrlChanged: externalPrompt.rearm()\n", ""),
+    (CHAT_VIEW, "            externalPrompt.armed = false\n", ""),
+    (CHAT_VIEW, "onTriggered: externalPrompt.armed = true", "onTriggered: externalPrompt.armed = true; externalPrompt.armed = true"),
+    (CHAT_VIEW, "            interval: externalPrompt.armDelay\n", "            interval: 1\n"),
+    # Reviewer L1: LinkOut only as `LinkOut.open(url)` in openHttps.
+    (CHAT_WEB_VIEW, 'import "LinkOut.js" as LinkOut\n', 'import "LinkOut.js" as LinkOut\nimport "LinkOut.js" as Out\n'),
+    (CHAT_WEB_VIEW, 'import "LinkOut.js" as LinkOut\n', 'import "LinkOut.js" as Out\n'),
+    (CHAT_WEB_VIEW, "    function focusView() {\n", "    function focusView() {\n        var o = LinkOut\n"),
+    (CHAT_WEB_VIEW, "    function focusView() {\n", "    function focusView() {\n        var f = LinkOut.open\n"),
+    (CHAT_WEB_VIEW, "    function focusView() {\n", "    function focusView() {\n        LinkOut[\"open\"](\"https://x.example/\")\n"),
+    (CHAT_WEB_VIEW, "            LinkOut.open(url)", "            LinkOut[\"open\"](url)"),
+    (CHAT_WEB_VIEW, "    function focusView() {\n", "    function focusView() {\n        var o = LinkOut; o.open(\"https://x.example/\")\n"),
+    (CHAT_VIEW, "    function focusView() {\n", "    function focusView() {\n        var o = LinkOut\n"),
     (USAGE_VIEW, "import QtQuick\n", "import QtQuick\n// x\n"),
 ]
 
@@ -13424,3 +13609,31 @@ LOCK_MUTATIONS = {
 @pytest.mark.parametrize("name", sorted(LOCK_MUTATIONS))
 def test_proof_lock_rule_catches(name):
     assert _lock_problems(_python_mutated(SETTINGS_BACKUP_PY, *LOCK_MUTATIONS[name]))
+
+
+# F1b The app id is 2**31, which a `property int` wraps to -2147483648: every
+# property that carries the applet id into a helper command or a profile name
+# is a double (tests/qml/tst_applet_id.qml proves the values).
+APPLET_ID_PROPERTIES = [
+    (CHAT_VIEW, "appletId"), (CHAT_VIEW, "storageApplet"),
+    (CHAT_WEB_VIEW, "appletId"), (CHAT_WEB_VIEW, "storageApplet"),
+    (UI / "LocalOwnerCheck.qml", "appletId"), (OLLAMA_CHAT_VIEW, "appletId"),
+]
+
+
+def _applet_id_type_problems(path, name, code):
+    kinds = re.findall(rf"(?m)^\s*property\s+(\w+)\s+{name}\s*:", code)
+    return [] if kinds == ["double"] else [f"{_rel(path)}: `property {name}` must be a double, got {kinds}"]
+
+
+@pytest.mark.parametrize(("path", "name"), APPLET_ID_PROPERTIES,
+                         ids=[f"{path.name}:{name}" for path, name in APPLET_ID_PROPERTIES])
+def test_applet_id_properties_are_doubles(path, name):
+    assert not _applet_id_type_problems(path, name, _read_code(path))
+
+
+@pytest.mark.parametrize(("path", "name"), APPLET_ID_PROPERTIES,
+                         ids=[f"{path.name}:{name}" for path, name in APPLET_ID_PROPERTIES])
+def test_proof_applet_id_type_rule_catches(path, name):
+    code = re.sub(rf"(?m)^(\s*property\s+)double(\s+{name}\s*:)", r"\1int\2", _read_code(path))
+    assert _applet_id_type_problems(path, name, code)

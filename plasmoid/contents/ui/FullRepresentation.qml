@@ -613,6 +613,8 @@ PlasmaExtras.Representation {
                     autoLockMinutes: root.chatAutoLockMinutes
                     storageBusy: root.chatStorageBusy || root.chatDialogOpen
                     zoomMap: root.chatZoom
+                    httpWarnedSites: root.chatHttpWarnedSites
+                    onHttpSiteAcknowledged: (origin) => root.chatHttpSiteAcknowledged(origin)
                     onStorageRequest: (action) => root.chatStorageRequest(action)
                     splitActive: root.chatSplit
                     siteIdB: root.chatSiteIdB

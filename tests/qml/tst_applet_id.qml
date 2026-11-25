@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest
+import "../../plasmoid/contents/ui"
 import "../../plasmoid/contents/ui/ChatStorage.js" as ChatStorage
 import "../../plasmoid/contents/ui/InstallInfo.js" as InstallInfo
 import "../../plasmoid/contents/ui/PromptLibrary.js" as PromptLibrary
@@ -125,6 +126,110 @@ TestCase {
         compare(ChatStorage.vaultCommand("add-key", 5, applet, "wallet"), prefix + "--vault add-key --method wallet")
         compare(InstallInfo.command(5, applet, false),
                 "env HEARTHWIRE_RUN=5 HEARTHWIRE_APPLET=" + data.text + " python3 -P -s -m hearthwire --install-info")
+    }
+
+    // F1b: the four views that carry the id into the helper's commands and
+    // the profile names must keep 2**31 exact (a `property int` wraps it).
+    Component {
+        id: ownerCheckComponent
+        LocalOwnerCheck {
+            property var commands: []
+            runOwnerCheck: function (command) { commands.push(command) }
+        }
+    }
+    Component {
+        id: ollamaComponent
+        OllamaChatView {
+            property var commands: []
+            current: true
+            siteEnabled: true
+            runOwnerCheck: function (command) { commands.push(command) }
+            createRequest: function () { return null }
+        }
+    }
+    Component {
+        id: chatViewComponent
+        ChatView {
+            webSource: Qt.resolvedUrl("ChatWebStub.qml")
+        }
+    }
+
+    function test_localOwnerCheckKeepsTheId_data() {
+        return rows()
+    }
+
+    function test_localOwnerCheckKeepsTheId(data) {
+        var check = createTemporaryObject(ownerCheckComponent, testCase, {appletId: data.id})
+        compare(check.appletId, data.id)
+        check.start(3000)
+        compare(check.commands.length, 1)
+        compare(check.commands[0].replace(/HEARTHWIRE_RUN=\d+/, "HEARTHWIRE_RUN=5"),
+                "env HEARTHWIRE_RUN=5 HEARTHWIRE_APPLET=" + data.text + " python3 -P -m hearthwire --port-owner 3000")
+    }
+
+    function test_ollamaChatViewKeepsTheId_data() {
+        return rows()
+    }
+
+    function test_ollamaChatViewKeepsTheId(data) {
+        var view = createTemporaryObject(ollamaComponent, testCase, {appletId: data.id, width: 300, height: 300})
+        verify(view !== null)
+        compare(view.appletId, data.id)
+        compare(String(view.appletId), data.text)
+        verify(view.commands.length >= 1)
+        verify(view.commands[0].indexOf(" HEARTHWIRE_APPLET=" + data.text + " python3 -P -m hearthwire --port-owner ") > 0,
+               view.commands[0])
+    }
+
+    function test_chatViewKeepsTheIdsAndPassesThem_data() {
+        return rows()
+    }
+
+    function test_chatViewKeepsTheIdsAndPassesThem(data) {
+        var view = createTemporaryObject(chatViewComponent, testCase,
+            {appletId: data.id, storageApplet: data.id, width: 300, height: 300})
+        verify(view !== null)
+        compare(view.appletId, data.id)
+        compare(view.storageApplet, data.id)
+        compare(String(view.storageApplet), data.text)
+    }
+
+    function test_chatWebViewKeepsTheIdsInProfilesAndChecks_data() {
+        return rows()
+    }
+
+    function test_chatWebViewKeepsTheIdsInProfilesAndChecks(data) {
+        var web = createTemporaryObject(webComponent, testCase, {
+            staySignedIn: true, runtimeDir: "/nonexistent/run",
+            storageApplet: data.id, storageGeneration: 4, appletId: data.id
+        })
+        verify(web !== null)
+        compare(web.storageApplet, data.id)
+        compare(web.appletId, data.id)
+        web.preparedSites = ["claude"]
+        compare(web.siteProfileSpec("claude"), {
+            saved: true,
+            sitePath: "/nonexistent/run/hearthwire/vault/web/applet-" + data.text + "-g4/site-claude",
+            siteName: "applet-" + data.text + "-g4-claude"
+        })
+        var check = null
+        for (var index = 0; index < web.children.length; index++) {
+            if (web.children[index].objectName === "localOwnerCheck")
+                check = web.children[index]
+        }
+        verify(check !== null)
+        compare(check.appletId, data.id)
+        var commands = []
+        check.runOwnerCheck = function (command) { commands.push(command) }
+        check.start(3000)
+        compare(commands.length, 1)
+        verify(commands[0].indexOf(" HEARTHWIRE_APPLET=" + data.text + " python3 -P -m hearthwire --port-owner 3000") > 0,
+               commands[0])
+    }
+
+    Component {
+        id: webComponent
+        ChatWebView { width: 300; height: 300 }
     }
 
     // Under the stand-ins only: the real files with the app's Plasmoid.id.

@@ -30,6 +30,14 @@ NOT_TOOL_HINTS = {
     "fedora": {"libsecret", "ollama"},
     "debian": {"libsecret-tools"},
 }
+# Tools the app (hearthwire-hyprland) provides, not the widget's packages:
+# the widget's packaging files must NOT suggest them, so they are left out of
+# the packaging comparison. Each must really be in ChatStorage.js with exactly
+# these package names, so the exception can't go stale.
+APP_ONLY_HINTS = {
+    "hearthwire-askpass": {"arch": "hearthwire-hyprland", "fedora": "hearthwire-askpass",
+                           "debian": "hearthwire-askpass", "other": "hearthwire-askpass"},
+}
 
 
 def _js_literal(text, name, opener):
@@ -86,13 +94,19 @@ def sync_problems(storage, pkgbuild, spec, control):
     for family, table in tables.items():
         if sorted(table) != sorted(tools):
             problems.append(f"TOOL_PACKAGES.{family} must have exactly the tools {sorted(tools)}, got {sorted(table)}")
+    for tool, packages in APP_ONLY_HINTS.items():
+        if tool not in tools:
+            problems.append(f"app-only hint {tool} is not a tool the widget reports")
+        for family, package in packages.items():
+            if tables.get(family, {}).get(tool) != package:
+                problems.append(f"TOOL_PACKAGES.{family}.{tool} must be {package!r}")
     suggested = {"arch": arch_optional(pkgbuild), "fedora": fedora_optional(spec), "debian": debian_optional(control)}
     for family in FAMILIES:
         packaged = set(suggested[family])
         stale = NOT_TOOL_HINTS[family] - packaged
         if stale:
             problems.append(f"{family}: {sorted(stale)} are listed as non-hint packages but not suggested")
-        hinted = {package for tool, package in tables.get(family, {}).items() if tool in tools}
+        hinted = {package for tool, package in tables.get(family, {}).items() if tool in tools and tool not in APP_ONLY_HINTS}
         expected = packaged - NOT_TOOL_HINTS[family]
         if hinted - expected:
             problems.append(f"{family}: the widget names {sorted(hinted - expected)}, which the package doesn't suggest")
@@ -111,11 +125,18 @@ def test_tool_packages_match_the_packaging_files():
 
 def test_the_tables_cover_every_tool_the_widget_reports():
     tools, tables = widget_tables(CHAT_STORAGE_JS.read_text(encoding="utf-8"))
-    assert tools == ["gocryptfs", "gocryptfs-v2", "kdialog", "fusermount3", "kwallet-query", "qdbus6", "openssl"]
+    assert tools == ["gocryptfs", "gocryptfs-v2", "kdialog", "hearthwire-askpass", "fusermount3", "kwallet-query", "qdbus6", "openssl"]
     assert all(set(table) == set(tools) for table in tables.values())
 
 
 MUTATIONS = [
+    # An unknown extra tool (not app-only) without packaging; an app-only hint
+    # with a changed package name or removed from the tools.
+    (0, '        "openssl": "openssl"\n    },\n    "fedora"',
+     '        "openssl": "openssl",\n        "hearthwire-extra": "hearthwire-extra"\n    },\n    "fedora"'),
+    (0, '"hearthwire-askpass": "hearthwire-hyprland"', '"hearthwire-askpass": "hearthwire-askpass"'),
+    (0, 'var MISSING_TOOLS = ["gocryptfs", "gocryptfs-v2", "kdialog", "hearthwire-askpass", "fusermount3"]',
+     'var MISSING_TOOLS = ["gocryptfs", "gocryptfs-v2", "kdialog", "fusermount3"]'),
     # The widget names a package the packaging doesn't suggest.
     (0, '"kwallet-query": "kwallet",', '"kwallet-query": "kwallet6",'),
     (0, '"qdbus6": "qt6-qttools",', '"qdbus6": "qdbus-qt6",'),

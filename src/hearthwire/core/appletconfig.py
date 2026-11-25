@@ -50,8 +50,14 @@ PLUGIN = "io.github.flybytechprog.hearthwire"
 # A desktop with many widgets stays far below this; a bigger file is refused.
 MAX_RC_BYTES = 4 * 1024 * 1024
 
-# Every main.xml entry of group General: name -> (type, default). Bool, Int and
-# String are the only types main.xml uses.
+# Every main.xml entry of group General: name -> (type, default). Bool, Int,
+# String and StringList (an empty default, a list of strings) are the only
+# types main.xml uses.
+# A StringList holds at most this many entries of at most this many characters
+# (as the app's ConfigStore); anything else is UNREADABLE.
+MAX_LIST_ENTRIES = 1000
+MAX_LIST_ENTRY_CHARS = 512
+
 CONFIG_ENTRIES: dict[str, tuple[str, object]] = {
     "trackedProviders": ("String", '["claude","codex","cursor","antigravity","copilot","devin","grok"]'),
     "providerMetrics": ("String", "{}"),
@@ -80,6 +86,7 @@ CONFIG_ENTRIES: dict[str, tuple[str, object]] = {
     "tooltipMetrics": ("String", ""),
     "shortcutOpens": ("String", "popup"),
     "chatSiteZoom": ("String", "{}"),
+    "chatHttpWarnedSites": ("StringList", []),
     "alertLowEnabled": ("Bool", False),
     "alertLowPercent": ("Int", 20),
     "alertResetEnabled": ("Bool", False),
@@ -282,8 +289,39 @@ def find_applet(content: bytes, applet: int, *, windowed: bool = False) -> Optio
     return entries
 
 
+def _string_list(raw: bytes) -> object:
+    """A KConfig StringList (items joined by ``,``, a literal comma written ``\\,``), or UNREADABLE."""
+    if not raw:
+        return []
+    items: list[bytes] = []
+    start = index = 0
+    while index < len(raw):
+        if raw[index:index + 1] == b"\\":
+            index += 2  # An escaped byte (including ``\,``) never splits.
+            continue
+        if raw[index:index + 1] == b",":
+            items.append(raw[start:index])
+            start = index + 1
+        index += 1
+    items.append(raw[start:])
+    if len(items) > MAX_LIST_ENTRIES:
+        return UNREADABLE
+    result: list[str] = []
+    for item in items:
+        try:
+            text = decode_value(item).decode("utf-8").replace("\\,", ",")
+        except UnicodeDecodeError:
+            return UNREADABLE
+        if len(text) > MAX_LIST_ENTRY_CHARS:
+            return UNREADABLE
+        result.append(text)
+    return result
+
+
 def typed_value(kind: str, raw: bytes) -> object:
     """The value KConfig would hand the widget for a main.xml ``kind``, or UNREADABLE."""
+    if kind == "StringList":
+        return _string_list(raw)
     try:
         text = decode_value(raw).decode("utf-8")
     except UnicodeDecodeError:
@@ -302,13 +340,18 @@ def typed_value(kind: str, raw: bytes) -> object:
     return UNREADABLE
 
 
+def _default(default: object) -> object:
+    """A default as a fresh value (a list is copied, so no caller changes the table)."""
+    return list(default) if isinstance(default, list) else default
+
+
 def applied_from(entries: Mapping[bytes, bytes], keys: Iterable[str]) -> dict[str, object]:
     """``keys`` (each a CONFIG_ENTRIES name) as the widget applies them."""
     result: dict[str, object] = {}
     for key in keys:
         kind, default = CONFIG_ENTRIES[key]
         raw = entries.get(key.encode("ascii"))
-        result[key] = default if raw is None else typed_value(kind, raw)
+        result[key] = _default(default) if raw is None else typed_value(kind, raw)
     return result
 
 

@@ -432,6 +432,19 @@ TestCase {
         compare(card.message.indexOf("/"), -1)
     }
 
+    function test_badFrontendCard() {
+        var view = make({
+            current: true,
+            storageMode: "encrypted",
+            card: {view: "unlock", message: "bad-frontend"}
+        })
+        var card = findChild(view, "storageCard")
+        verify(card.visible)
+        compare(card.message, "The helper refused this request. "
+                + "Install hearthwire-helper and hearthwire-hyprland of the same version.")
+        compare(view.storageText("bad-frontend"), card.message)
+    }
+
     // The install card names the distro family's packages and command, or
     // only the tools with generic wording when the family isn't known.
     function test_installCardPerDistro_data() {
@@ -569,6 +582,7 @@ TestCase {
         var open = findChild(view, "externalOpen")
         var cancel = findChild(view, "externalCancel")
         verify(!prompt.visible)
+        prompt.armDelay = 80
         // ChatSites never yields such a host; the label must still show it literally.
         var host = "<b>example.net</b>"
         view.web.externalUrl = "https://example.net/"
@@ -583,6 +597,7 @@ TestCase {
         verify(!prompt.visible)
         view.web.externalUrl = "https://example.net/"
         view.web.externalHost = "example.net"
+        tryVerify(function () { return open.enabled })
         open.clicked()
         compare(view.web.opened, 1)
         verify(!prompt.visible)
@@ -590,6 +605,58 @@ TestCase {
         view.web.externalUrl = "https://example.net/"
         view.web.externalHost = ""
         verify(!prompt.visible)
+    }
+
+    // Open stays off for a moment each time the prompt shows or changes (L1).
+    function test_externalOpenIsDisabledForAMomentEachTime() {
+        var view = make({current: true, siteId: "claude", siteIds: ["claude"]})
+        tryVerify(function () { return view.web !== null })
+        var prompt = findChild(view, "externalPrompt")
+        var open = findChild(view, "externalOpen")
+        var cancel = findChild(view, "externalCancel")
+        compare(prompt.armDelay, 700)
+        prompt.armDelay = 150
+        verify(!open.enabled)
+        view.web.externalUrl = "https://example.net/"
+        view.web.externalHost = "example.net"
+        verify(prompt.visible)
+        verify(!open.enabled)
+        verify(cancel.enabled)
+        wait(60)
+        verify(!open.enabled)
+        tryVerify(function () { return open.enabled }, 2000)
+        // Hiding and showing it again arms it again.
+        view.web.externalUrl = ""
+        verify(!prompt.visible)
+        view.web.externalUrl = "https://example.net/"
+        verify(!open.enabled)
+        tryVerify(function () { return open.enabled }, 2000)
+        // A different address in the visible prompt does too.
+        view.web.externalUrl = "http://example.net/"
+        verify(!open.enabled)
+        tryVerify(function () { return open.enabled }, 2000)
+    }
+
+    function test_insecurePromptSaysSoAndForwardsTheAcknowledgement() {
+        var view = make({current: true, siteId: "claude", siteIds: ["claude"]})
+        tryVerify(function () { return view.web !== null })
+        var label = findChild(view, "externalText")
+        var open = findChild(view, "externalOpen")
+        findChild(view, "externalPrompt").armDelay = 60
+        view.web.externalUrl = "http://example.net/"
+        view.web.externalHost = "example.net"
+        compare(label.text, "Open example.net in your browser?")
+        view.web.externalInsecure = true
+        compare(label.text, "This page uses http, which is not secure. Anyone on the network can read or change it. Open example.net in your browser anyway?")
+        compare(label.textFormat, Text.PlainText)
+        tryVerify(function () { return open.enabled })
+        // Both lists reach the web view and the acknowledgement comes back.
+        var got = []
+        view.httpSiteAcknowledged.connect(function (origin) { got.push(origin) })
+        view.httpWarnedSites = ["http://a.example:80"]
+        compare(view.web.httpWarnedSites, ["http://a.example:80"])
+        view.web.httpSiteAcknowledged("http://example.net:80")
+        compare(got, ["http://example.net:80"])
     }
 
     // --- off-site notice (L2) ------------------------------------------------

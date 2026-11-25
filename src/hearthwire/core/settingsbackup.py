@@ -140,6 +140,7 @@ EXCLUDED_KEYS = (
     "chatVaultUnlock", "chatSiteZoom", "configSchemaVersion",
     "initialSetupComplete", "usageHistoryEnabled", "usageHistoryClearOwed",
     "chatProfileLayout", "chatPendingSiteClears",
+    "chatHttpWarnedSites",  # task 013: per-origin "http is not secure" confirmations stay on this machine
     "backupAutoExport", "backupRestoreAt",  # task 007: a restore never changes backup behavior
 )
 

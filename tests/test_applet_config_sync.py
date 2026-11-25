@@ -35,6 +35,9 @@ def main_xml_entries(text):
         elif kind == "Bool":
             assert text_value in ("true", "false"), (name, text_value)
             value = text_value == "true"
+        elif kind == "StringList":
+            assert text_value == "", (name, text_value)  # Only an empty default is supported.
+            value = []
         else:
             value = text_value
         entries[name] = (kind, value)
@@ -57,7 +60,7 @@ def test_config_entries_equal_main_xml():
 
 def test_main_xml_uses_only_the_types_the_reader_knows():
     assert {kind for kind, _ in main_xml_entries(MAIN_XML.read_text(encoding="utf-8")).values()} <= \
-        {"String", "Int", "Bool"}
+        {"String", "Int", "Bool", "StringList"}
 
 
 def test_the_backup_behavior_keys_are_in_the_table():
@@ -83,6 +86,9 @@ def test_every_backup_default_passes_the_backup_rules():
      ""),                                                                       # a removed key
     ('<entry name="chatPendingSiteClears" type="String">\n            <default></default>\n        </entry>\n',
      ""),
+    ('<entry name="chatHttpWarnedSites" type="StringList">\n            <default></default>\n        </entry>\n',
+     ""),                                                                       # task 013
+    ('<entry name="chatHttpWarnedSites" type="StringList">', '<entry name="chatHttpWarnedSites" type="String">'),
     ('<entry name="chatUserSites" type="String">\n            <default>[]</default>\n        </entry>\n',
      ""),                                                                       # task 005
     ('<entry name="chatUserSites" type="String">\n            <default>[]</default>',

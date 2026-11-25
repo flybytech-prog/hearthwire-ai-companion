@@ -5,7 +5,7 @@ import QtQuick
 Item {
     property bool staySignedIn: false
     property string runtimeDir: ""
-    property int storageApplet: -1
+    property double storageApplet: -1
     property int storageGeneration: -1
     property var preparedSites: []
     property var siteIds: []
@@ -27,7 +27,7 @@ Item {
     property bool passkeyNotice: false
     property bool pageCrashed: false
     property bool pageFailed: false
-    property int appletId: 0
+    property double appletId: 0
     property var offSite: ({off: false, host: ""})
     property string activeSiteName: ""
     property string localOwnerProblem: ""
@@ -35,6 +35,9 @@ Item {
     property bool localOwnerChecking: false
     property string externalUrl: ""
     property string externalHost: ""
+    property bool externalInsecure: false
+    property var httpWarnedSites: []
+    signal httpSiteAcknowledged(string origin)
     property int retries: 0
     property int homes: 0
     property int dismissals: 0
@@ -48,8 +51,8 @@ Item {
     function home() { homes++ }
     function retryLocalOwner() { retries++ }
     function dismissLocalOwner() { dismissals++; localOwnerProblem = "" }
-    function acceptExternal() { opened++; externalUrl = ""; externalHost = "" }
-    function clearExternal() { cancelled++; externalUrl = ""; externalHost = "" }
+    function acceptExternal() { opened++; externalUrl = ""; externalHost = ""; externalInsecure = false }
+    function clearExternal() { cancelled++; externalUrl = ""; externalHost = ""; externalInsecure = false }
     function openExternally() {}
     function focusView() {}
     function cancelDownload() {}

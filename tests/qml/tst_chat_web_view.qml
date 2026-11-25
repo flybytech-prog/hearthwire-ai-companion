@@ -240,8 +240,9 @@ TestCase {
         compare(web.externalHost, "other.example")
         web.clearExternal()
         wait(150)
-        // Nothing that isn't https with a readable host.
-        web.askExternal("http://example.net/")
+        // Nothing that isn't http(s) with a readable host.
+        web.askExternal("ftp://example.net/")
+        web.askExternal("http://ev%69l.example/")
         web.askExternal("https://ev%69l.example/")
         web.askExternal("file:///etc/passwd")
         web.askExternal("")
@@ -1296,5 +1297,179 @@ TestCase {
         waitForPortCheck(5, 7)
         answer(web, "self")
         tryVerify(function () { return b.url.toString() === testCase.loopSite.url }, 3000)
+    }
+
+    // --- LinkOut: the one way to the system browser -----------------------------
+    // Qt.openUrlExternally can't be replaced in a test. Under the offscreen
+    // platform it reaches the platform services, which warn with the exact
+    // URL and start nothing; that warning is the proof of a call. Other
+    // platforms would start a real browser, so these tests skip there.
+
+    function skipUnlessOffscreen() {
+        if (Qt.platform.pluginName !== "offscreen")
+            skip("a real platform would open a real browser")
+    }
+
+    function openedWarning(url) {
+        return new RegExp("QPlatformServices::openUrl\\(\\) for '" + url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "'")
+    }
+
+    function test_linkOutOpensAnHttpsUrlExactly() {
+        skipUnlessOffscreen()
+        var web = make()
+        var url = "https://example.org/a/b?c=d#e"
+        ignoreWarning(openedWarning(url))
+        web.openHttps(url)
+    }
+
+    function test_linkOutRefusesOtherAddresses_data() {
+        return [
+            {tag: "ftp", url: "ftp://example.org/"},
+            {tag: "http, site not acknowledged", url: "http://example.org/"},
+            {tag: "file", url: "file:///etc/passwd"},
+            {tag: "javascript", url: "javascript:alert(1)"},
+            {tag: "mailto", url: "mailto:a@example.org"},
+            {tag: "empty", url: ""},
+            {tag: "no host", url: "https:///x"},
+            {tag: "not a string", url: null},
+            {tag: "too long", url: "https://example.org/" + "a".repeat(4077)}
+        ]
+    }
+
+    function test_linkOutRefusesOtherAddresses(data) {
+        skipUnlessOffscreen()
+        var web = make()
+        failOnWarning(/QPlatformServices::openUrl/)
+        web.openHttps(data.url)
+    }
+
+    function test_linkOutAcceptsTheLongestAllowedAddress() {
+        skipUnlessOffscreen()
+        var web = make()
+        var url = "https://example.org/" + "a".repeat(4076)
+        compare(url.length, 4096)
+        ignoreWarning(openedWarning(url))
+        web.openHttps(url)
+    }
+
+    // The toolbar button on an http page (the Local page here): it asks
+    // first, with the insecure wording, and opens nothing by itself.
+    function test_toolbarAsksBeforeOpeningAnHttpPage() {
+        skipUnlessOffscreen()
+        var web = localView({})
+        verify(web.canOpenExternally)
+        failOnWarning(/QPlatformServices::openUrl/)
+        var url = String(web.activeView.url)
+        verify(url.indexOf("http://") === 0)
+        web.openExternally()
+        compare(web.externalUrl, url)
+        compare(web.externalInsecure, true)
+        web.clearExternal()
+        compare(web.externalInsecure, false)
+        compare(web.externalUrl, "")
+    }
+
+    function test_openExternallyIsOffOutsideHttpAndHttps() {
+        var web = localView({})
+        verify(web.canOpenExternally)
+        web.activeView.url = "about:blank"
+        verify(!web.canOpenExternally)
+    }
+
+    // Once per site: confirming the warning opens the page and remembers the
+    // origin; the next open of that site goes straight through.
+    function test_httpWarningOncePerSite() {
+        skipUnlessOffscreen()
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        web.externalPromptGap = 0
+        var got = []
+        web.httpSiteAcknowledged.connect(function (origin) { got.push(origin) })
+        var url = "http://example.org/a?b=1"
+        // Not acknowledged: asked by the page, nothing opened.
+        web.askExternal(url)
+        compare(web.externalUrl, url)
+        compare(web.externalInsecure, true)
+        compare(web.externalHost, "example.org")
+        compare(got, [])
+        // Cancel acknowledges nothing.
+        web.clearExternal()
+        compare(got, [])
+        compare(web.siteWarned(url), false)
+        web.askExternal(url)
+        ignoreWarning(openedWarning(url))
+        web.acceptExternal()
+        compare(got, ["http://example.org:80"])
+        compare(web.siteWarned("http://example.org/other"), true)
+        // Same host, another port or scheme, is another site.
+        compare(web.siteWarned("http://example.org:8080/"), false)
+        compare(web.siteWarned("http://other.example/"), false)
+        // Acknowledged: the page-asked prompt keeps the plain wording.
+        web.askExternal("http://example.org/x")
+        compare(web.externalInsecure, false)
+        web.clearExternal()
+        // And the open goes straight through.
+        ignoreWarning(openedWarning("http://example.org/again"))
+        web.openHttps("http://example.org/again")
+    }
+
+    function test_httpOpenIsRefusedUntilAcknowledged() {
+        skipUnlessOffscreen()
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        failOnWarning(/QPlatformServices::openUrl/)
+        web.openHttps("http://example.org/a?b=1")
+        web.openHttps("http://example.org:8080/")
+        compare(web.siteWarned("http://example.org/"), false)
+    }
+
+    function test_httpWarnedSitesFromSettingsCount() {
+        skipUnlessOffscreen()
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        web.httpWarnedSites = ["http://saved.example:80"]
+        ignoreWarning(openedWarning("http://saved.example/p"))
+        web.openHttps("http://saved.example/p")
+        web.externalPromptGap = 0
+        web.askExternal("http://saved.example/p")
+        compare(web.externalInsecure, false)
+        // Junk entries count for nothing.
+        web.clearExternal()
+        web.httpWarnedSites = ["saved.example", "https://saved.example:443", "http://saved.example"]
+        compare(web.siteWarned("http://saved.example/"), false)
+        failOnWarning(/QPlatformServices::openUrl/)
+        web.openHttps("http://saved.example/p")
+    }
+
+    function test_httpAddressTooLongIsDropped() {
+        skipUnlessOffscreen()
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        web.askExternal("http://example.org/" + "a".repeat(4078))
+        compare(web.externalUrl, "")
+        var got = []
+        web.httpSiteAcknowledged.connect(function (origin) { got.push(origin) })
+        var longest = "http://example.org/" + "a".repeat(4077)
+        compare(longest.length, 4096)
+        web.askExternal(longest)
+        compare(web.externalInsecure, true)
+        ignoreWarning(openedWarning(longest))
+        web.acceptExternal()
+        compare(got.length, 1)
+    }
+
+    // The prompt's Open: the asked address, exactly, and only once.
+    function test_promptOpenUsesTheAskedAddress() {
+        skipUnlessOffscreen()
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        var url = "https://other.example/path?q=1"
+        web.askExternal(url)
+        compare(web.externalUrl, url)
+        ignoreWarning(openedWarning(url))
+        web.acceptExternal()
+        compare(web.externalUrl, "")
+        failOnWarning(/QPlatformServices::openUrl/)
+        web.acceptExternal()
     }
 }

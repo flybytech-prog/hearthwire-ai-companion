@@ -303,6 +303,61 @@ function isHttpsUrl(value) {
     return parsed !== null && parsed.scheme === "https" && parsed.host !== ""
 }
 
+function isHttpUrl(value) {
+    var parsed = parseUrl(value)
+    return parsed !== null && parsed.scheme === "http" && parsed.host !== ""
+}
+
+// An address the user may send to the system browser: https, or http after
+// the insecure warning (ChatWebView). Every other scheme is refused.
+function isWebUrl(value) {
+    return isHttpsUrl(value) || isHttpUrl(value)
+}
+
+// At most this many acknowledged http sites are kept (chatHttpWarnedSites).
+var MAX_WARNED_SITES = 200
+
+// The origin "http://host:port" (port always given, 80 when absent) of a
+// valid http address; "" for anything else.
+function httpWarnOrigin(value) {
+    if (!isHttpUrl(value))
+        return ""
+    var parsed = parseUrl(value)
+    return "http://" + parsed.host + ":" + (parsed.port !== "" ? parsed.port : "80")
+}
+
+// The stored list read safely: only canonical http origins, no repeats, the
+// newest MAX_WARNED_SITES.
+function cleanWarnedSites(list) {
+    var result = []
+    if (list === undefined || list === null || typeof list.length !== "number")
+        return result
+    for (var index = 0; index < list.length; index++) {
+        var item = list[index]
+        if (typeof item !== "string" || item.length > 300)
+            continue
+        if (httpWarnOrigin(item) !== item || result.indexOf(item) >= 0)
+            continue
+        result.push(item)
+    }
+    return result.slice(-MAX_WARNED_SITES)
+}
+
+// Whether the user already confirmed the insecure warning for url's site.
+function isWarnedSite(list, url) {
+    var origin = httpWarnOrigin(url)
+    return origin !== "" && cleanWarnedSites(list).indexOf(origin) >= 0
+}
+
+// The list with url's site added (unchanged when url isn't http).
+function addWarnedSite(list, url) {
+    var result = cleanWarnedSites(list)
+    var origin = httpWarnOrigin(url)
+    if (origin !== "" && result.indexOf(origin) < 0)
+        result.push(origin)
+    return result.slice(-MAX_WARNED_SITES)
+}
+
 // "host:port" of a parsed http URL, port 80 when absent.
 function httpOrigin(parsed) {
     return normalizeHost(parsed.host) + ":" + (parsed.port !== "" ? parsed.port : "80")

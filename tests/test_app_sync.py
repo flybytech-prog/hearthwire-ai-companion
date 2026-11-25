@@ -4,11 +4,16 @@ Every generated file must equal its source except import lines of the KDE
 modules in IMPORTS, which point at Hearthwire.Compat.* with the alias kept.
 The .js files (the protected ones too) and main.xml must be byte-identical,
 except ui/Host.js (exactly PLASMA_HOST in, exactly APP_HOST out), and no
-generated file may still import an org.kde module.
+generated file may still import an org.kde module. ui/LinkOut.js (task 013)
+is synced unchanged and only as the exact reviewed bytes; check_no_opener.py
+allows that one file, there, and nothing else. app/src starts Qt WebEngine
+only through WebEngineEnv.h and never sets a QTWEBENGINE variable.
 """
 
+import hashlib
 import importlib.util
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -19,6 +24,19 @@ PLASMOID = ROOT / "plasmoid"
 UI = PLASMOID / "contents" / "ui"
 TOOL = ROOT / "app" / "tools" / "sync_plasmoid.py"
 PROTECTED = ("ProviderCatalog.js", "RefreshGate.js", "SnapshotLogic.js")
+
+
+def _load(name, path):
+    # No __pycache__ next to the tool in the repo.
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
 
 
 def _tool():
@@ -204,8 +222,11 @@ def test_js_files_never_import_or_name_kde(text):
     tool.check_js(".pragma library\nvar OPERATIONS = [\"status\", \"import\"]\n// org.kde in a comment\n")
 
 
-def _tmp_plasmoid(tmp_path, host):
-    """A minimal plasmoid folder; host: the bytes of ui/Host.js (None: no Host.js)."""
+def _tmp_plasmoid(tmp_path, host, link_out=True):
+    """A minimal plasmoid folder; host: the bytes of ui/Host.js (None: no Host.js);
+    link_out: the bytes of ui/LinkOut.js (True: the reviewed ones, None: none)."""
+    if link_out is True:
+        link_out = _tool().PLASMA_LINK_OUT
     source = tmp_path / "plasmoid"
     (source / "contents" / "ui").mkdir(parents=True)
     (source / "contents" / "config").mkdir()
@@ -214,6 +235,8 @@ def _tmp_plasmoid(tmp_path, host):
     (source / "contents" / "ui" / "Page.qml").write_text('import QtQuick\nimport "Host.js" as Host\nItem {}\n')
     if host is not None:
         (source / "contents" / "ui" / "Host.js").write_bytes(host)
+    if link_out is not None:
+        (source / "contents" / "ui" / "LinkOut.js").write_bytes(link_out)
     return source
 
 
@@ -347,8 +370,9 @@ def test_qml_tests_differ_only_in_kde_imports_and_ui_paths(tmp_path):
     tool = _tests_tool()
     synced = tmp_path / "synced"
     dest = tmp_path / "qmltests"
-    names = tool.sync(TESTS_QML, dest, synced, exclude={"tst_chat_web_view.qml"})
-    expected = sorted(p.name for p in TESTS_QML.iterdir() if p.suffix in (".qml", ".js") and p.name != "tst_chat_web_view.qml")
+    names = tool.sync(TESTS_QML, dest, synced)
+    expected = sorted(p.name for p in TESTS_QML.iterdir() if p.suffix in (".qml", ".js"))
+    assert "tst_chat_web_view.qml" in names
     assert sorted(names) == expected
     allowed = {"import " + kde: "import " + app for kde, app in tool.SYNC.IMPORTS.items()}
     for name in names:
@@ -401,3 +425,287 @@ def test_qml_tests_dest_inside_the_tests_folder_is_refused(tmp_path):
         tool.sync(TESTS_QML, TESTS_QML / "out", tmp_path)
     assert not (TESTS_QML / "out").exists()
     assert tool.main(["--source", str(tmp_path / "none"), "--dest", str(tmp_path / "o"), "--synced", str(tmp_path)]) == 1
+
+
+# Task 013 (user decision Q1 = B): ui/LinkOut.js, the one chat-link opener,
+# is synced unchanged but only as the reviewed bytes, and check_no_opener.py
+# allows exactly that file in the synced folder.
+NO_OPENER = ROOT / "app" / "tests" / "check_no_opener.py"
+CHECK_SYNCED = ROOT / "app" / "tests" / "check_synced.py"
+APP = ROOT / "app"
+
+
+def _no_opener():
+    return _load("check_no_opener", NO_OPENER)
+
+
+def _check_synced():
+    return _load("check_synced", CHECK_SYNCED)
+
+
+def test_link_out_pins_agree_and_match_the_plasmoid_file():
+    tool = _tool()
+    digest = hashlib.sha256(tool.PLASMA_LINK_OUT).hexdigest()
+    assert digest == _no_opener().LINK_OUT_SHA256
+    assert digest == _check_synced().LINK_OUT_SHA256
+    assert (UI / "LinkOut.js").read_bytes() == tool.PLASMA_LINK_OUT
+    # Its one way out: Qt.openUrlExternally, once, in open().
+    text = tool.PLASMA_LINK_OUT.decode("utf-8")
+    assert text.count("openUrlExternally") == 1
+    assert "function open(url) { Qt.openUrlExternally(url) }\n" in text
+    assert text.startswith(".pragma library\n")
+
+
+def test_link_out_is_synced_unchanged(synced):
+    tool, dest, names = synced
+    assert "LinkOut.js" in names and "ChatWebView.qml" in names
+    assert (dest / "LinkOut.js").read_bytes() == tool.PLASMA_LINK_OUT == (UI / "LinkOut.js").read_bytes()
+
+
+def test_a_good_tmp_plasmoid_syncs_link_out(tmp_path):
+    tool = _tool()
+    names = tool.sync(_tmp_plasmoid(tmp_path, tool.PLASMA_HOST), tmp_path / "out")
+    assert "LinkOut.js" in names
+    assert (tmp_path / "out" / "LinkOut.js").read_bytes() == tool.PLASMA_LINK_OUT
+
+
+def _link_out_variants():
+    reviewed = _tool().PLASMA_LINK_OUT
+    return [
+        None,                                                              # no LinkOut.js
+        b"",
+        reviewed + b"function again(u) { Qt.openUrlExternally(u) }\n",    # a second opener
+        reviewed + b"\n",                                                  # a trailing empty line
+        reviewed[:-1],                                                     # no last newline
+        reviewed.replace(b"\n", b"\r\n"),                                  # CRLF
+        b"\xef\xbb\xbf" + reviewed,                                        # a BOM
+        reviewed.replace(b"Qt.openUrlExternally(url)", b""),               # opens nothing
+        reviewed.replace(b"(url)", b"(\"https://example.org/\")"),         # a fixed address
+        reviewed.replace(b"// Where", b"//  Where"),                       # a comment changed
+    ]
+
+
+@pytest.mark.parametrize("index", range(len(_link_out_variants())))
+def test_any_other_link_out_stops_the_sync(tmp_path, index):
+    tool = _tool()
+    source = _tmp_plasmoid(tmp_path, tool.PLASMA_HOST, _link_out_variants()[index])
+    with pytest.raises(tool.SyncError):
+        tool.sync(source, tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+    assert tool.main(["--source", str(source), "--dest", str(tmp_path / "out2")]) == 1
+    assert not (tmp_path / "out2").exists()
+
+
+def test_a_link_out_symlink_stops_the_sync(tmp_path):
+    tool = _tool()
+    source = _tmp_plasmoid(tmp_path, tool.PLASMA_HOST, None)
+    real = tmp_path / "real.js"
+    real.write_bytes(tool.PLASMA_LINK_OUT)
+    (source / "contents" / "ui" / "LinkOut.js").symlink_to(real)
+    with pytest.raises(tool.SyncError):
+        tool.sync(source, tmp_path / "out")
+
+
+def test_link_out_can_not_be_left_out(tmp_path):
+    tool = _tool()
+    with pytest.raises(tool.SyncError):
+        tool.sync(_tmp_plasmoid(tmp_path, tool.PLASMA_HOST), tmp_path / "out", exclude={"LinkOut.js"})
+    assert not (tmp_path / "out").exists()
+
+
+def _app_folders():
+    return [str(APP / "src"), str(APP / "qml")]
+
+
+def test_check_no_opener_passes_the_app_and_the_synced_tree(synced):
+    tool, dest, names = synced
+    check = _no_opener()
+    assert check.scan(_app_folders(), str(dest)) == []
+    assert check.main(["check"] + _app_folders() + ["--synced", str(dest)]) == 0
+
+
+def test_check_no_opener_needs_the_synced_folder_named(synced):
+    # Mutation proof: the same tree with the folder given plainly (no
+    # exception) is caught, at LinkOut.js only.
+    tool, dest, names = synced
+    found = _no_opener().scan(_app_folders() + [str(dest)])
+    assert any("LinkOut.js:" in line and "openUrl" in line for line in found)
+    # F1: the way to LinkOut (names, openHttps, acceptExternal, externalUrl =)
+    # is caught outside the exception too, in the two files that hold it.
+    gate = [line for line in found if "only the synced ChatWebView.qml" in line]
+    assert gate and all("ChatWebView.qml:" in line or "ChatView.qml:" in line for line in gate)
+    assert any("ChatWebView.qml:" in line for line in gate)
+    assert all("LinkOut.js:" in line or "ChatWebView.qml:" in line or "ChatView.qml:" in line for line in found)
+
+
+def test_check_no_opener_catches_a_caller_of_link_out_in_the_app(tmp_path):
+    # The auditor's repro (L2): an app QML that imports LinkOut.js and calls
+    # openHttps/acceptExternal and assigns externalUrl, outside the exception.
+    check = _no_opener()
+    qml = tmp_path / "qml"
+    qml.mkdir()
+    (qml / "Evil.qml").write_text(
+        'import QtQuick\nimport "qrc:/qt/qml/Hearthwire/Plasmoid/LinkOut.js" as Out\n'
+        'Item { Component.onCompleted: Out.open("http://127.0.0.1:9/x") ; function f(w) { '
+        'w.externalUrl = "https://x.example/"; w.acceptExternal(); w.openHttps("https://y.example/") } }\n',
+        encoding="utf-8")
+    found = check.scan([str(qml)])
+    assert any("Evil.qml:2" in line for line in found) and any("Evil.qml:3" in line for line in found)
+    # Each word on its own is caught too (one finding per line, so one file each).
+    for number, text in enumerate(("w.acceptExternal()", "w.openHttps(u)", "w.externalUrl = u", "Out.open(u) // LinkOut")):
+        (qml / ("One%d.qml" % number)).write_text("Item { function f(w) { %s } }\n" % text, encoding="utf-8")
+        assert check.scan([str(qml)]) and any("One%d.qml:1" % number in line for line in check.scan([str(qml)])), text
+    # Not in a folder named --synced either: only the exact synced names are exempt.
+    assert check.scan([], str(qml))
+    # The exact names, directly in --synced, are fine for the gate words.
+    synced = tmp_path / "synced"
+    synced.mkdir()
+    (synced / "ChatWebView.qml").write_text('import "LinkOut.js" as LinkOut\nItem { property string externalUrl: "" }\n',
+                                            encoding="utf-8")
+    assert check.scan([], str(synced)) == []
+
+
+def _copy(dest, tmp_path):
+    copy = tmp_path / "synced"
+    shutil.copytree(dest, copy)
+    return copy
+
+
+@pytest.mark.parametrize("change", [
+    ("ChatWebView.qml", lambda data: data + b"// Qt.openUrlExternally(url)\n"),        # another file opens
+    ("ChatView.qml", lambda data: data.replace(b"import QtQuick\n", b"import QtQuick\n// openUrl\n", 1)),
+    ("LinkOut.js", lambda data: data + b"// reviewed?\n"),                            # LinkOut.js changed
+    ("LinkOut.js", lambda data: data.replace(b"Qt.openUrlExternally(url)", b"")),     # ... to open nothing
+    ("LinkOut.js", lambda data: data.replace(b"Qt.openUrlExternally", b"Qt[\"openUrlExternally\"]")),
+])
+def test_check_no_opener_catches_every_other_opener(synced, tmp_path, change):
+    tool, dest, names = synced
+    copy = _copy(dest, tmp_path)
+    name, edit = change
+    (copy / name).write_bytes(edit((copy / name).read_bytes()))
+    found = _no_opener().scan(_app_folders(), str(copy))
+    assert found and all(name + ":" in line for line in found), found
+    assert _no_opener().main(["check"] + _app_folders() + ["--synced", str(copy)]) == 1
+
+
+def test_check_no_opener_allows_link_out_nowhere_else(synced, tmp_path):
+    tool, dest, names = synced
+    check = _no_opener()
+    copy = _copy(dest, tmp_path)
+    # The reviewed bytes under another name, or one folder down.
+    (copy / "Opener.js").write_bytes(tool.PLASMA_LINK_OUT)
+    (copy / "sub").mkdir()
+    (copy / "sub" / "LinkOut.js").write_bytes(tool.PLASMA_LINK_OUT)
+    found = check.scan([], str(copy))
+    assert len(found) == 2 and any("Opener.js:" in line for line in found) and any("sub/LinkOut.js:" in line for line in found)
+    # In the app's own folders it is not allowed either.
+    app_copy = tmp_path / "qml"
+    app_copy.mkdir()
+    (app_copy / "LinkOut.js").write_bytes(tool.PLASMA_LINK_OUT)
+    assert check.scan([str(app_copy)], str(dest)) != []
+
+
+def test_check_no_opener_self_test_passes():
+    assert _no_opener().main(["check", "--self-test"]) == 0
+
+
+def test_check_synced_wants_the_reviewed_link_out(synced, tmp_path):
+    tool, dest, names = synced
+    check = _check_synced()
+    assert check.link_out_problems(dest) == []
+    copy = _copy(dest, tmp_path)
+    (copy / "LinkOut.js").write_bytes(tool.PLASMA_LINK_OUT + b"\n")
+    assert check.link_out_problems(copy) == ["LinkOut.js: not the reviewed bytes"]
+    (copy / "LinkOut.js").unlink()
+    assert check.link_out_problems(copy) == ["LinkOut.js: missing"]
+
+
+# Task 013: Qt WebEngine starts only through WebEngineEnv.h's
+# hwStartWebEngine() (environment dropped, then initialize), after the argv
+# refusal and before QGuiApplication; nothing in app/ turns the sandbox off.
+def _code_lines(path):
+    """The lines of a C++/CMake file without whole-line comments."""
+    return [line for line in path.read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith(("//", "#"))]
+
+
+def test_main_starts_webengine_after_the_refusals_and_before_the_app():
+    text = (APP / "src" / "main.cpp").read_text(encoding="utf-8")
+    code = "\n".join(_code_lines(APP / "src" / "main.cpp"))
+    assert "QtWebEngineQuick::initialize" not in code
+    assert code.count("hwStartWebEngine()") == 1
+    refusal = code.index("hwRefusedChromiumArgument(argc, argv)")
+    plugin_refusal = code.index("hwRefusedArgument(argc, argv)")
+    start = code.index("hwStartWebEngine();")
+    application = code.index("QGuiApplication app(argc, argv);")
+    assert plugin_refusal < refusal < start < application
+    assert "#include \"WebEngineEnv.h\"" in text
+
+
+def test_webengine_env_drops_before_initialize():
+    header = (APP / "src" / "WebEngineEnv.h").read_text(encoding="utf-8")
+    body = header[header.index("inline void hwStartWebEngine("):]
+    assert body.index("hwDropWebEngineEnvironment(unset)") < body.index("initialize();")
+    # Fail closed: a drop that left names (-1) ends the app before initialize.
+    assert body.index("< 0") < body.index("std::_Exit(2)") < body.index("initialize();")
+    assert 'constexpr std::string_view prefix("QTWEBENGINE");' in header
+
+
+def test_webengine_env_lists():
+    header = (APP / "src" / "WebEngineEnv.h").read_text(encoding="utf-8")
+    # Dropped by exact name besides QTWEBENGINE* (F1: M1 and L3).
+    for name in ("SSLKEYLOGFILE", "CHROME_DEVEL_SANDBOX", "CHROME_SANDBOX_DEBUGGING", "CHROME_LOG_FILE",
+                 "GOOGLE_API_KEY", "GOOGLE_DEFAULT_CLIENT_ID", "GOOGLE_DEFAULT_CLIENT_SECRET"):
+        assert '"%s",' % name in header, name
+    # Proxy variables are the user's real setting: never dropped.
+    assert '"http_proxy"' not in header.lower() and '"https_proxy"' not in header.lower()
+    # The one QTWEBENGINE name that passes (user decision I3), by exact name.
+    assert 'hwWebEngineKept = "QTWEBENGINE_ENABLE_LINUX_ACCESSIBILITY";' in header
+    assert header.count("QTWEBENGINE_ENABLE_LINUX_ACCESSIBILITY\"") == 1
+    for switch in ("ssl-key-log-file", "log-net-log", "net-log-capture-mode", "enable-features", "disable-features",
+                   "unsafely-treat-insecure-origin-as-secure", "allow-file-access-from-files",
+                   "allow-insecure-localhost"):
+        assert '"%s",' % switch in header, switch
+
+
+def test_only_webengine_env_initializes_webengine():
+    for path in sorted((APP / "src").rglob("*")):
+        if path.is_file() and path.name != "WebEngineEnv.h":
+            assert "QtWebEngineQuick::initialize" not in "\n".join(_code_lines(path)), path
+    qmltests = "\n".join(_code_lines(APP / "tests" / "qmltests.cpp"))
+    assert "QtWebEngineQuick::initialize" not in qmltests
+    assert qmltests.index("hwStartWebEngine();") < qmltests.index("quick_test_main_with_setup(")
+
+
+SETS_WEBENGINE = re.compile(r"\b(?:qputenv|setenv|putenv|insert)\s*\(\s*(?:QByteArrayLiteral\(|QStringLiteral\(|u)?\"QTWEBENGINE")
+CHROMIUM_SWITCH_LITERAL = re.compile(r"[\"']--?(?:no-sandbox|single-process|disable-[a-z-]*sandbox|remote-debugging|disable-web-security"
+                                     r"|in-process-gpu|no-zygote|webEngineArgs)")
+
+
+def test_app_never_sets_a_webengine_variable_or_switch():
+    for root in (APP / "src", APP / "qml"):
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+            assert not SETS_WEBENGINE.search(text), path
+            assert not CHROMIUM_SWITCH_LITERAL.search(text), path
+            assert "appendChromium" not in text and "QTWEBENGINE_CHROMIUM_FLAGS=" not in text, path
+            for line in _code_lines(path):
+                assert "QTWEBENGINE_DISABLE_SANDBOX" not in line, (path, line)
+    # The build and the tests' environment never switch the sandbox off.
+    for path in (APP / "CMakeLists.txt", APP / "tests" / "CMakeLists.txt"):
+        assert "QTWEBENGINE_DISABLE_SANDBOX" not in path.read_text(encoding="utf-8"), path
+
+
+@pytest.mark.parametrize("line", [
+    'qputenv("QTWEBENGINE_DISABLE_SANDBOX", "1");',
+    'setenv("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox", 1);',
+    'environment.insert(QStringLiteral("QTWEBENGINE_REMOTE_DEBUGGING"), x);',
+    'args << QStringLiteral("--no-sandbox");',
+    'char flag[] = "--single-process";',
+    'argv.push_back("--webEngineArgs");',
+])
+def test_the_webengine_patterns_catch_the_usual_forms(line):
+    # Mutation proof for the scan above.
+    assert SETS_WEBENGINE.search(line) or CHROMIUM_SWITCH_LITERAL.search(line)

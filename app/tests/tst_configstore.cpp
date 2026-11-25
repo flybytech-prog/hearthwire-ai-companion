@@ -7,13 +7,16 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQmlExpression>
+#include <QQmlPropertyMap>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <memory>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -617,6 +620,181 @@ private Q_SLOTS:
         engine.rootContext()->setContextProperty("store", &store);
         QQmlExpression write(engine.rootContext(), nullptr, "store.refreshIntervalDefault = 5; store.refreshIntervalDefault");
         QCOMPARE(write.evaluate().toInt(), 300);
+    }
+
+    // A schema with a StringList key (the widget's chatHttpWarnedSites), apart
+    // from main.xml so this holds whatever main.xml carries.
+    void loadListSchema(ConfigStore &store)
+    {
+        const QString path = m_dir.filePath(QStringLiteral("list-main.xml"));
+        QFile xml(path);
+        QVERIFY(xml.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        xml.write("<kcfg><group name=\"General\">"
+                  "<entry name=\"refreshInterval\" type=\"Int\"><default>300</default></entry>"
+                  "<entry name=\"chatHttpWarnedSites\" type=\"StringList\"><default></default></entry>"
+                  "<entry name=\"listWithDefault\" type=\"StringList\"><default>a,b</default></entry>"
+                  "</group></kcfg>");
+        xml.close();
+        QVERIFY(store.loadSchema(path));
+    }
+
+    void stringListKeyRoundTrips()
+    {
+        const QStringList sites{QStringLiteral("http://example.org:80"), QStringLiteral("http://[::1]:8080")};
+        {
+            ConfigStore store;
+            loadListSchema(store);
+            QCOMPARE(store.value("chatHttpWarnedSites"), QVariant(QStringList()));
+            QCOMPARE(store.value("listWithDefault"), QVariant(QStringList{"a", "b"}));
+            QVERIFY(store.open(m_file));
+            // From QML: an array of strings, then the Apply.
+            QQmlEngine engine;
+            engine.rootContext()->setContextProperty("store", &store);
+            QQmlExpression write(engine.rootContext(), nullptr,
+                                 "store.chatHttpWarnedSites = [\"http://example.org:80\", \"http://[::1]:8080\"]; "
+                                 "store.writeConfig(); store.chatHttpWarnedSites.length");
+            QCOMPARE(write.evaluate().toInt(), 2);
+            QCOMPARE(store.value("chatHttpWarnedSites").toStringList(), sites);
+        }
+        const QJsonObject saved = QJsonDocument::fromJson(readAll(m_file)).object().value("settings").toObject();
+        QCOMPARE(saved.value("chatHttpWarnedSites").toArray().size(), 2);
+        QCOMPARE(modeOf(m_file), 0600);
+        ConfigStore again;
+        loadListSchema(again);
+        QVERIFY(again.open(m_file));
+        QCOMPARE(again.dropped(), 0);
+        QCOMPARE(again.value("chatHttpWarnedSites").toStringList(), sites);
+    }
+
+    void stringListKeyIsCheckedOnReadAndWrite_data()
+    {
+        QTest::addColumn<QJsonValue>("stored");
+        QJsonArray tooMany;
+        for (int i = 0; i <= ConfigStore::MaxListEntries; ++i)
+            tooMany.append(QStringLiteral("http://h%1:80").arg(i));
+        QTest::newRow("text") << QJsonValue(QStringLiteral("http://a:80"));
+        QTest::newRow("number in the list") << QJsonValue(QJsonArray{QStringLiteral("http://a:80"), 5});
+        QTest::newRow("object in the list") << QJsonValue(QJsonArray{QJsonObject{}});
+        QTest::newRow("too many") << QJsonValue(tooMany);
+        QTest::newRow("a long entry")
+            << QJsonValue(QJsonArray{QString(ConfigStore::MaxListEntryChars + 1, QLatin1Char('x'))});
+    }
+
+    void stringListKeyIsCheckedOnReadAndWrite()
+    {
+        QFETCH(QJsonValue, stored);
+        writeFile(m_file, document(QJsonObject{{"chatHttpWarnedSites", stored}}));
+        ConfigStore store;
+        loadListSchema(store);
+        QVERIFY(store.open(m_file));
+        QCOMPARE(store.dropped(), 1);
+        QCOMPARE(store.value("chatHttpWarnedSites"), QVariant(QStringList()));
+        // The same shapes from QML are refused: the value stays.
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("store", &store);
+        QQmlExpression bad(engine.rootContext(), nullptr,
+                           "store.chatHttpWarnedSites = [\"http://a:80\", 5]; "
+                           "store.chatHttpWarnedSites = \"http://a:80\"; "
+                           "store.chatHttpWarnedSites.length");
+        QCOMPARE(bad.evaluate().toInt(), 0);
+    }
+
+    // Task 013 F2: the http acknowledgement persists. These are main.qml's two
+    // lines (chatHttpWarnedSites, chatHttpSiteAcknowledged) on the real
+    // main.xml schema and the real synced ChatSites.js; the fixture check in
+    // SpikeChecks.qml runs the real main.qml, FullRepresentation and ChatView.
+    QString warnedSitesQml() const
+    {
+        const QString ui = QFileInfo(QStringLiteral(HW_MAIN_XML)).absolutePath();
+        return QStringLiteral(
+                   "import QtQml\n"
+                   "import \"file://%1/ChatSites.js\" as ChatSites\n"
+                   "QtObject {\n"
+                   "    readonly property var warned: ChatSites.cleanWarnedSites(Plasmoid.configuration.chatHttpWarnedSites)\n"
+                   "    function acknowledged(origin) {\n"
+                   "        if (typeof origin !== \"string\" || ChatSites.httpWarnOrigin(origin) !== origin)\n"
+                   "            return\n"
+                   "        Plasmoid.configuration.chatHttpWarnedSites = ChatSites.addWarnedSite(warned, origin)\n"
+                   "    }\n"
+                   "}\n")
+            .arg(ui);
+    }
+
+    // Returns the view's warned list; `ack` runs first, when not empty.
+    QStringList warnedSites(ConfigStore &store, const QString &ack)
+    {
+        QQmlEngine engine;
+        auto *plasmoid = QQmlPropertyMap::create(&engine);
+        plasmoid->insert(QStringLiteral("configuration"), QVariant::fromValue<QObject *>(&store));
+        engine.rootContext()->setContextProperty("Plasmoid", plasmoid);
+        QQmlComponent component(&engine);
+        component.setData(warnedSitesQml().toUtf8(), QUrl(QStringLiteral("file:///hw/warned.qml")));
+        std::unique_ptr<QObject> view(component.create());
+        if (!view) {
+            qWarning().noquote() << component.errorString();
+            return {QStringLiteral("<no view>")};
+        }
+        if (!ack.isEmpty())
+            QMetaObject::invokeMethod(view.get(), "acknowledged", Q_ARG(QVariant, ack));
+        QTest::qWait(50); // the deferred save
+        QVariantList list = view->property("warned").toList();
+        QStringList out;
+        for (const QVariant &v : list)
+            out << v.toString();
+        return out;
+    }
+
+    void httpAcknowledgementPersistsAndIsReadBack()
+    {
+        const QString origin = QStringLiteral("http://example.org:8080");
+        {
+            ConfigStore store;
+            load(store);
+            QVERIFY(store.open(m_file));
+            QCOMPARE(warnedSites(store, QString()), QStringList());
+            // Not a canonical origin: refused, nothing stored.
+            QCOMPARE(warnedSites(store, QStringLiteral("http://example.org:8080/path")), QStringList());
+            QCOMPARE(warnedSites(store, QStringLiteral("https://example.org:443")), QStringList());
+            QCOMPARE(warnedSites(store, origin), QStringList{origin});
+        }
+        QCOMPARE(modeOf(m_file), 0600);
+        const QJsonObject saved = QJsonDocument::fromJson(readAll(m_file)).object().value("settings").toObject();
+        QCOMPARE(saved.value("chatHttpWarnedSites").toArray(), QJsonArray{origin});
+        // The next start reads it back.
+        ConfigStore again;
+        load(again);
+        QVERIFY(again.open(m_file));
+        QCOMPARE(warnedSites(again, QString()), QStringList{origin});
+        // A second site is added, the first kept.
+        QCOMPARE(warnedSites(again, QStringLiteral("http://[::1]:80")),
+                 (QStringList{origin, QStringLiteral("http://[::1]:80")}));
+    }
+
+    void aNonStringInTheStoredAcknowledgementsDropsTheList()
+    {
+        const QString good = QStringLiteral("http://example.org:8080");
+        writeFile(m_file, document(QJsonObject{{"chatHttpWarnedSites",
+            QJsonArray{good, QStringLiteral("javascript:alert(1)"), QStringLiteral("http://example.org:8080/x"),
+                       QStringLiteral("https://a:443"), good,
+                       QString(400, QLatin1Char('a')), 7}}}));
+        ConfigStore store;
+        load(store);
+        QVERIFY(store.open(m_file));
+        QCOMPARE(store.dropped(), 1); // a non-string entry: ConfigStore drops the whole list
+        QCOMPARE(warnedSites(store, QString()), QStringList());
+    }
+
+    void junkStringsInTheStoredAcknowledgementsAreDroppedByTheWidget()
+    {
+        const QString good = QStringLiteral("http://example.org:8080");
+        writeFile(m_file, document(QJsonObject{{"chatHttpWarnedSites",
+            QJsonArray{good, QStringLiteral("javascript:alert(1)"), QStringLiteral("http://example.org:8080/x"),
+                       QStringLiteral("https://a:443"), good, QString(400, QLatin1Char('a'))}}}));
+        ConfigStore store;
+        load(store);
+        QVERIFY(store.open(m_file));
+        QCOMPARE(store.dropped(), 0); // strings: ConfigStore keeps them, the widget filters
+        QCOMPARE(warnedSites(store, QString()), QStringList{good});
     }
 
     // The helper itself (core/appconfig.py, stdlib only) reads what the app

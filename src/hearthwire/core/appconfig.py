@@ -35,7 +35,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable, Mapping
 
-from .appletconfig import CONFIG_ENTRIES, UNREADABLE, read_rc
+from .appletconfig import CONFIG_ENTRIES, MAX_LIST_ENTRIES, MAX_LIST_ENTRY_CHARS, UNREADABLE, read_rc
 from .frontend import APP_NAME
 from .webdata import HelperError, _descriptors, open_base, open_child_dir
 
@@ -70,6 +70,10 @@ def typed_value(kind: str, value: object) -> object:
         return value if type(value) is int and INT_MIN <= value <= INT_MAX else UNREADABLE
     if kind == "String":
         return value if type(value) is str else UNREADABLE
+    if kind == "StringList":
+        ok = type(value) is list and len(value) <= MAX_LIST_ENTRIES and all(
+            type(item) is str and len(item) <= MAX_LIST_ENTRY_CHARS for item in value)
+        return list(value) if ok else UNREADABLE  # type: ignore[call-overload]
     return UNREADABLE
 
 
@@ -96,7 +100,8 @@ def applied_from(settings: Mapping[str, object], keys: Iterable[str]) -> dict[st
     result: dict[str, object] = {}
     for key in keys:
         kind, default = CONFIG_ENTRIES[key]
-        result[key] = typed_value(kind, settings[key]) if key in settings else default
+        result[key] = typed_value(kind, settings[key]) if key in settings else (
+            list(default) if isinstance(default, list) else default)
     return result
 
 

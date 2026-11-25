@@ -1,7 +1,8 @@
 # hearthwire-hyprland: the plasmoid's QML in a plain Qt Quick (Material)
 # app, through the private Hearthwire.Compat.* stand-ins (task 008 plan-v1
 # §2.1-2.2). Task 012: single instance and notifications on the session bus,
-# a .desktop file and install rules; no WebEngine yet (013).
+# a .desktop file and install rules. Task 013: Qt WebEngine for the Chat tab
+# (ChatWebView.qml), its sandbox always on (src/WebEngineEnv.h).
 #
 # Build out of tree only, e.g.
 #   cmake -S app -B "$TMPDIR/hw-app" -G Ninja && cmake --build "$TMPDIR/hw-app"
@@ -37,7 +38,7 @@ if(NOT IS_ABSOLUTE "${HW_HELPER_PYTHON}")
     message(FATAL_ERROR "HW_HELPER_PYTHON must be an absolute path")
 endif()
 
-set(hw_qt_components Gui Qml Quick QuickControls2 DBus)
+set(hw_qt_components Gui Qml Quick QuickControls2 DBus WebEngineQuick)
 if(HW_TESTS)
     list(APPEND hw_qt_components Test QuickTest)
 endif()
@@ -59,10 +60,10 @@ set(HW_PLASMOID ${CMAKE_CURRENT_SOURCE_DIR}/../plasmoid)
 set(HW_SYNCED ${CMAKE_BINARY_DIR}/synced)
 
 # --- The plasmoid's files, import lines rewritten (tools/sync_plasmoid.py).
-# ChatWebView.qml needs Qt WebEngine, which the spike leaves out.
+# All of them, ChatWebView.qml (Qt WebEngine) included.
 execute_process(
     COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tools/sync_plasmoid.py
-            --source ${HW_PLASMOID} --dest ${HW_SYNCED} --exclude ChatWebView.qml --list
+            --source ${HW_PLASMOID} --dest ${HW_SYNCED} --list
     OUTPUT_VARIABLE hw_synced_names
     RESULT_VARIABLE hw_sync_result)
 if(NOT hw_sync_result EQUAL 0)
@@ -194,7 +195,8 @@ qt_add_executable(hearthwire-hyprland
     src/IconProvider.h
     src/ImportPaths.h
     src/ImportTrust.h src/ImportTrust.cpp
-    src/UrlGuard.h)
+    src/UrlGuard.h
+    src/WebEngineEnv.h)
 
 file(GLOB hw_app_qml CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/qml/Hearthwire/App/*.qml)
 if(NOT HW_FIXTURES)
@@ -222,7 +224,7 @@ if(HW_FIXTURES)
 endif()
 
 target_link_libraries(hearthwire-hyprland PRIVATE
-    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::DBus
+    Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::DBus Qt6::WebEngineQuick
     hwplasmoidplugin hwstyleplugin
     hwcompat_Kirigamiplugin hwcompat_PlasmaComponentsplugin hwcompat_PlasmaExtrasplugin
     hwcompat_PlasmaCoreplugin hwcompat_Plasmoidplugin hwcompat_Plasma5Supportplugin

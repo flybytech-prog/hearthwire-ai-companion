@@ -13,7 +13,7 @@ Item {
 
     // Only makes the helper's source name unique. runOwnerCheck is a test
     // seam: overridden by tests only, never in the plasmoid.
-    property int appletId: 0
+    property double appletId: 0
     property var runOwnerCheck: function (command) { ownerSource.connectSource(command) }
     property int timeout: 15000
 

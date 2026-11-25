@@ -29,7 +29,7 @@ ColumnLayout {
     // True while the Chat tab is shown in the open popup.
     property bool current: false
     // Only makes the Local owner check's helper source name unique.
-    property int appletId: 0
+    property double appletId: 0
 
     // Saved sign-ins, all runtime state owned by main.qml.
     property string storageMode: "memory"
@@ -40,7 +40,7 @@ ColumnLayout {
     // What the web view builds each site's folder and name from, and the
     // sites whose folder is prepared (main.qml).
     property string runtimeDir: ""
-    property int storageApplet: -1
+    property double storageApplet: -1
     property int storageGeneration: -1
     property var preparedSites: []
     // Sites whose saved folder a Clear <site> data still has to delete
@@ -71,6 +71,10 @@ ColumnLayout {
     property url webSource: Qt.resolvedUrl("ChatWebView.qml")
     // Per-site zoom {siteId: factor}, owned by main.qml.
     property var zoomMap: ({})
+    // Origins whose insecure (http) warning was confirmed before, and the
+    // signal that stores one more (main.qml's chatHttpWarnedSites).
+    property var httpWarnedSites: []
+    signal httpSiteAcknowledged(string origin)
     // Split view (runtime only): a second pane shows siteIdB.
     property bool splitActive: false
     property string siteIdB: ""
@@ -438,6 +442,8 @@ ColumnLayout {
             return i18n("The encrypted folder is damaged and can't be opened.")
         case "legacy-data":
             return i18n("Saved sign-ins from the previous version haven't been moved yet. Run the installer again with --restart-plasma.")
+        case "bad-frontend":
+            return i18n("The helper refused this request. Install hearthwire-helper and hearthwire-hyprland of the same version.")
         case "delete-failed":
             return i18n("Couldn't delete the encrypted folder because it is still in use. Close Chat in other Hearthwire widgets, then delete it in Settings → General → Encrypted folder → Show folder actions.")
         case "":
@@ -784,13 +790,35 @@ ColumnLayout {
         }
     }
 
-    // A page asked to open an address in the system browser. Nothing opens
-    // until Open is clicked; the host is ASCII and plain text.
+    // A page (or the toolbar, for an http page) asked to open an address in
+    // the system browser. Nothing opens until Open is clicked, and Open
+    // stays off for a moment each time the prompt appears or changes, so a
+    // click already on its way can't confirm it. The host is ASCII and plain
+    // text.
     Rectangle {
         id: externalPrompt
         objectName: "externalPrompt"
         Layout.fillWidth: true
         readonly property string host: chatView.web ? chatView.web.externalHost : ""
+        readonly property string url: chatView.web ? chatView.web.externalUrl : ""
+        readonly property bool insecure: !!chatView.web && chatView.web.externalInsecure === true
+        // How long Open stays off (ms); overridable by tests only.
+        property int armDelay: 700
+        property bool armed: false
+        function rearm() {
+            externalPrompt.armed = false
+            if (externalPrompt.visible)
+                armTimer.restart()
+            else
+                armTimer.stop()
+        }
+        onVisibleChanged: externalPrompt.rearm()
+        onUrlChanged: externalPrompt.rearm()
+        Timer {
+            id: armTimer
+            interval: externalPrompt.armDelay
+            onTriggered: externalPrompt.armed = true
+        }
         visible: !!chatView.web && chatView.web.externalUrl !== "" && host !== ""
         implicitHeight: externalRow.implicitHeight + Kirigami.Units.smallSpacing * 2
         color: Kirigami.Theme.neutralBackgroundColor
@@ -819,12 +847,15 @@ ColumnLayout {
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
-                text: i18n("Open %1 in your browser?", externalPrompt.host)
+                text: externalPrompt.insecure
+                    ? i18n("This page uses http, which is not secure. Anyone on the network can read or change it. Open %1 in your browser anyway?", externalPrompt.host)
+                    : i18n("Open %1 in your browser?", externalPrompt.host)
             }
             PlasmaComponents.ToolButton {
                 objectName: "externalOpen"
                 icon.name: "internet-web-browser"
                 text: i18n("Open")
+                enabled: externalPrompt.armed
                 onClicked: chatView.web.acceptExternal()
             }
             PlasmaComponents.ToolButton {
@@ -931,6 +962,8 @@ ColumnLayout {
                 webLoader.item.customUrls = Qt.binding(function () { return chatView.customUrls })
                 webLoader.item.userSites = Qt.binding(function () { return chatView.userSites })
                 webLoader.item.zoomMap = Qt.binding(function () { return chatView.zoomMap })
+                webLoader.item.httpWarnedSites = Qt.binding(function () { return chatView.httpWarnedSites })
+                webLoader.item.httpSiteAcknowledged.connect(chatView.httpSiteAcknowledged)
                 webLoader.item.siteIds = Qt.binding(function () { return chatView.siteIds })
                 webLoader.item.siteId = Qt.binding(function () { return chatView.siteId })
                 webLoader.item.siteIdB = Qt.binding(function () { return chatView.siteIdB })

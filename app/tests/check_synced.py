@@ -7,10 +7,13 @@ Plasma's own settings file name in a message; every string import is a
 bare <Name>.js of the same folder or the synced folder (or one of its .js
 files); a .js file has no .import; the synced Host.js is exactly APP_HOST
 (the app's text, written by sync_plasmoid.py; kept here on its own so the
-two can't drift together). Stdlib only; reads, never writes.
+two can't drift together); the synced LinkOut.js is exactly the reviewed
+bytes (LINK_OUT_SHA256, task 013; pinned here on its own as well). Stdlib
+only; reads, never writes.
 Usage: check_synced.py <synced folder> [<qml tests folder>]
 """
 
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -25,6 +28,18 @@ APP_HOST = (
     b"// file with \"var isApp = true\" instead; nothing else may change here.\n"
     b"var isApp = true\n"
 )
+
+# The synced LinkOut.js (the one chat-link opener, synced unchanged).
+LINK_OUT_SHA256 = "6d788c93ae5e207d7a8bcc466ff7b57fd6a8290f602ba011d4a916374d2f8d11"
+
+
+def link_out_problems(synced):
+    link_out = synced / "LinkOut.js"
+    if link_out.is_symlink() or not link_out.is_file():
+        return ["LinkOut.js: missing"]
+    if hashlib.sha256(link_out.read_bytes()).hexdigest() != LINK_OUT_SHA256:
+        return ["LinkOut.js: not the reviewed bytes"]
+    return []
 
 
 def host_problems(synced):
@@ -65,7 +80,7 @@ def main(argv):
         print(__doc__.splitlines()[-1], file=sys.stderr)
         return 2
     synced = Path(argv[1]).resolve()
-    found = host_problems(synced)
+    found = host_problems(synced) + link_out_problems(synced)
     for folder in argv[1:]:
         found += problems(Path(folder).resolve(), synced)
     for line in found:

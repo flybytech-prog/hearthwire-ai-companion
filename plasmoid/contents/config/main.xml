@@ -86,6 +86,9 @@
         <entry name="chatSiteZoom" type="String">
             <default>{}</default>
         </entry>
+        <entry name="chatHttpWarnedSites" type="StringList">
+            <default></default>
+        </entry>
         <entry name="alertLowEnabled" type="Bool">
             <default>false</default>
         </entry>

@@ -29,7 +29,7 @@ ColumnLayout {
     // appletId only makes the helper's source name unique. createRequest and
     // runOwnerCheck are test seams: overridden by tests only, never in the
     // plasmoid.
-    property int appletId: 0
+    property double appletId: 0
     property var createRequest: function () { return new XMLHttpRequest() }
     property var runOwnerCheck: function (command) { ownerSource.connectSource(command) }
 
