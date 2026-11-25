@@ -2139,13 +2139,6 @@ PlasmoidItem {
         }
     }
 
-    Timer {
-        id: firstRunSettingsTimer
-        interval: 1200
-        repeat: false
-        onTriggered: Plasmoid.internalAction("configure").trigger()
-    }
-
     // Settings schema 2 -> 3, once: the reading boxes now filter the Usage
     // tab. A choice saved for the hover popup moves to tooltipMetrics (unless
     // it has its own), and the Usage tab shows every reading again.
@@ -2170,7 +2163,6 @@ PlasmoidItem {
             Plasmoid.configuration.configSchemaVersion = 3
         if (!Plasmoid.configuration.initialSetupComplete) {
             Plasmoid.configuration.initialSetupComplete = true
-            firstRunSettingsTimer.start()
         }
         root.syncChatSite()
         root.popupTab = SettingsLogic.normalizeDefaultTab(Plasmoid.configuration.popupDefaultTab)

@@ -654,7 +654,8 @@ tab icons, and optionally
 reloads Plasma.
 
 Then right-click the panel, choose **Add Widgets…**, search for **Hearthwire**,
-and add it. The first launch opens Settings once. A widget carried over from
+and add it. Settings does not open by itself; open it from the widget's
+right-click menu when you want it. A widget carried over from
 the previous name stays on the panel and isn't added again; see the upgrade
 section below.
 

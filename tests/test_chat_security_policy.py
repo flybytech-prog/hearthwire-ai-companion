@@ -12756,8 +12756,8 @@ def _restore_problems(sources):
         held = base == MAIN_QML.name and reads == 1 and _squashed(_function_body(code, "autoBackup") or "") == AUTO_BACKUP_BODY
         if (reads and not held) or _hits(r"\bstartRestore\b|\brequestImport\b|\brestorePending\b", code):
             problems.append(f"{name}: only configGeneral.qml accepts a Restore request")
-    if len(_hits(r'\binternalAction\s*\(\s*"configure"\s*\)', main)) != 2:
-        problems.append("main.qml opens Settings only from restoreSettings and the first-run timer")
+    if len(_hits(r'\binternalAction\s*\(\s*"configure"\s*\)', main)) != 1:
+        problems.append("main.qml opens Settings only from restoreSettings (task 021: never by itself on first add)")
     problems += _pin_problems(main, ("onTriggered: root.restoreSettings()",), "main.qml")
     if len(_hits(r"\brestoreSettings\b", main)) != 2:
         problems.append("main.qml restoreSettings runs only from the menu's Restore settings… action")
