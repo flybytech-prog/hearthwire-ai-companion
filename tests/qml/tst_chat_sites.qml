@@ -40,6 +40,239 @@ TestCase {
 
     // Task 005 golden table: every built-in answer recorded before added
     // sites existed must stay the same, with or without request.userSites.
+    // Task 013 F-A (user decision): a clicked http link off the site and a
+    // clicked http window ask for the browser instead of being blocked. The
+    // recorded table stays byte-identical; these are its changed http rows,
+    // and only "block" -> "external" in the clicked main-frame answer (1) and
+    // the two clicked windows (4, 5). P1-http-2: Local's http windows reach
+    // this computer only at its own origin, so its other loopback rows are
+    // the recorded ones again (16 rows, was 22).
+    readonly property var http013: ({
+        "claude none http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "chatgpt none http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "grok none http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "gemini none http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "copilot none http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "mscopilot none http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "local none http://example.com/": "block external block block external external block block no-page off:example.com 0",
+        "local none http://localhost:3000/": "allow allow allow allow external external block block page on: 3000",
+        "claude set http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "chatgpt set http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "grok set http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "gemini set http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "copilot set http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "mscopilot set http://example.com/": "block external allow allow external external block block no-page off:example.com 0",
+        "local set http://example.com/": "block external block block external external block block no-page off:example.com 0",
+        "local set http://127.0.0.1:8080/x": "allow allow allow allow external external block block page on: 8080"
+    })
+
+    // Task 013 P1-http-2 (user decision on the audit, L-C): no clicked link
+    // or window of a built-in site but Local reaches a private, link-local
+    // or 0/8 IPv4 literal. The only other changed rows: https literals of
+    // the six built-ins, "external" or "overlay" -> "block" in the clicked
+    // main-frame answer (1) and the windows (4, 5, 7); nothing else moves.
+    readonly property var private013: ({
+        "claude none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "claude none https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "claude none https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "claude none https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "claude none https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "claude none https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "claude none https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0",
+        "chatgpt none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "chatgpt none https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "chatgpt none https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "chatgpt none https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "chatgpt none https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "chatgpt none https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "chatgpt none https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0",
+        "grok none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "grok none https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "grok none https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "grok none https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "grok none https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "grok none https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "grok none https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0",
+        "gemini none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "gemini none https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "gemini none https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "gemini none https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "gemini none https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "gemini none https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "gemini none https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0",
+        "copilot none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "copilot none https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "copilot none https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "copilot none https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "copilot none https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "copilot none https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "copilot none https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0",
+        "mscopilot none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "mscopilot none https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "mscopilot none https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "mscopilot none https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "mscopilot none https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "mscopilot none https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "mscopilot none https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0",
+        "claude set https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "claude set https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "claude set https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "claude set https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "claude set https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "claude set https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "claude set https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0",
+        "chatgpt set https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "chatgpt set https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "chatgpt set https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "chatgpt set https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "chatgpt set https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "chatgpt set https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "chatgpt set https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0",
+        "grok set https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "grok set https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "grok set https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "grok set https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "grok set https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "grok set https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "grok set https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0",
+        "gemini set https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "gemini set https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "gemini set https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "gemini set https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "gemini set https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "gemini set https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "gemini set https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0",
+        "copilot set https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "copilot set https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "copilot set https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "copilot set https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "copilot set https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "copilot set https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "copilot set https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0",
+        "mscopilot set https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",
+        "mscopilot set https://172.16.0.1/": "allow block allow allow block block block block page off:172.16.0.1 0",
+        "mscopilot set https://192.168.1.1/": "allow block allow allow block block block block page off:192.168.1.1 0",
+        "mscopilot set https://169.254.169.254/": "allow block allow allow block block block block page off:169.254.169.254 0",
+        "mscopilot set https://169.254.1.1:8443/": "allow block allow allow block block block block page off:169.254.1.1 0",
+        "mscopilot set https://0300.0250.1.1/": "allow block allow allow block block block block page off:0300.0250.1.1 0",
+        "mscopilot set https://0xa.1/": "allow block allow allow block block block block page off:0xa.1 0"
+    })
+
+    // Task 013 P1-http-2b (user decision 2026-11-26): Local's https links
+    // and windows reach this computer or a private literal only at its own
+    // origin too. The only other changed rows: Local, https, those
+    // addresses; "external" -> "block" in the clicked main-frame answer (1)
+    // and the windows (5, 7). The clicked dialog (4, a sign-in overlay) and
+    // everything else stay.
+    readonly property var localHttps013: ({
+        "local none https://localhost/": "allow allow allow allow overlay block block block page on: 443",
+        "local none https://127.0.0.1/": "allow allow allow allow overlay block block block page on: 443",
+        "local none https://127.1/": "allow block allow allow overlay block block block page off:127.1 443",
+        "local none https://0x7f000001/": "allow block allow allow overlay block block block page off:0x7f000001 443",
+        "local none https://017700000001/": "allow block allow allow overlay block block block page off:017700000001 443",
+        "local none https://2130706433/": "allow block allow allow overlay block block block page off:2130706433 443",
+        "local none https://[::1]/": "allow allow allow allow overlay block block block page on: 443",
+        "local none https://10.0.0.1/": "allow block allow allow overlay block block block page off:10.0.0.1 0",
+        "local none https://172.16.0.1/": "allow block allow allow overlay block block block page off:172.16.0.1 0",
+        "local none https://192.168.1.1/": "allow block allow allow overlay block block block page off:192.168.1.1 0",
+        "local none https://169.254.169.254/": "allow block allow allow overlay block block block page off:169.254.169.254 0",
+        "local none https://169.254.1.1:8443/": "allow block allow allow overlay block block block page off:169.254.1.1 0",
+        "local none https://0.0.0.0/": "allow block allow allow overlay block block block page off:0.0.0.0 443",
+        "local none https://0300.0250.1.1/": "allow block allow allow overlay block block block page off:0300.0250.1.1 0",
+        "local none https://0xa.1/": "allow block allow allow overlay block block block page off:0xa.1 0",
+        "local none https://256.256.256.256/": "allow block allow allow overlay block block block page off:256.256.256.256 443",
+        "local none https://foo.localhost/": "allow allow allow allow overlay block block block page on: 443",
+        "local none https://intranet/": "allow block allow allow overlay block block block page off:intranet 443",
+        "local set https://localhost/": "allow allow allow allow overlay block block block page on: 443",
+        "local set https://127.0.0.1/": "allow allow allow allow overlay block block block page on: 443",
+        "local set https://127.1/": "allow block allow allow overlay block block block page off:127.1 443",
+        "local set https://0x7f000001/": "allow block allow allow overlay block block block page off:0x7f000001 443",
+        "local set https://017700000001/": "allow block allow allow overlay block block block page off:017700000001 443",
+        "local set https://2130706433/": "allow block allow allow overlay block block block page off:2130706433 443",
+        "local set https://[::1]/": "allow allow allow allow overlay block block block page on: 443",
+        "local set https://10.0.0.1/": "allow block allow allow overlay block block block page off:10.0.0.1 0",
+        "local set https://172.16.0.1/": "allow block allow allow overlay block block block page off:172.16.0.1 0",
+        "local set https://192.168.1.1/": "allow block allow allow overlay block block block page off:192.168.1.1 0",
+        "local set https://169.254.169.254/": "allow block allow allow overlay block block block page off:169.254.169.254 0",
+        "local set https://169.254.1.1:8443/": "allow block allow allow overlay block block block page off:169.254.1.1 0",
+        "local set https://0.0.0.0/": "allow block allow allow overlay block block block page off:0.0.0.0 443",
+        "local set https://0300.0250.1.1/": "allow block allow allow overlay block block block page off:0300.0250.1.1 0",
+        "local set https://0xa.1/": "allow block allow allow overlay block block block page off:0xa.1 0",
+        "local set https://256.256.256.256/": "allow block allow allow overlay block block block page off:256.256.256.256 443",
+        "local set https://foo.localhost/": "allow allow allow allow overlay block block block page on: 443",
+        "local set https://intranet/": "allow block allow allow overlay block block block page off:intranet 443"
+    })
+
+    function goldenExpected() {
+        var expected = {}
+        for (var key in Golden.EXPECTED)
+            expected[key] = Golden.EXPECTED[key]
+        var changed = Object.keys(testCase.http013)
+        compare(changed.length, 16)
+        for (var index = 0; index < changed.length; index++) {
+            var was = String(Golden.EXPECTED[changed[index]]).split(" ")
+            var now = testCase.http013[changed[index]].split(" ")
+            verify(Golden.EXPECTED[changed[index]] !== undefined, changed[index])
+            compare(now.length, was.length, changed[index])
+            var flipped = []
+            for (var at = 0; at < was.length; at++) {
+                if (now[at] === was[at])
+                    continue
+                compare([was[at], now[at]], ["block", "external"], changed[index] + " @" + at)
+                flipped.push(at)
+            }
+            verify(flipped.length > 0 && flipped.every(function (at) { return [1, 4, 5].indexOf(at) >= 0 }),
+                   changed[index] + " " + flipped)
+            verify(now[4] === "external" && now[5] === "external" && now[6] === "block" && now[7] === "block",
+                   "clicked windows ask, script windows stay blocked: " + changed[index])
+            verify(changed[index].indexOf(" http://") > 0, changed[index])
+            expected[changed[index]] = testCase.http013[changed[index]]
+        }
+        var closed = Object.keys(testCase.private013)
+        compare(closed.length, 84)
+        for (var row = 0; row < closed.length; row++) {
+            var name = closed[row]
+            var before = String(Golden.EXPECTED[name]).split(" ")
+            var after = testCase.private013[name].split(" ")
+            verify(Golden.EXPECTED[name] !== undefined && testCase.http013[name] === undefined, name)
+            compare(after.length, before.length, name)
+            for (var spot = 0; spot < before.length; spot++) {
+                if ([1, 4, 5, 7].indexOf(spot) < 0)
+                    compare(after[spot], before[spot], name + " @" + spot)
+                else
+                    compare([["external", "overlay"].indexOf(before[spot]) >= 0, after[spot]], [true, "block"],
+                            name + " @" + spot)
+            }
+            var parts = name.split(" ")
+            verify(parts[0] !== "local" && parts[2].indexOf("https://") === 0
+                   && ChatSites.isPrivateLiteral(ChatSites.parseUrl(parts[2]).host), name)
+            expected[name] = testCase.private013[name]
+        }
+        var local = Object.keys(testCase.localHttps013)
+        compare(local.length, 36)
+        for (var at3 = 0; at3 < local.length; at3++) {
+            var key3 = local[at3]
+            var was3 = String(Golden.EXPECTED[key3]).split(" ")
+            var now3 = testCase.localHttps013[key3].split(" ")
+            verify(Golden.EXPECTED[key3] !== undefined && testCase.http013[key3] === undefined
+                   && testCase.private013[key3] === undefined, key3)
+            compare(now3.length, was3.length, key3)
+            for (var spot3 = 0; spot3 < was3.length; spot3++) {
+                if ([1, 5, 7].indexOf(spot3) < 0 || now3[spot3] === was3[spot3])
+                    compare(now3[spot3], was3[spot3], key3 + " @" + spot3)
+                else
+                    compare([was3[spot3], now3[spot3]], ["external", "block"], key3 + " @" + spot3)
+            }
+            verify(now3[5] === "block" && now3[7] === "block", key3)
+            var bits = key3.split(" ")
+            var host3 = ChatSites.parseUrl(bits[2]).host
+            verify(bits[0] === "local" && bits[2].indexOf("https://") === 0
+                   && (ChatSites.isLocalAddress(host3) || ChatSites.isPrivateLiteral(host3)), key3)
+            expected[key3] = testCase.localHttps013[key3]
+        }
+        return expected
+    }
+
     function test_builtinGoldenTable() {
         var added = [
             { id: "user-3fa9c01b", name: "Le Chat", url: "https://chat.mistral.ai/chat" },
@@ -60,11 +293,12 @@ TestCase {
         var variants = [undefined, [], added, home]
         var keys = Object.keys(Golden.EXPECTED)
         compare(keys.length, Golden.SITE_IDS.length * Golden.ADDRESSES.length * 2)
+        var expected = testCase.goldenExpected()
         for (var v = 0; v < variants.length; v++) {
             var now = Golden.table(ChatSites, variants[v])
             compare(Object.keys(now).length, keys.length)
             for (var index = 0; index < keys.length; index++)
-                compare(now[keys[index]], Golden.EXPECTED[keys[index]], "variant " + v + ": " + keys[index])
+                compare(now[keys[index]], expected[keys[index]], "variant " + v + ": " + keys[index])
         }
     }
 
@@ -275,6 +509,13 @@ TestCase {
                 compare(homeNav(site, url, false, false), url.indexOf("http") === 0 ? "block" : "allow",
                         site.name + " frame: " + url)
             })
+            // 013 F-A: clicked, only public http off the site asks.
+            ;["http://192.168.1.21:3000/", "http://10.0.0.1/", own.replace(":3000/", ":3001/"),
+              own.replace(":3000/", "/"), "http://localhost:3000/", "http://[fd00::21]:3000/",
+              "ftp://a.example/", "javascript:alert(1)", "file:///etc/passwd"].forEach(function (url) {
+                compare(homeNav(site, url, true), "block", site.name + " clicked: " + url)
+            })
+            compare(homeNav(site, "http://chat.example.org/", true), "external")
             compare(homeNav(site, "about:blank"), "allow")
             // Public https, as for any site; a clicked link off the site goes out.
             compare(homeNav(site, "https://cdn.example.org/a.js"), "allow")
@@ -340,6 +581,16 @@ TestCase {
         })
         compare(homeNav(site, "https://cdn.example.org/"), "allow")
         compare(homeNav(site, "https://cdn.example.org/", true), "external")
+        // 013 F-A: a clicked public http link asks; everything local stays blocked.
+        compare(homeNav(site, "http://chat.example.org/", true), "external")
+        ;["http://localhost:3001/", "http://127.0.0.1:3000/", "http://[::1]:3000/", "http://192.168.1.20:3000/",
+          "http://localhost./", "http://nas/"].forEach(function (url) {
+            compare(homeNav(site, url, true), "block", "clicked " + url)
+        })
+        compare(ChatSites.classifyNewWindow({url: "http://chat.example.org/", siteId: site.id,
+                                             userInitiated: true, userSites: testCase.homeSites}), "external")
+        compare(ChatSites.classifyNewWindow({url: "http://chat.example.org/", siteId: site.id,
+                                             userInitiated: false, userSites: testCase.homeSites}), "block")
         // The owner check: its own port, explicit or by scheme.
         var port = function (s, url) {
             return ChatSites.localOwnerPort({siteId: s.id, userSites: testCase.homeSites, url: url})
@@ -780,6 +1031,11 @@ TestCase {
         compare(userNav("https://mistral.ai/", true), "external", "exact host only")
         compare(userNav("about:blank"), "allow")
         compare(userNav("http://chat.mistral.ai/"), "block")
+        compare(userNav("http://chat.mistral.ai/", true), "block", "its own host over http: as before")
+        compare(userNav("http://example.org/"), "block")
+        compare(userNav("http://example.org/", true), "external", "013 F-A")
+        compare(userNav("http://192.168.1.1/", true), "block")
+        compare(userNav("http://localhost/", true), "block")
         compare(userNav("data:text/html,x"), "block")
         compare(userNav("javascript:alert(1)"), "block")
         compare(userNav("file:///etc/passwd"), "block")
@@ -822,7 +1078,11 @@ TestCase {
         compare(userPopup("https://auth.mistral.ai/", true, false), "block")
         compare(userPopup("https://accounts.google.com/", false, true), "external")
         compare(userPopup("https://chat.mistral.ai/x", false, true), "external")
-        compare(userPopup("http://chat.mistral.ai/x", false, true), "block")
+        // 013 F-A: a clicked http window asks; a script-opened one doesn't.
+        compare(userPopup("http://chat.mistral.ai/x", false, true), "external")
+        compare(userPopup("http://chat.mistral.ai/x", true, true), "external")
+        compare(userPopup("http://chat.mistral.ai/x", false, false), "block")
+        compare(userPopup("http://chat.mistral.ai/x", true, false), "block")
     }
 
     // Without its entry an added id is blocked everywhere.
@@ -1142,8 +1402,10 @@ TestCase {
         compare(popup("https://example.com/paper", "claude"), "external")
         compare(popup("https://claude.ai/other", "claude"), "external")
         compare(popup("https://evilaccounts.google.com/", "claude"), "external")
-        compare(popup("http://example.com/", "claude"), "block")
-        compare(popup("http://example.com/", "claude", true), "block")
+        // 013 F-A: a clicked http window asks too (never an overlay).
+        compare(popup("http://example.com/", "claude"), "external")
+        compare(popup("http://example.com/", "claude", true), "external")
+        compare(popup("http://accounts.google.com/", "claude", true), "external")
         compare(popup("javascript:alert(1)", "claude", true), "block")
         compare(popup("file:///etc/passwd", "claude", true), "block")
         compare(popup("view-source:https://claude.ai/", "claude"), "block")
@@ -1171,6 +1433,146 @@ TestCase {
             userInitiated: true}), "overlay")
         compare(ChatSites.classifyNewWindow({url: "", isDialog: true, siteId: "claude",
             userInitiated: true}), "overlay")
+    }
+
+    // 013 F-A (user decision): an http link-type navigation off the site
+    // and a clicked (userInitiated) http window reach the browser prompt;
+    // everything else about http stays as strict as before. linkClicked is
+    // WebEngine's LinkClickedNavigation, which page script can make too
+    // (location.href after load, a.click()): ChatWebView shows the prompt
+    // only after the user's own input on the view (P1-http-2, audit L-A).
+    function test_httpLinkNavigationsAndClickedWindowsAsk() {
+        var sitesToTry = ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot", "local"]
+        sitesToTry.forEach(function (id) {
+            compare(nav("http://example.org/a?b=1", id, true), "external", id + " link-type navigation")
+            compare(nav("http://example.org/a?b=1", id, false), "block", id + " other navigation (redirect, form, typed)")
+            compare(popup("http://example.org/a", id, false), "external", id + " clicked window")
+            compare(popup("http://example.org/a", id, true), "external", id + " clicked dialog")
+            compare(popup("http://example.org/a", id, false, undefined, false), "block", id + " script window")
+            compare(popup("http://example.org/a", id, true, undefined, false), "block", id + " script dialog")
+        })
+        // A site's own host over http stays blocked (same-site http as before).
+        ;[["claude", "http://claude.ai/"], ["claude", "http://sub.claude.ai/x"], ["chatgpt", "http://openai.com/"],
+          ["claude", "http://accounts.google.com/"], ["gemini", "http://accounts.google.com/"],
+          ["local", "http://localhost:3001/"]].forEach(function (row) {
+            compare(nav(row[1], row[0], true), "block", row.join(" "))
+            compare(nav(row[1], row[0], false), "block", row.join(" "))
+        })
+        compare(nav("http://claude.example.org/c", "claude", true, true, {claude: "https://claude.example.org/c"}),
+                "block", "the custom host over http")
+        // userInitiated must be exactly true.
+        ;[undefined, "true", 1, {}].forEach(function (value) {
+            compare(ChatSites.classifyNewWindow({url: "http://example.org/", siteId: "claude",
+                                                 userInitiated: value}), "block", String(value))
+        })
+        // Never an overlay, not even on a sign-in host.
+        compare(popup("http://accounts.google.com/", "claude", true), "external")
+        compare(popup("http://login.microsoftonline.com/", "chatgpt"), "external")
+        // Parser tricks, this computer and other schemes stay refused, clicked or not.
+        var refused = ["http://user@example.org/", "http://user:pw@example.org/", "http://ev%69l.example/",
+                       "http://evil.example\\@claude.ai/", "http://exa mple.org/", "http://сlaude.ai/",
+                       "http://example.org:0/", "http://example.org:65536/", "http://[::2]/", "http://.example.org/",
+                       "http://example..org/", "http:example.org", "http://", "HTTP://localhost:3000/",
+                       "http://127.0.0.1/", "http://127.1/", "http://0x7f000001/", "http://[::1]/",
+                       "http://foo.localhost/", "http://intranet/", "http://0.0.0.0/",
+                       "ftp://example.org/", "ws://example.org/", "file:///etc/passwd", "javascript:alert(1)",
+                       "data:text/html,x", "mailto:a@example.org", "view-source:http://example.org/",
+                       "blob:http://example.org/1", ""]
+        refused.forEach(function (url) {
+            compare(nav(url, "claude", true), "block", "nav " + url)
+            compare(popup(url, "claude", false), "block", "window " + url)
+            if (url !== "")
+                compare(popup(url, "claude", true), "block", "dialog " + url)
+        })
+        // Added public sites: the same, private literals stay blocked.
+        compare(userNav("http://example.org/", true), "external")
+        compare(userPopup("http://example.org/", false, true), "external")
+        compare(userPopup("http://example.org/", false, false), "block")
+        ;["http://192.168.1.1/", "http://10.0.0.1/", "http://172.16.0.1/", "http://169.254.169.254/",
+          "http://3232235777/", "http://localhost:3000/"].forEach(function (url) {
+            compare(userNav(url, true), "block", "added nav " + url)
+            compare(userPopup(url, false, true), "block", "added window " + url)
+        })
+        // Subframes are unchanged (http frames from public hosts load as before).
+        compare(nav("http://example.org/", "claude", true, false), "allow")
+        compare(nav("http://localhost:3000/", "claude", true, false), "block")
+        // https is unchanged.
+        compare(nav("https://example.org/", "claude", true), "external")
+        compare(nav("https://example.org/", "claude", false), "allow")
+        compare(popup("https://example.org/", "claude", false), "external")
+        compare(popup("https://example.org/", "claude", false, undefined, false), "external",
+                "https: ChatWebView still drops it (request.userInitiated)")
+        compare(popup("https://accounts.google.com/", "claude", false), "overlay")
+    }
+
+    // 013 P1-http-2 (audit L-C): no built-in site but Local hands a private,
+    // link-local or 0/8 IPv4 literal (any spelling) to the browser prompt,
+    // over http or https, as a link or a window; added sites already block
+    // them. Their own hosts and public literals are unchanged.
+    function test_builtinSitesNeverAskForPrivateLiterals() {
+        var builtins = ["claude", "chatgpt", "grok", "gemini", "copilot", "mscopilot"]
+        var literals = ["10.0.0.1", "172.16.0.1", "172.31.255.254", "192.168.1.1", "169.254.169.254",
+                        "169.254.1.1:8443", "0300.0250.1.1", "0xa.1", "3232235777", "0xc0a80101", "10.1"]
+        builtins.forEach(function (id) {
+            literals.forEach(function (host) {
+                ;["http://", "https://"].forEach(function (scheme) {
+                    var url = scheme + host + "/latest/meta-data/"
+                    compare(nav(url, id, true), "block", id + " link " + url)
+                    compare(popup(url, id, false), "block", id + " window " + url)
+                    compare(popup(url, id, true), "block", id + " dialog " + url)
+                    compare(popup(url, id, false, undefined, false), "block", id + " script window " + url)
+                })
+                // In-view loads are as before: unclicked https stays (a dotless
+                // number is a name of this computer: blocked), http blocks.
+                compare(nav("https://" + host + "/", id, false), host.indexOf(".") > 0 ? "allow" : "block",
+                        id + " in view https " + host)
+                compare(nav("http://" + host + "/", id, false), "block", id + " in view http " + host)
+            })
+            // Public literals and names next to the ranges still ask.
+            ;["https://8.8.8.8/", "http://8.8.8.8/", "https://172.32.0.1/", "http://192.169.0.1/",
+              "https://100.64.0.1/", "http://11.0.0.1/"].forEach(function (url) {
+                compare(nav(url, id, true), "external", id + " " + url)
+                compare(popup(url, id, false), "external", id + " " + url)
+            })
+        })
+        // Subframes are unchanged (built-ins keep their looser frame rule).
+        compare(nav("https://192.168.1.1/", "claude", true, false), "allow")
+        // P1-http-2b: Local's https links and windows to the home network
+        // are blocked too (own origin aside: test_newWindowForLocal).
+        compare(nav("https://192.168.1.1/", "local", true), "block")
+        compare(popup("https://192.168.1.1/", "local", false), "block")
+        // A custom address on a private literal still loads its own host in view.
+        var custom = {claude: "https://10.0.0.5/c"}
+        compare(nav("https://10.0.0.5/c/1", "claude", true, true, custom), "allow")
+        compare(nav("https://10.0.0.6/", "claude", true, true, custom), "block")
+    }
+
+    // 013 P1-http-2: the prompt names the port when it isn't the scheme's
+    // default, so two ports of one host never look alike.
+    function test_promptHost() {
+        compare(ChatSites.promptHost("https://example.org/x"), "example.org")
+        compare(ChatSites.promptHost("https://example.org:443/x"), "example.org")
+        compare(ChatSites.promptHost("https://example.org:0443/x"), "example.org")
+        compare(ChatSites.promptHost("http://example.org:80/"), "example.org")
+        compare(ChatSites.promptHost("http://example.org/"), "example.org")
+        compare(ChatSites.promptHost("http://example.org:443/"), "example.org:443")
+        compare(ChatSites.promptHost("https://example.org:80/"), "example.org:80")
+        compare(ChatSites.promptHost("http://localhost:3000/"), "localhost:3000")
+        compare(ChatSites.promptHost("http://localhost:3001/c"), "localhost:3001")
+        compare(ChatSites.promptHost("http://[::1]:631/"), "[::1]:631")
+        compare(ChatSites.promptHost("HTTP://Example.ORG.:8080/"), "example.org:8080")
+        // Unreadable or refused addresses name no host.
+        ;["", "ftp://example.org:21/", "http://user@example.org:8080/", "http://ev%69l.example:81/",
+          "http://evil.example\\@claude.ai:81/", "javascript:alert(1)"].forEach(function (url) {
+            compare(ChatSites.promptHost(url) === "" || ChatSites.parseUrl(url) === null, true, url)
+        })
+        compare(ChatSites.promptHost("http://evil.example\\@claude.ai:81/"), "")
+        // A long host is cut at the front; the port stays readable.
+        var long = "a".repeat(80) + ".example"
+        var shown = ChatSites.promptHost("http://" + long + ":8080/")
+        compare(shown.length, 64)
+        compare(shown.charAt(0), "…")
+        compare(shown.slice(-13), ".example:8080")
     }
 
     function test_parseUrl() {
@@ -1449,6 +1851,19 @@ TestCase {
         compare(nav("http://[::1]:3000/", "local", false), "block")
         compare(nav("http://192.168.1.2:3000/", "local", false), "block")
         compare(nav("http://example.com/", "local", false), "block")
+        // 013 F-A: a clicked http link off the site asks; one to a host of
+        // the site (another port, another loopback spelling) stays blocked.
+        // P1-http-2: so does one to this computer or a private literal.
+        compare(nav("http://example.com/", "local", true), "external")
+        ;["http://192.168.1.2:3000/", "http://10.0.0.1/", "http://169.254.169.254/latest/meta-data/",
+          "http://0.0.0.0:3000/", "http://0:3000/", "http://127.1:3000/", "http://2130706433:3000/",
+          "http://foo.localhost/", "http://nas/", "http://3232235777/"].forEach(function (url) {
+            compare(nav(url, "local", true), "block", url)
+        })
+        compare(nav("http://localhost.:3000/", "local", true), "allow", "its own origin, trailing dot")
+        compare(nav("http://localhost:8080/", "local", true), "block")
+        compare(nav("http://127.0.0.1:3000/", "local", true), "block")
+        compare(nav("http://[::1]:3000/", "local", true), "block")
         var ipv4 = {local: "http://127.0.0.1:8080/"}
         compare(nav("http://127.0.0.1:8080/x", "local", true, true, ipv4), "allow")
         compare(nav("http://localhost:8080/x", "local", true, true, ipv4), "block")
@@ -1463,6 +1878,9 @@ TestCase {
         compare(nav("https://other.example/", "local", true, true, secure), "external")
         compare(nav("http://localhost:3000/", "local", false, true, secure), "block")
         compare(nav("http://ai.home.example/", "local", false, true, secure), "block")
+        compare(nav("http://ai.home.example/", "local", true, true, secure), "block")
+        compare(nav("http://localhost:3000/", "local", true, true, secure), "block")
+        compare(nav("http://other.example/", "local", true, true, secure), "external")
         compare(nav("https://localhost/", "local", false), "allow")
         compare(nav("file:///etc/passwd", "local", false), "block")
         compare(nav("javascript:alert(1)", "local", true), "block")
@@ -1494,15 +1912,66 @@ TestCase {
     }
 
     function test_newWindowForLocal() {
-        compare(popup("http://localhost:3000/", "local"), "block")
-        compare(popup("http://localhost:3000/", "local", true), "block")
-        compare(popup("http://127.0.0.1:3000/x", "local", true), "block")
+        // 013 F-A: a clicked http window asks, as https does for Local.
+        // P1-http-2: on this computer or a private literal only at Local's
+        // own origin (another port, another loopback spelling: blocked).
+        compare(popup("http://localhost:3000/", "local"), "external")
+        compare(popup("http://localhost:3000/", "local", true), "external")
+        compare(popup("http://localhost:3000/c/1?x=1", "local"), "external")
+        compare(popup("http://localhost.:3000/", "local"), "external", "its own origin, trailing dot")
+        compare(popup("http://example.org/", "local"), "external")
+        ;["http://127.0.0.1:3000/x", "http://localhost:3001/", "http://[::1]:3000/", "http://[::1]:631/",
+          "http://localhost./", "http://foo.localhost/", "http://0.0.0.0/",
+          "http://0.0.0.0:3000/", "http://127.1:3000/", "http://192.168.1.1/", "http://10.0.0.1/",
+          "http://169.254.169.254/", "http://3232235777/", "http://nas/"].forEach(function (url) {
+            compare(popup(url, "local"), "block", url)
+            compare(popup(url, "local", true), "block", "dialog " + url)
+        })
+        var own = {local: "http://127.0.0.1:8080/"}
+        compare(popup("http://127.0.0.1:8080/x", "local", false, own), "external")
+        compare(popup("http://localhost:3000/", "local", false, own), "block")
+        compare(popup("http://localhost:8080/", "local", false, own), "block")
+        // P1-http-2b: the same for https. The built-in http address has no
+        // https own origin, so every local or LAN https window is blocked;
+        // public https still asks.
+        ;["https://192.168.1.1/", "https://127.0.0.1:3000/", "https://localhost:3000/", "https://localhost/",
+          "https://[::1]:8443/",
+          "https://0.0.0.0/", "https://foo.localhost/", "https://10.0.0.1/", "https://169.254.169.254/",
+          "https://nas/", "https://127.1/"].forEach(function (url) {
+            compare(popup(url, "local"), "block", url)
+            compare(popup(url, "local", false, undefined, false), "block", "script " + url)
+            compare(nav(url, "local", true), ChatSites.knownHost(ChatSites.effectiveSite("local"),
+                    ChatSites.parseUrl(url).host) ? "allow" : "block", "link " + url)
+        })
+        compare(popup("https://example.com/docs", "local"), "external")
+        // A clicked dialog is a sign-in window, not the prompt: unchanged.
+        compare(popup("https://localhost/", "local", true), "overlay")
+        // An https Local address: its exact origin asks, nothing else local.
+        var lan = {local: "https://192.168.1.5/chat"}
+        compare(popup("https://192.168.1.5/x", "local", false, lan), "external")
+        compare(popup("https://192.168.1.5:443/x", "local", false, lan), "external")
+        compare(popup("https://192.168.1.5:8443/x", "local", false, lan), "block")
+        compare(popup("http://192.168.1.5/x", "local", false, lan), "block")
+        compare(popup("https://192.168.1.6/", "local", false, lan), "block")
+        compare(popup("https://localhost/", "local", false, lan), "block")
+        compare(nav("https://192.168.1.5/y", "local", true, true, lan), "allow")
+        compare(nav("https://192.168.1.6/", "local", true, true, lan), "block")
+        var port = {local: "https://localhost:8443/"}
+        compare(popup("https://localhost:8443/a", "local", false, port), "external")
+        compare(popup("https://LOCALHOST.:8443/a", "local", false, port), "external")
+        compare(popup("https://localhost/a", "local", false, port), "block")
+        compare(popup("https://127.0.0.1:8443/a", "local", false, port), "block")
+        // The http own origin is no https one.
+        compare(popup("https://127.0.0.1:8080/x", "local", false, {local: "http://127.0.0.1:8080/x"}), "block")
+        compare(popup("http://localhost:3000/", "local", false, undefined, false), "block")
+        compare(popup("http://localhost:3000/", "local", true, undefined, false), "block")
         compare(popup("about:blank", "local", true), "overlay")
         compare(popup("", "local", true), "overlay")
         compare(popup("https://example.com/docs", "local"), "external")
-        compare(popup("https://localhost/", "local"), "external")
+        compare(popup("https://localhost/", "local"), "block", "P1-http-2b: not Local's own origin")
         var secure = {local: "https://ai.home.example/"}
-        compare(popup("http://ai.home.example/", "local", true, secure), "block")
+        compare(popup("http://ai.home.example/", "local", true, secure), "external")
+        compare(popup("http://ai.home.example/", "local", true, secure, false), "block")
         compare(popup("https://ai.home.example/x", "local", false, secure), "external")
     }
 

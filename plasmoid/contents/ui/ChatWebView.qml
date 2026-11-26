@@ -182,6 +182,11 @@ Item {
     // answered are dropped; overridable by tests only.
     property int externalPromptGap: 3000
     property double externalQuietUntil: 0
+    // A page may ask only this soon (ms) after the user's own input on its
+    // view, and never with input from before the last prompt was answered
+    // or dropped (013 P1-http-2, audit L-A).
+    readonly property int pageInputWindow: 1000
+    property double externalClearedAt: 0
 
     property bool dialogOpen: false
     property bool passkeyNotice: false
@@ -258,7 +263,7 @@ Item {
 
     // Puts url on the prompt; the host must be readable.
     function showExternal(url, replace) {
-        var host = ChatSites.shortHost(ChatSites.displayHost(url))
+        var host = ChatSites.promptHost(url)
         if (host === "" || (!replace && chatWeb.externalUrl !== ""))
             return
         chatWeb.externalQuietUntil = Date.now() + chatWeb.externalPromptGap
@@ -274,6 +279,16 @@ Item {
                 || Date.now() < chatWeb.externalQuietUntil || !ChatSites.isWebUrl(url))
             return
         chatWeb.showExternal(url, false)
+    }
+
+    // A page's navigation or new window wants url in the system browser:
+    // asks only right after the user's own press or Enter on that view.
+    // Page script can click links and navigate, but makes no Qt input.
+    function pageAsksExternal(view, url) {
+        if (!view || !(view.inputAt > chatWeb.externalClearedAt)
+                || Date.now() - view.inputAt > chatWeb.pageInputWindow)
+            return
+        chatWeb.askExternal(url)
     }
 
     // Open on the prompt: the user's answer, the only other way out. An
@@ -293,6 +308,7 @@ Item {
         chatWeb.externalHost = ""
         chatWeb.externalInsecure = false
         chatWeb.externalQuietUntil = Date.now() + chatWeb.externalPromptGap
+        chatWeb.externalClearedAt = Date.now()
     }
 
     function focusView() {
@@ -1016,6 +1032,10 @@ Item {
             readonly property real wantedZoom: SettingsLogic.zoomFor(chatWeb.zoomMap, page.site)
             // The last zoom change came while a page was loading.
             property bool zoomedWhileLoading: false
+            // Date.now() of the user's last pointer press on this view or
+            // Enter in its page, 0 before any: Qt input events only, which
+            // page script can't make (013 P1-http-2).
+            property double inputAt: 0
 
             // Chromium keeps it across navigations (spike Z1), so it is
             // bound once.
@@ -1077,6 +1097,25 @@ Item {
                 chatWeb.openUploadDialog(request, page)
             }
 
+            // Enter (which follows a focused link) seen on its way to the
+            // page; never accepted here, so the page still gets it. Typing
+            // other keys doesn't count.
+            Keys.onShortcutOverride: (event) => {
+                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                    page.inputAt = Date.now()
+            }
+            // Over the page, passive: notes every press and its release
+            // (Chromium follows a link on release, so a slow click still
+            // counts), takes none.
+            Item {
+                anchors.fill: parent
+                z: 1
+                PointHandler {
+                    acceptedButtons: Qt.AllButtons
+                    onActiveChanged: page.inputAt = Date.now()
+                }
+            }
+
             onNavigationRequested: (request) => {
                 var verdict = ChatSites.classifyNavigation({
                     url: request.url.toString(),
@@ -1114,7 +1153,7 @@ Item {
                 }
                 request.reject()
                 if (verdict === "external")
-                    chatWeb.askExternal(request.url.toString())
+                    chatWeb.pageAsksExternal(page, request.url.toString())
             }
 
             onNewWindowRequested: (request) => {
@@ -1144,7 +1183,7 @@ Item {
                 // are dropped.
                 else if (verdict !== "block" && request.userInitiated
                          && ChatSites.isWebUrl(url))
-                    chatWeb.askExternal(url)
+                    chatWeb.pageAsksExternal(page, url)
             }
 
             // A main-frame load that needs the other user agent is stopped

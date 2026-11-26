@@ -502,6 +502,13 @@ function isPageUrl(site, url) {
 // "allow" | "external" | "block" for a WebEngine navigation request.
 // request.customUrls is optional; without it the built-in addresses apply.
 // request.userSites: the added sites (see the top of this file).
+// A link-type navigation off the site (LinkClickedNavigation, which page
+// script can also make; ChatWebView asks only after the user's own input)
+// goes to the browser prompt, for http too (013 F-A; ChatWebView adds the
+// insecure wording); other http stays blocked unless Local's own origin.
+// The prompt never gets a private, link-local or 0/8 IPv4 literal from a
+// built-in site, nor (http or https) this computer or such a literal from
+// Local (013 P1-http-2, -2b); Local's own hosts load in view instead.
 function classifyNavigation(request) {
     var info = request || {}
     // Only an explicit subframe gets the looser rules; missing info is
@@ -524,11 +531,15 @@ function classifyNavigation(request) {
         return "block"
     if (parsed.scheme === "https") {
         if (info.linkClicked && !knownHost(site, parsed.host))
-            return "external"
+            return !isLocalAddress(parsed.host) && !isPrivateLiteral(parsed.host) ? "external" : "block"
         return "allow"
     }
-    if (parsed.scheme === "http")
-        return httpAllowed(site, parsed) ? "allow" : "block"
+    if (parsed.scheme === "http") {
+        if (httpAllowed(site, parsed))
+            return "allow"
+        return info.linkClicked && !knownHost(site, parsed.host) && !isLocalAddress(parsed.host)
+            && !isPrivateLiteral(parsed.host) ? "external" : "block"
+    }
     return "block"
 }
 
@@ -1089,18 +1100,19 @@ function isHomeTarget(host) {
 
 // classifyNavigation's main frame for a home site: its own origin, and
 // public https as for any site; nothing else on this computer or the
-// network, and no other http.
+// network. Other public http only as a clicked link off the site, to the
+// browser prompt (013 F-A).
 function classifyHomeNavigation(site, info) {
     var parsed = parseUserUrl(info.url)
     if (parsed === null || (parsed.scheme !== "http" && parsed.scheme !== "https") || parsed.host === "")
         return "block"
     if (isOwnOrigin(site, parsed))
         return "allow"
-    if (isHomeTarget(parsed.host) || parsed.scheme !== "https")
+    if (isHomeTarget(parsed.host))
         return "block"
     if (info.linkClicked && !knownHost(site, parsed.host))
         return "external"
-    return "allow"
+    return parsed.scheme === "https" ? "allow" : "block"
 }
 
 // classifySubframe for a home site: about:, blob:, data: and srcdoc as for
@@ -1469,6 +1481,19 @@ function shortHost(host) {
     return text.length > MAX_HOST_DISPLAY ? "…" + text.slice(-(MAX_HOST_DISPLAY - 1)) : text
 }
 
+// The host the browser prompt names: shortHost(displayHost(url)), with
+// ":port" when url gives a port other than its scheme's default, so two
+// ports of one host never look alike (013 P1-http-2). The port is kept
+// when the text is shortened.
+function promptHost(url) {
+    var host = displayHost(url)
+    var parsed = parseUrl(url)
+    if (host === "" || parsed === null || parsed.port === ""
+            || parsed.port === (parsed.scheme === "https" ? "443" : "80"))
+        return shortHost(host)
+    return shortHost(host + ":" + parsed.port)
+}
+
 // {off, host} for the page shown in a site's main frame: off when it is an
 // http(s) page on a host outside the site's own, sign-in and custom hosts.
 // host is shortHost(displayHost(url)), "" when unreadable (still off).
@@ -1529,9 +1554,13 @@ function classifySubframe(request) {
 }
 
 // "overlay" | "external" | "block" for a new-window request. Plain http is
-// always blocked here, even for Local. A sign-in window ("overlay") opens
-// only for a click (request.userInitiated === true); a script-opened one is
-// blocked.
+// never an overlay; a clicked http window only asks for the browser
+// (013 F-A), a script-opened one is blocked. A sign-in window ("overlay")
+// opens only for a click (request.userInitiated === true); a script-opened
+// one is blocked. No window of a site but Local reaches a private,
+// link-local or 0/8 IPv4 literal; Local's http windows reach this computer
+// or such a literal only at Local's own origin (013 P1-http-2), and so do
+// its https windows (P1-http-2b).
 function classifyNewWindow(request) {
     var info = request || {}
     var site = effectiveSite(info.siteId, info.customUrls, info.userSites)
@@ -1541,17 +1570,31 @@ function classifyNewWindow(request) {
     var parsed = parseUrl(url)
     if (parsed !== null && parsed.host !== "" && !site.local && isLocalAddress(parsed.host))
         return "block"
-    if (site.user === true && parsed !== null && parsed.host !== "" && isPrivateLiteral(parsed.host))
+    if (!site.local && parsed !== null && parsed.host !== "" && isPrivateLiteral(parsed.host))
         return "block"
     var https = isHttpsUrl(url)
     var clicked = info.userInitiated === true
     if (info.isDialog && (https || url === "" || isAboutBlank(url)))
         return clicked ? "overlay" : "block"
     if (!https)
-        return "block"
+        return clicked && isHttpUrl(url) && (httpAllowed(site, parsed)
+            || (!isLocalAddress(parsed.host) && !isPrivateLiteral(parsed.host))) ? "external" : "block"
     if (hostMatches(parsed.host, site.auth_hosts))
         return clicked ? "overlay" : "block"
+    if (site.local && (isLocalAddress(parsed.host) || isPrivateLiteral(parsed.host))
+            && !isLocalHttpsOrigin(site, parsed))
+        return "block"
     return "external"
+}
+
+// Whether parsed (https) is exactly Local's own https origin: the scheme,
+// host and port (443 when absent) of its address (013 P1-http-2b).
+function isLocalHttpsOrigin(site, parsed) {
+    var own = parseUrl(site.url)
+    return site.local === true && own !== null && own.scheme === "https" && own.host !== ""
+        && parsed !== null && parsed.scheme === "https"
+        && normalizeHost(parsed.host) === normalizeHost(own.host)
+        && (parsed.port !== "" ? parsed.port : "443") === (own.port !== "" ? own.port : "443")
 }
 
 // Drops only the QtWebEngine/x.y.z product token; Chrome/platform stay intact.

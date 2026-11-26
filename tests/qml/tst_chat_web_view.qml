@@ -2,6 +2,7 @@ import QtQuick
 import QtTest
 import QtWebEngine
 import "../../plasmoid/contents/ui"
+import "../../plasmoid/contents/ui/ChatSites.js" as ChatSites
 
 // ChatWebView's Local owner gate with a real, off-the-record Qt WebEngine
 // view and a fake port owner helper. The Local address is 127.0.0.1:9,
@@ -1411,6 +1412,198 @@ TestCase {
         // And the open goes straight through.
         ignoreWarning(openedWarning("http://example.org/again"))
         web.openHttps("http://example.org/again")
+    }
+
+    // 013 F-A: what the page-driven handlers hand over for http. A clicked
+    // http window or a link-type navigation off the site gets the prompt
+    // with the insecure wording (P1-http-2: only after real input on the
+    // view, test_pageAskedPromptNeedsRealInput); Open acknowledges that
+    // origin and opens exactly the asked address. Script windows and
+    // same-site http are "block", which the handlers never pass on.
+    function test_pageAskedHttpReachesTheInsecurePrompt() {
+        skipUnlessOffscreen()
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        web.externalPromptGap = 0
+        var got = []
+        web.httpSiteAcknowledged.connect(function (origin) { got.push(origin) })
+        var url = "http://example.org/doc?x=1"
+        compare(ChatSites.classifyNewWindow({url: url, siteId: "claude", userInitiated: true}), "external")
+        compare(ChatSites.classifyNewWindow({url: url, siteId: "claude", userInitiated: false}), "block")
+        web.askExternal(url)
+        compare(web.externalUrl, url)
+        compare(web.externalHost, "example.org")
+        compare(web.externalInsecure, true)
+        ignoreWarning(openedWarning(url))
+        web.acceptExternal()
+        compare(got, ["http://example.org:80"])
+        compare(web.externalUrl, "")
+        // A clicked link to the same origin later: the plain prompt, and
+        // Open opens it (the repeated acknowledgement is the same origin;
+        // main.qml keeps no repeats).
+        var link = "http://example.org/other"
+        compare(ChatSites.classifyNavigation({url: link, siteId: "claude", linkClicked: true,
+                                              isMainFrame: true}), "external")
+        web.askExternal(link)
+        compare(web.externalInsecure, false)
+        ignoreWarning(openedWarning(link))
+        web.acceptExternal()
+        compare(ChatSites.addWarnedSite([], link), ["http://example.org:80"])
+        verify(got.every(function (origin) { return origin === "http://example.org:80" }), got)
+        // Another port is another site: insecure again; Cancel acknowledges nothing.
+        var before = got.length
+        web.askExternal("http://example.org:8080/")
+        compare(web.externalInsecure, true)
+        web.clearExternal()
+        compare(got.length, before)
+        compare(web.siteWarned("http://example.org:8080/"), false)
+        // Same-site http and script windows never reach the prompt.
+        compare(ChatSites.classifyNavigation({url: "http://claude.ai/", siteId: "claude", linkClicked: true,
+                                              isMainFrame: true}), "block")
+        compare(ChatSites.classifyNavigation({url: "http://example.org/", siteId: "claude", linkClicked: false,
+                                              isMainFrame: true}), "block")
+    }
+
+    // 013 P1-http-2 (audit L-A): a page-asked prompt needs the user's own
+    // input on that view within pageInputWindow (1 s). Real Qt input from
+    // the test framework counts (a pointer press of any button, Enter);
+    // events the page makes itself, hovering, other keys, input from before
+    // the last answer and old input don't. The toolbar is not gated.
+    function test_pageAskedPromptNeedsRealInput() {
+        skipUnlessOffscreen()
+        var web = localView({})
+        web.externalPromptGap = 0
+        // Ends the quiet time choosing the site started.
+        web.clearExternal()
+        var view = web.currentView
+        var url = "http://example.org/a"
+        compare(web.pageInputWindow, 1000)
+        // No input at all.
+        compare(view.inputAt, 0)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, "")
+        // Events the page dispatches itself are not Qt input.
+        var done = false
+        view.runJavaScript("document.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));"
+                           + "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));"
+                           + "document.documentElement.click(); 1", function () { done = true })
+        tryVerify(function () { return done }, 5000)
+        wait(50)
+        compare(view.inputAt, 0)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, "")
+        // Hovering is not input.
+        mouseMove(view, 20, 20)
+        mouseMove(view, 60, 40)
+        compare(view.inputAt, 0)
+        // A real press asks.
+        mouseClick(view, 40, 40)
+        verify(view.inputAt > 0)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, url)
+        compare(web.externalInsecure, true)
+        // P1-http-2c: a press held longer than the window, then released
+        // (Chromium follows a link on release), still asks.
+        web.clearExternal()
+        wait(5)
+        mousePress(view, 40, 40)
+        wait(1500)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, "", "the press alone is too old")
+        mouseRelease(view, 40, 40)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, url, "the release counts")
+        // And the press counts on its own (a page acting on mousedown).
+        web.clearExternal()
+        wait(5)
+        mousePress(view, 40, 40)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, url, "the press counts")
+        mouseRelease(view, 40, 40)
+        // Hovering after that is still not input.
+        web.clearExternal()
+        wait(5)
+        mouseMove(view, 70, 70)
+        mouseMove(view, 90, 60)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, "")
+        mouseClick(view, 40, 40)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, url)
+        // Cancel: nothing more until the next real input.
+        web.clearExternal()
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, "")
+        wait(5)
+        mouseClick(view, 40, 40, Qt.MiddleButton)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, url)
+        web.clearExternal()
+        // Enter on the page counts; other keys don't.
+        view.forceActiveFocus()
+        wait(5)
+        keyClick(Qt.Key_A)
+        keyClick(Qt.Key_Space)
+        keyClick(Qt.Key_Tab)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, "")
+        view.forceActiveFocus()
+        keyClick(Qt.Key_Return)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, url)
+        web.clearExternal()
+        wait(5)
+        view.forceActiveFocus()
+        keyClick(Qt.Key_Enter, Qt.KeypadModifier)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, url)
+        web.clearExternal()
+        // Input older than the window doesn't count.
+        wait(5)
+        mouseClick(view, 40, 40)
+        wait(1100)
+        web.pageAsksExternal(view, url)
+        compare(web.externalUrl, "")
+        // Not without a view, and an Open answer uses the input up too.
+        mouseClick(view, 40, 40)
+        web.pageAsksExternal(null, url)
+        compare(web.externalUrl, "")
+        web.pageAsksExternal(view, "https://example.org/b")
+        compare(web.externalUrl, "https://example.org/b")
+        ignoreWarning(openedWarning("https://example.org/b"))
+        web.acceptExternal()
+        web.pageAsksExternal(view, "https://example.org/c")
+        compare(web.externalUrl, "")
+        // The rest of askExternal still applies after real input.
+        wait(5)
+        mouseClick(view, 40, 40)
+        web.pageAsksExternal(view, "ftp://example.org/")
+        web.pageAsksExternal(view, "http://example.org/" + "a".repeat(4078))
+        compare(web.externalUrl, "")
+        // The toolbar needs no page input, and names the port (Local's
+        // page here, http://127.0.0.1:9/).
+        web.clearExternal()
+        web.openExternally()
+        compare(web.externalUrl, String(view.url))
+        compare(web.externalHost, "127.0.0.1:9")
+        web.clearExternal()
+    }
+
+    // 013 P1-http-2: the prompt shows host:port for a port that isn't the
+    // scheme's default.
+    function test_promptNamesANonDefaultPort() {
+        skipUnlessOffscreen()
+        var web = createTemporaryObject(webComponent, testCase, {})
+        verify(web !== null)
+        web.externalPromptGap = 0
+        ;[["http://localhost:3001/x", "localhost:3001"], ["http://example.org:80/", "example.org"],
+          ["https://example.org:443/", "example.org"], ["https://example.org:8443/", "example.org:8443"],
+          ["http://[::1]:631/", "[::1]:631"], ["http://example.org:443/", "example.org:443"]].forEach(function (row) {
+            web.askExternal(row[0])
+            compare(web.externalUrl, row[0])
+            compare(web.externalHost, row[1], row[0])
+            web.clearExternal()
+        })
     }
 
     function test_httpOpenIsRefusedUntilAcknowledged() {

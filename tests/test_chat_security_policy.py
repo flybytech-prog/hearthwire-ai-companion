@@ -4209,7 +4209,8 @@ def test_proof_hidden_chars_rule_catches(path, old, new):
 # ChatWebView.acceptExternal (Open on the "Open <host> in your browser?"
 # prompt, which for http is the once-per-site insecure warning). The prompt's
 # Open stays disabled ~700 ms each time it shows (arming). Page-driven navigations and windows
-# only call askExternal, which keeps one prompt at a time and rate limits.
+# only call pageAsksExternal, which needs the user's own input on the view (013 P1-http-2,
+# rule below) and then askExternal, which keeps one prompt at a time and rate limits.
 # Open and Open in browser are reached only from a button click.
 
 LINK_OUT = UI / "LinkOut.js"
@@ -4342,17 +4343,17 @@ def _external_open_problems(sources):
     if not re.search(r"chatWeb\s*\.\s*externalQuietUntil\s*=\s*Date\s*\.\s*now\s*\(\s*\)\s*\+\s*"
                      r"chatWeb\s*\.\s*externalPromptGap", clear):
         problems.append("ChatWebView.clearExternal must start the quiet time")
-    # The page-driven paths only ask.
+    # The page-driven paths only ask, through the real-input gate.
     navs = [body for _, body in _blocks(web, NAV_HANDLER)]
     if len(navs) != 1 or not re.search(r'if\s*\(\s*verdict\s*===\s*"external"\s*\)\s*'
-                                       r"chatWeb\s*\.\s*askExternal\s*\(\s*request\s*\.\s*url\s*\.\s*toString\s*\(\s*\)\s*\)",
-                                       navs[0] if navs else ""):
-        problems.append('onNavigationRequested: an "external" verdict must only call chatWeb.askExternal(...)')
+                                       r"chatWeb\s*\.\s*pageAsksExternal\s*\(\s*page\s*,\s*request\s*\.\s*url\s*\.\s*"
+                                       r"toString\s*\(\s*\)\s*\)", navs[0] if navs else ""):
+        problems.append('onNavigationRequested: an "external" verdict must only call chatWeb.pageAsksExternal(page, ...)')
     windows = [body for _, body in _blocks(web, r"\bonNewWindowRequested\s*:\s*\(\s*request\s*\)\s*=>\s*\{")]
     if len(windows) != 1 or not re.search(r"request\s*\.\s*userInitiated\s*&&\s*ChatSites\s*\.\s*isWebUrl\s*\(\s*url\s*\)"
-                                          r"\s*\)\s*chatWeb\s*\.\s*askExternal\s*\(\s*url\s*\)",
+                                          r"\s*\)\s*chatWeb\s*\.\s*pageAsksExternal\s*\(\s*page\s*,\s*url\s*\)",
                                           windows[0] if windows else ""):
-        problems.append("onNewWindowRequested: only a clicked http(s) window may call chatWeb.askExternal(url)")
+        problems.append("onNewWindowRequested: only a clicked http(s) window may call chatWeb.pageAsksExternal(page, url)")
     # Open and the toolbar button are only ever a click away.
     accepts = [(name, match.start()) for name, code in sources.items()
                for match in re.finditer(r"\bacceptExternal\s*\(", code)]
@@ -4427,8 +4428,10 @@ def test_pages_only_ask_to_open_the_browser():
 
 
 EXTERNAL_MUTATIONS = [
-    (CHAT_WEB_VIEW, "chatWeb.askExternal(request.url.toString())", "Qt.openUrlExternally(request.url)"),
-    (CHAT_WEB_VIEW, "chatWeb.askExternal(url)", "Qt.openUrlExternally(url)"),
+    (CHAT_WEB_VIEW, "chatWeb.pageAsksExternal(page, request.url.toString())", "Qt.openUrlExternally(request.url)"),
+    (CHAT_WEB_VIEW, "chatWeb.pageAsksExternal(page, url)", "Qt.openUrlExternally(url)"),
+    (CHAT_WEB_VIEW, "chatWeb.pageAsksExternal(page, request.url.toString())", "chatWeb.askExternal(request.url.toString())"),
+    (CHAT_WEB_VIEW, "chatWeb.pageAsksExternal(page, url)", "chatWeb.askExternal(url)"),
     (CHAT_WEB_VIEW, "        chatWeb.externalUrl = url\n    }",
      "        chatWeb.externalUrl = url\n        chatWeb.acceptExternal()\n    }"),
     (CHAT_WEB_VIEW, '        if (typeof url !== "string" || url.length > 4096 || chatWeb.externalUrl !== ""\n                || Date.now()',
@@ -4460,7 +4463,7 @@ EXTERNAL_MUTATIONS = [
     (CHAT_VIEW, "    function focusView() {\n", "    function focusView() {\n        LinkOut.open(\"https://x.example/\")\n"),
     (CHAT_WEB_VIEW, "        chatWeb.syncCurrentViews()\n    }\n\n    // A changed address moves",
      "        chatWeb.syncCurrentViews()\n        chatWeb.acceptExternal()\n    }\n\n    // A changed address moves"),
-    (CHAT_WEB_VIEW, "                         && ChatSites.isWebUrl(url))\n                    chatWeb.askExternal(url)",
+    (CHAT_WEB_VIEW, "                         && ChatSites.isWebUrl(url))\n                    chatWeb.pageAsksExternal(page, url)",
      "                         && ChatSites.isWebUrl(url))\n                    chatWeb.acceptExternal(url)"),
     (CHAT_WEB_VIEW, "                else if (verdict !== \"block\" && request.userInitiated\n",
      "                else if (verdict !== \"block\"\n"),
@@ -4528,6 +4531,151 @@ def test_proof_external_open_rule_catches(path, old, new):
         # A new browser call anywhere else.
         sources[_rel(path)] += "\nfunction leak(u) { Qt.openUrlExternally(u) }\n"
     assert _external_open_problems(sources)
+
+
+# Task 013 P1-http-2 (user decision on the audit, L-A): WebEngine reports a page script's
+# location.href / a.click() / dispatchEvent as LinkClickedNavigation, so "linkClicked" is no
+# user click. A page-asked prompt (navigation or new window) therefore needs the user's own
+# input on that view: Date.now() of the last pointer press or release (a passive PointHandler in an
+# Item over the page) or Enter (seen in ShortcutOverride, never accepted), within
+# pageInputWindow (1000 ms, readonly), and newer than the last answered or dropped prompt
+# (clearExternal stamps externalClearedAt). Page script makes no Qt input event. Only
+# pageAsksExternal calls askExternal; only the two handlers call pageAsksExternal; inputAt
+# is written only by the two input recorders. The toolbar (openExternally) is not gated.
+PAGE_ASKS_BODY = ("{ if (!view || !(view.inputAt > chatWeb.externalClearedAt) "
+                  "|| Date.now() - view.inputAt > chatWeb.pageInputWindow) return chatWeb.askExternal(url) }")
+INPUT_KEYS_BODY = ("{ if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) "
+                   "page.inputAt = Date.now() }")
+# P1-http-2c (reviewer L1): the press and its release both count, since Chromium follows a
+# link on release (a press held over a second still asks).
+INPUT_POINTER_ITEM = ("{ anchors.fill: parent z: 1 PointHandler { acceptedButtons: Qt.AllButtons "
+                      "onActiveChanged: page.inputAt = Date.now() } }")
+INPUT_KEYS_OPENER = r"\bKeys\s*\.\s*onShortcutOverride\s*:\s*\(\s*event\s*\)\s*=>\s*\{"
+
+
+def _page_input_gate_problems(sources):
+    problems = []
+    web_name = _rel(CHAT_WEB_VIEW)
+    web = sources.get(web_name, "")
+    if len(_hits(r"(?m)^\s*readonly\s+property\s+int\s+pageInputWindow\s*:\s*1000\s*$", web)) != 1 \
+            or len(_hits(r"\bpageInputWindow\b", web)) != 2:
+        problems.append("ChatWebView: `readonly property int pageInputWindow: 1000`, used only in pageAsksExternal")
+    body = _function_body(web, "pageAsksExternal")
+    if body is None or _squashed(body) != PAGE_ASKS_BODY:
+        problems.append(f"ChatWebView.pageAsksExternal must be exactly `{PAGE_ASKS_BODY}`")
+    # askExternal: called only by pageAsksExternal; pageAsksExternal only by the two handlers.
+    for name, code in sources.items():
+        for match in re.finditer(r"\baskExternal\s*\(", code):
+            line = code[:match.end()].splitlines()[-1]
+            if name == web_name and re.search(r"\bfunction\s+askExternal\s*\($", line):
+                continue
+            if name == web_name and body and web.find(body) <= match.start() < web.find(body) + len(body) \
+                    and re.search(r"\bchatWeb\s*\.\s*askExternal\s*\($", line):
+                continue
+            problems.append(f"{name}:{_line_of(code, match.start())}: askExternal outside pageAsksExternal")
+        calls = [match.start() for match in re.finditer(r"\bpageAsksExternal\s*\(", code)]
+        if name != web_name and calls:
+            problems.append(f"{name}: pageAsksExternal is only for ChatWebView's page handlers")
+    handler_calls = []
+    for opener in (NAV_HANDLER, NEW_WINDOW_HANDLER):
+        for start, block in _blocks(web, opener):
+            handler_calls += [start + found.start() for found in re.finditer(r"\bpageAsksExternal\s*\(", block)]
+    all_calls = [match.start() for match in re.finditer(r"\bpageAsksExternal\s*\(", web)]
+    if len(handler_calls) != 2 or len(all_calls) != 3:
+        problems.append("ChatWebView: pageAsksExternal is called once in each page handler and nowhere else")
+    # The cut-off: stamped only by clearExternal.
+    clear = _function_body(web, "clearExternal") or ""
+    stamps = [match.start() for match in re.finditer(r"\bexternalClearedAt\s*=(?!=)", web)]
+    if len(stamps) != 1 or not re.search(r"chatWeb\s*\.\s*externalClearedAt\s*=\s*Date\s*\.\s*now\s*\(\s*\)", clear) \
+            or not clear or not (web.find(clear) <= stamps[0] < web.find(clear) + len(clear)) \
+            or len(_hits(r"(?m)^\s*property\s+double\s+externalClearedAt\s*:\s*0\s*$", web)) != 1:
+        problems.append("ChatWebView: `property double externalClearedAt: 0`, set only by clearExternal to Date.now()")
+    # The input record: written only by the two recorders, from Qt input.
+    if len(_hits(r"(?m)^\s*property\s+double\s+inputAt\s*:\s*0\s*$", web)) != 1:
+        problems.append("ChatWebView: the page's `property double inputAt: 0`, once")
+    keys = [block for _, block in _blocks(web, INPUT_KEYS_OPENER)]
+    if len(keys) != 1 or _squashed(keys[0]) != INPUT_KEYS_BODY:
+        problems.append(f"ChatWebView: Keys.onShortcutOverride on the page must be exactly `{INPUT_KEYS_BODY}` "
+                        "(Enter only, never accepted)")
+    holders = sorted(((start, block) for start, block in _blocks(web, r"(?<![\w.])Item\s*\{")
+                      if re.search(r"\bPointHandler\b", block)), key=lambda found: len(found[1]))
+    items = holders[:1]
+    if len(_hits(r"\b(?:PointHandler|TapHandler|HoverHandler|DragHandler|WheelHandler|MouseArea)\b", web)) != 1 \
+            or len(items) != 1 or _squashed(items[0][1]) != INPUT_POINTER_ITEM:
+        problems.append(f"ChatWebView: the pointer recorder must be exactly `Item {INPUT_POINTER_ITEM}`")
+    writes = [match.start() for match in re.finditer(r"\binputAt\s*=(?!=)", web)]
+    spans = [(web.find(block), web.find(block) + len(block)) for block in keys[:1] + [block for _, block in items]]
+    inside = [at for at in writes if any(lo <= at < hi for lo, hi in spans)]
+    if len(writes) != 2 or len(inside) != 2:
+        problems.append("ChatWebView: page.inputAt is written only by the Enter and pointer recorders")
+    page_blocks = [block for _, block in _blocks(web, r"\bWebEngineView\s*\{(?=\s*id\s*:\s*page\b)")]
+    if len(page_blocks) != 1 or not keys or not items or keys[0] not in page_blocks[0] \
+            or items[0][1] not in page_blocks[0]:
+        problems.append("ChatWebView: both input recorders sit on the page's WebEngineView (id: page)")
+    for name, code in sources.items():
+        if name != web_name and (_hits(r"\binputAt\b", code) or _hits(r"\bexternalClearedAt\b", code)):
+            problems.append(f"{name}: inputAt and externalClearedAt are ChatWebView's own")
+    return problems
+
+
+def test_page_asked_prompts_need_real_input():
+    problems = _page_input_gate_problems(_all_code())
+    assert not problems, problems
+
+
+PAGE_INPUT_MUTATIONS = {
+    "no input check": ("        if (!view || !(view.inputAt > chatWeb.externalClearedAt)\n"
+                       "                || Date.now() - view.inputAt > chatWeb.pageInputWindow)\n            return\n", ""),
+    "input before the answer counts": ("!(view.inputAt > chatWeb.externalClearedAt)", "!(view.inputAt > 0)"),
+    "no time window": ("\n                || Date.now() - view.inputAt > chatWeb.pageInputWindow)", ")"),
+    "longer window": ("readonly property int pageInputWindow: 1000", "readonly property int pageInputWindow: 30000"),
+    "window not readonly": ("readonly property int pageInputWindow: 1000", "property int pageInputWindow: 1000"),
+    "window changed elsewhere": ("    function focusView() {\n", "    function focusView() {\n        chatWeb.pageInputWindow = 1e9\n"),
+    "cut-off not stamped": ("        chatWeb.externalClearedAt = Date.now()\n", ""),
+    "cut-off stamped elsewhere": ("    function focusView() {\n", "    function focusView() {\n        chatWeb.externalClearedAt = 0\n"),
+    "nav handler skips the gate": ("chatWeb.pageAsksExternal(page, request.url.toString())", "chatWeb.askExternal(request.url.toString())"),
+    "window handler skips the gate": ("chatWeb.pageAsksExternal(page, url)", "chatWeb.askExternal(url)"),
+    "gate called elsewhere": ("    function focusView() {\n", "    function focusView() {\n        chatWeb.pageAsksExternal(chatWeb.activeView, \"https://x.example/\")\n"),
+    "askExternal called elsewhere": ("    function focusView() {\n", "    function focusView() {\n        chatWeb.askExternal(\"https://x.example/\")\n"),
+    "every key counts": ("                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)\n"
+                         "                    page.inputAt = Date.now()\n", "                page.inputAt = Date.now()\n"),
+    "key accepted": ("                    page.inputAt = Date.now()\n            }\n            // Over the page",
+                     "                    page.inputAt = Date.now()\n                event.accepted = true\n            }\n            // Over the page"),
+    "space counts": ("event.key === Qt.Key_Return || event.key === Qt.Key_Enter",
+                     "event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space"),
+    "pointer recorder dropped": ("                PointHandler {\n                    acceptedButtons: Qt.AllButtons\n"
+                                 "                    onActiveChanged: page.inputAt = Date.now()\n                }\n", ""),
+    "press only (2a)": ("                    onActiveChanged: page.inputAt = Date.now()\n",
+                        "                    onActiveChanged: {\n                        if (active)\n"
+                        "                            page.inputAt = Date.now()\n                    }\n"),
+    "release only": ("onActiveChanged: page.inputAt = Date.now()", "onActiveChanged: if (!active) page.inputAt = Date.now()"),
+    "hover counts": ("                PointHandler {\n                    acceptedButtons: Qt.AllButtons\n",
+                     "                HoverHandler {\n                    onHoveredChanged: page.inputAt = Date.now()\n                }\n"
+                     "                PointHandler {\n                    acceptedButtons: Qt.AllButtons\n"),
+    "pointer recorder grabs": ("                    acceptedButtons: Qt.AllButtons\n",
+                               "                    acceptedButtons: Qt.AllButtons\n                    grabPermissions: PointerHandler.TakeOverForbidden\n"),
+    "page sets the input": ("            onLoadingChanged: (loadingInfo) => {\n",
+                            "            onLoadingChanged: (loadingInfo) => {\n                page.inputAt = Date.now()\n"),
+    "script sets the input": ("            onLoadingChanged: (loadingInfo) => {\n",
+                              "            onLoadingChanged: (loadingInfo) => {\n                page.runJavaScript(\"1\", function () { page.inputAt = Date.now() })\n"),
+    "navigation sets the input": ("            onNavigationRequested: (request) => {\n",
+                                  "            onNavigationRequested: (request) => {\n                page.inputAt = Date.now()\n"),
+    "input starts set": ("            property double inputAt: 0\n", "            property double inputAt: Date.now()\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PAGE_INPUT_MUTATIONS))
+def test_proof_page_input_gate_rule_catches(name):
+    old, new = PAGE_INPUT_MUTATIONS[name]
+    sources = _all_code()
+    sources[_rel(CHAT_WEB_VIEW)] = _mutated(CHAT_WEB_VIEW, old, new)
+    assert _page_input_gate_problems(sources)
+
+
+def test_proof_page_input_state_elsewhere_is_caught():
+    sources = _all_code()
+    sources[_rel(CHAT_VIEW)] += "\nItem { Component.onCompleted: chatView.web.currentView.inputAt = Date.now() }\n"
+    assert _page_input_gate_problems(sources)
 
 
 # N4 A "Send the form again" pass is good for ownerPassLifetime (10 s) only:
@@ -7153,7 +7301,7 @@ NAV_HEAD = (
     "=== WebEngineNavigationRequest.LinkClickedNavigation, siteId: page.site, "
     "customUrls: chatWeb.customUrls, userSites: chatWeb.userSites }) if (verdict === \"allow\") {"
 )
-NAV_TAIL = " request.reject() if (verdict === \"external\") chatWeb.askExternal(request.url.toString()) }"
+NAV_TAIL = " request.reject() if (verdict === \"external\") chatWeb.pageAsksExternal(page, request.url.toString()) }"
 
 
 def _normalized(text):
@@ -7542,8 +7690,8 @@ NEW_WINDOW_CLICK_MUTATIONS = [
     (CHAT_WEB_VIEW, "userInitiated: request.userInitiated === true,", "userInitiated: request.userInitiated || true,"),
     (CHAT_SITES_JS, '        return clicked ? "overlay" : "block"\n    if (!https)',
      '        return "overlay"\n    if (!https)'),
-    (CHAT_SITES_JS, '        return clicked ? "overlay" : "block"\n    return "external"',
-     '        return "overlay"\n    return "external"'),
+    (CHAT_SITES_JS, '        return clicked ? "overlay" : "block"\n    if (site.local && (isLocalAddress',
+     '        return "overlay"\n    if (site.local && (isLocalAddress'),
     (CHAT_SITES_JS, "    var clicked = info.userInitiated === true\n", "    var clicked = true\n"),
     (CHAT_SITES_JS, "    var clicked = info.userInitiated === true\n",
      "    var clicked = info.userInitiated !== false\n"),
@@ -11314,6 +11462,47 @@ GOLDEN_HOME_URLS = ("http://localhost:3000/", "https://127.0.0.1:8443/", "http:/
                     "http://192.168.1.20:3000/", "https://10.0.0.5/", "http://[fd00::20]:3000/")
 # Task 006 rule 3: the recorded 005 table itself (ChatSitesGolden.js at 1524dd0) never changes.
 GOLDEN_SHA256 = "d1725fb2e1348bc732c5952d3583e9ce782f976645a23e33431e26f389cf7bd4"
+# Task 013 F-A (user decision): the changed http answers are listed in tst_chat_sites.qml's
+# http013 (http addresses only, "block" -> "external" in the clicked link and the two clicked
+# windows); P1-http-2 took Local's 6 other-loopback rows out again (22 -> 16 rows, L-B) and
+# added private013 (84 rows: https private literals of the six built-ins, "external" or
+# "overlay" -> "block" in the clicked link and the windows 4, 5, 7; L-C). Both literals are
+# pinned here, and goldenExpected checks each row's change.
+HTTP_013_SHA256 = "d7c1044cedf60d6cb93cbceeb546bd82b2a9b823558447978d22d655b21af540"
+HTTP_013_LITERAL = re.compile(r"(?ms)^    readonly property var http013: \(\{\n(.*?)\n    \}\)$")
+PRIVATE_013_SHA256 = "f68ea27fd1022b6cbac57b2e5b31d9eddb22874f36a4058b33dd1f0b81fac33f"
+PRIVATE_013_LITERAL = re.compile(r"(?ms)^    readonly property var private013: \(\{\n(.*?)\n    \}\)$")
+# P1-http-2b (user decision 2026-11-26): localHttps013, 36 rows: Local, https, this computer or
+# a private literal; "external" -> "block" at the clicked link (1, when not a Local host) and the
+# windows 5 and 7 only.
+LOCAL_HTTPS_013_SHA256 = "098dc0c52e66fda03a2b5c2a5a5aa64fd774c64f4178c597ebd4cf34b1d5dc1e"
+LOCAL_HTTPS_013_LITERAL = re.compile(r"(?ms)^    readonly property var localHttps013: \(\{\n(.*?)\n    \}\)$")
+HTTP_013_CHECKS = ("for (var key in Golden.EXPECTED) expected[key] = Golden.EXPECTED[key]",
+                   "compare(changed.length, 16)",
+                   "compare([was[at], now[at]], [\"block\", \"external\"]",
+                   "[1, 4, 5].indexOf(at) >= 0",
+                   "now[4] === \"external\" && now[5] === \"external\" && now[6] === \"block\" && now[7] === \"block\"",
+                   "verify(changed[index].indexOf(\" http://\") > 0, changed[index])",
+                   "expected[changed[index]] = testCase.http013[changed[index]]",
+                   "var closed = Object.keys(testCase.private013)",
+                   "compare(closed.length, 84)",
+                   "verify(Golden.EXPECTED[name] !== undefined && testCase.http013[name] === undefined, name)",
+                   "if ([1, 4, 5, 7].indexOf(spot) < 0) compare(after[spot], before[spot], name + \" @\" + spot)",
+                   "compare([[\"external\", \"overlay\"].indexOf(before[spot]) >= 0, after[spot]], [true, \"block\"],",
+                   "verify(parts[0] !== \"local\" && parts[2].indexOf(\"https://\") === 0 "
+                   "&& ChatSites.isPrivateLiteral(ChatSites.parseUrl(parts[2]).host), name)",
+                   "expected[name] = testCase.private013[name]",
+                   "var local = Object.keys(testCase.localHttps013)",
+                   "compare(local.length, 36)",
+                   "testCase.http013[key3] === undefined && testCase.private013[key3] === undefined, key3)",
+                   "if ([1, 5, 7].indexOf(spot3) < 0 || now3[spot3] === was3[spot3]) "
+                   "compare(now3[spot3], was3[spot3], key3 + \" @\" + spot3)",
+                   "compare([was3[spot3], now3[spot3]], [\"external\", \"block\"], key3 + \" @\" + spot3)",
+                   "verify(now3[5] === \"block\" && now3[7] === \"block\", key3)",
+                   "verify(bits[0] === \"local\" && bits[2].indexOf(\"https://\") === 0 "
+                   "&& (ChatSites.isLocalAddress(host3) || ChatSites.isPrivateLiteral(host3)), key3)",
+                   "expected[key3] = testCase.localHttps013[key3]",
+                   "return expected")
 
 
 def _golden_table_problems(test_code, golden):
@@ -11325,10 +11514,24 @@ def _golden_table_problems(test_code, golden):
                    # Task 006 rule 3: the six local and home-network entries, all valid.
                    "var home = added.concat([", "compare(ChatSites.validUserSites(home).length, 9)",
                    *[f'url: "{url}"' for url in GOLDEN_HOME_URLS],
-                   "compare(now[keys[index]], Golden.EXPECTED[keys[index]]",
+                   "var expected = testCase.goldenExpected()",
+                   "compare(now[keys[index]], expected[keys[index]]",
                    "compare(keys.length, Golden.SITE_IDS.length * Golden.ADDRESSES.length * 2)"):
         if _squashed(needed) not in _squashed(body):
             problems.append(f"test_builtinGoldenTable must keep `{needed}`")
+    delta = _function_body(test_code, "goldenExpected")
+    for needed in HTTP_013_CHECKS:
+        if delta is None or _squashed(needed) not in _squashed(delta):
+            problems.append(f"goldenExpected must keep `{needed}`")
+    literal = HTTP_013_LITERAL.findall(test_code)
+    if len(literal) != 1 or hashlib.sha256(_squashed(literal[0]).encode("utf-8")).hexdigest() != HTTP_013_SHA256:
+        problems.append("tst_chat_sites.qml: the 013 F-A rows (http013) must be exactly the reviewed 16")
+    closed = PRIVATE_013_LITERAL.findall(test_code)
+    if len(closed) != 1 or hashlib.sha256(_squashed(closed[0]).encode("utf-8")).hexdigest() != PRIVATE_013_SHA256:
+        problems.append("tst_chat_sites.qml: the 013 P1-http-2 rows (private013) must be exactly the reviewed 84")
+    local = LOCAL_HTTPS_013_LITERAL.findall(test_code)
+    if len(local) != 1 or hashlib.sha256(_squashed(local[0]).encode("utf-8")).hexdigest() != LOCAL_HTTPS_013_SHA256:
+        problems.append("tst_chat_sites.qml: the 013 P1-http-2b rows (localHttps013) must be exactly the reviewed 36")
     if not re.search(r'(?m)^import "ChatSitesGolden\.js" as Golden$', test_code):
         problems.append('tst_chat_sites.qml imports "ChatSitesGolden.js" as Golden')
     if not re.search(r"(?m)^var EXPECTED = \{$", golden) or len(re.findall(r'(?m)^    "[^"]+": ', golden)) < 700:
@@ -11352,7 +11555,57 @@ def test_the_builtin_golden_table_is_checked():
      '            { id: "user-00000008", name: "Private v6", url: "https://example.org/" }\n'),
     ("test", "compare(ChatSites.validUserSites(home).length, 9)", "compare(ChatSites.validUserSites(home).length, 3)"),
     ("golden", '    "https://[fd00::1]/",\n', '    "https://[fd00::2]/",\n'),
-    ("test", "compare(now[keys[index]], Golden.EXPECTED[keys[index]]", "compare(now[keys[index]], now[keys[index]]"),
+    ("test", "compare(now[keys[index]], expected[keys[index]]", "compare(now[keys[index]], now[keys[index]]"),
+    ("test", "var expected = testCase.goldenExpected()", "var expected = Golden.EXPECTED"),
+    # 013 F-A: the delta is exact and only ever block -> external for clicked answers.
+    ("test", '        "claude none http://example.com/": "block external allow allow external external block block no-page off:example.com 0",\n',
+     '        "claude none http://example.com/": "allow external allow allow external external block block no-page off:example.com 0",\n'),
+    ("test", '        "claude none http://example.com/": "block external allow allow external external block block no-page off:example.com 0",\n',
+     '        "claude none http://example.com/": "block external allow allow external external external block no-page off:example.com 0",\n'),
+    ("test", '        "claude none http://example.com/": "block external allow allow external external block block no-page off:example.com 0",\n',
+     '        "claude none http://example.com/": "block external allow allow external external block block no-page off:example.com 0",\n'
+     '        "claude none https://example.com/page": "allow allow allow allow overlay external block external page off:example.com 0",\n'),
+    ("test", '        "claude none http://example.com/": "block external allow allow external external block block no-page off:example.com 0",\n', ""),
+    ("test", "compare(changed.length, 16)", "compare(changed.length, changed.length)"),
+    # P1-http-2: Local's other loopback windows back in http013 (the old 22).
+    ("test", '        "local none http://localhost:3000/": "allow allow allow allow external external block block page on: 3000",\n',
+     '        "local none http://localhost:3000/": "allow allow allow allow external external block block page on: 3000",\n'
+     '        "local none http://127.0.0.1:3000/": "block block block block external external block block no-page on: 3000",\n'),
+    # P1-http-2: the private-literal rows are exact and only ever close clicked answers.
+    ("test", '        "claude none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",\n',
+     '        "claude none https://10.0.0.1/": "allow external allow allow block block block block page off:10.0.0.1 0",\n'),
+    ("test", '        "claude none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",\n',
+     '        "claude none https://10.0.0.1/": "block block allow allow block block block block page off:10.0.0.1 0",\n'),
+    ("test", '        "claude none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",\n', ""),
+    ("test", '        "claude none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",\n',
+     '        "claude none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",\n'
+     '        "local none https://10.0.0.1/": "allow block allow allow block block block block page off:10.0.0.1 0",\n'),
+    ("test", "compare(closed.length, 84)", "compare(closed.length, closed.length)"),
+    ("test", "if ([1, 4, 5, 7].indexOf(spot) < 0)", "if ([0, 1, 4, 5, 7].indexOf(spot) < 0)"),
+    ("test", '[["external", "overlay"].indexOf(before[spot]) >= 0, after[spot]]', '[true, after[spot]]'),
+    ("test", 'verify(parts[0] !== "local" && parts[2]', 'verify(parts[2]'),
+    ("test", "            expected[name] = testCase.private013[name]\n", ""),
+    ("test", "testCase.http013[name] === undefined", "true"),
+    # P1-http-2b: the Local https rows are exact and only ever close answers 1, 5 and 7.
+    ("test", '        "local none https://localhost/": "allow allow allow allow overlay block block block page on: 443",\n',
+     '        "local none https://localhost/": "allow allow allow allow overlay external block block page on: 443",\n'),
+    ("test", '        "local none https://localhost/": "allow allow allow allow overlay block block block page on: 443",\n',
+     '        "local none https://localhost/": "allow allow allow allow block block block block page on: 443",\n'),
+    ("test", '        "local none https://localhost/": "allow allow allow allow overlay block block block page on: 443",\n', ""),
+    ("test", '        "local none https://localhost/": "allow allow allow allow overlay block block block page on: 443",\n',
+     '        "local none https://localhost/": "allow allow allow allow overlay block block block page on: 443",\n'
+     '        "local none https://example.com/page": "allow block allow allow overlay block block block page off:example.com 0",\n'),
+    ("test", "compare(local.length, 36)", "compare(local.length, local.length)"),
+    ("test", "if ([1, 5, 7].indexOf(spot3) < 0", "if ([1, 4, 5, 7].indexOf(spot3) < 0"),
+    ("test", 'compare([was3[spot3], now3[spot3]], ["external", "block"]', 'compare([was3[spot3], now3[spot3]], [was3[spot3], now3[spot3]]'),
+    ("test", 'verify(now3[5] === "block" && now3[7] === "block", key3)', "verify(true, key3)"),
+    ("test", "(ChatSites.isLocalAddress(host3) || ChatSites.isPrivateLiteral(host3))", "true"),
+    ("test", "            expected[key3] = testCase.localHttps013[key3]\n", ""),
+    ("test", "&& testCase.private013[key3] === undefined", ""),
+    ("test", '[1, 4, 5].indexOf(at) >= 0', '[0, 1, 4, 5, 6, 7].indexOf(at) >= 0'),
+    ("test", 'compare([was[at], now[at]], ["block", "external"]', 'compare([was[at], now[at]], [was[at], now[at]]'),
+    ("test", '&& now[6] === "block" && now[7] === "block"', ""),
+    ("test", "            expected[changed[index]] = testCase.http013[changed[index]]\n", ""),
     ("golden", "var EXPECTED = {\n", "var EXPECTED = {}\nvar OLD = {\n"),
 ])
 def test_proof_golden_table_rule_catches(which, old, new):
@@ -11493,6 +11746,28 @@ def _raw_function(raw, name):
 
 # Rule 2 (M-A): the built-in machinery is byte-for-byte the 1524dd0 code, so the
 # golden table stays identical, not merely equivalent; new windows are unchanged (M-G).
+# Task 013 F-A (user decision) changed exactly one line of classifyNewWindow: a clicked
+# http window asks for the browser. P1-http-2 (user decision on the audit) narrowed it:
+# Local's http windows reach this computer or a private literal only at Local's own
+# origin (L-B); and moved the private-literal block from added sites to every site but
+# Local (L-C). The hash is taken with both lines put back, so nothing else in the
+# function may change.
+NEW_WINDOW_013_LINE = ('        return clicked && isHttpUrl(url) && (httpAllowed(site, parsed)\n'
+                       '            || (!isLocalAddress(parsed.host) && !isPrivateLiteral(parsed.host))) '
+                       '? "external" : "block"\n    if (hostMatches')
+NEW_WINDOW_005_LINE = '        return "block"\n    if (hostMatches'
+NEW_WINDOW_PRIVATE_013 = ('    if (!site.local && parsed !== null && parsed.host !== "" '
+                          '&& isPrivateLiteral(parsed.host))\n        return "block"\n')
+NEW_WINDOW_PRIVATE_005 = ('    if (site.user === true && parsed !== null && parsed.host !== "" '
+                          '&& isPrivateLiteral(parsed.host))\n        return "block"\n')
+# P1-http-2b (user decision 2026-11-26): Local's https windows reach this computer or a
+# private literal only at its own https origin; the block is taken out for the hash.
+NEW_WINDOW_LOCAL_HTTPS_013 = ('    if (site.local && (isLocalAddress(parsed.host) || isPrivateLiteral(parsed.host))\n'
+                              '            && !isLocalHttpsOrigin(site, parsed))\n        return "block"\n')
+LOCAL_HTTPS_ORIGIN_BODY = ('{ var own = parseUrl(site.url) return site.local === true && own !== null && own.scheme === "https" '
+                           '&& own.host !== "" && parsed !== null && parsed.scheme === "https" '
+                           '&& normalizeHost(parsed.host) === normalizeHost(own.host) '
+                           '&& (parsed.port !== "" ? parsed.port : "443") === (own.port !== "" ? own.port : "443") }')
 UNCHANGED_005_FUNCTIONS = {
     "parseUrl": "018718178a4ae1e2c74868a229a0fb1f72710a4c4e75084fae01fb2f3284f820",
     "validateCustomUrl": "5e648f452f3357d0ebc15ba73140081956cbd987747e41520caeb6cb5bd232f0",
@@ -11552,9 +11827,27 @@ def _narrow_parser_problems(chat_sites_raw, sources):
     problems = []
     for name, digest in UNCHANGED_005_FUNCTIONS.items():
         text = _raw_function(chat_sites_raw, name)
+        if name == "classifyNewWindow" and text is not None:
+            if text.count(NEW_WINDOW_013_LINE) != 1:
+                problems.append("ChatSites.classifyNewWindow: the 013 http window line (F-A, P1-http-2) right "
+                                "after `if (!https)`, once")
+            if text.count(NEW_WINDOW_PRIVATE_013) != 1:
+                problems.append("ChatSites.classifyNewWindow: the private-literal block for every site but Local "
+                                "(P1-http-2), once")
+            if text.count(NEW_WINDOW_LOCAL_HTTPS_013) != 1:
+                problems.append("ChatSites.classifyNewWindow: Local's https own-origin block (P1-http-2b) right "
+                                'before the last `return "external"`, once')
+            text = text.replace(NEW_WINDOW_013_LINE, NEW_WINDOW_005_LINE, 1)
+            text = text.replace(NEW_WINDOW_PRIVATE_013, NEW_WINDOW_PRIVATE_005, 1)
+            text = text.replace(NEW_WINDOW_LOCAL_HTTPS_013 + '    return "external"\n}', '    return "external"\n}', 1)
         if text is None or hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
             problems.append(f"ChatSites.{name} must stay byte-identical to 1524dd0 (006 M-A)")
     code = _strip_comments(chat_sites_raw)
+    own = _function_body(code, "isLocalHttpsOrigin")
+    if own is None or _squashed(own) != LOCAL_HTTPS_ORIGIN_BODY \
+            or len(_hits(r"\bisLocalHttpsOrigin\s*\(", code)) != 2:
+        problems.append(f"ChatSites.isLocalHttpsOrigin must be exactly `{LOCAL_HTTPS_ORIGIN_BODY}`, used only "
+                        "in classifyNewWindow")
     body = _function_body(code, "parseUserUrl")
     if body is None or _squashed(body) != PARSE_USER_URL_BODY:
         problems.append(f"ChatSites.parseUserUrl must be exactly `{PARSE_USER_URL_BODY}`")
@@ -11609,6 +11902,34 @@ NARROW_PARSER_MUTATIONS = {
     "wide parser reads more": (CHAT_SITES_JS, "    var parsed = parseUrl(value)\n    if (parsed !== null)\n        return parsed\n", ""),
     "wide parser zone ids": (CHAT_SITES_JS, "/^(\\[[0-9A-Fa-f:]{2,39}\\])", "/^(\\[[0-9A-Fa-f:%a-z]{2,39}\\])"),
     "row host for built-ins": (CONFIG_CHAT, ROW_HOST_PARSE, "var parsed = ChatSites.parseUserUrl(address)"),
+    "013 line dropped": (CHAT_SITES_JS, NEW_WINDOW_013_LINE, NEW_WINDOW_005_LINE),
+    "013 line without the click": (CHAT_SITES_JS, NEW_WINDOW_013_LINE,
+                                   NEW_WINDOW_013_LINE.replace("clicked && isHttpUrl", "isHttpUrl")),
+    "013 line any local target": (CHAT_SITES_JS, NEW_WINDOW_013_LINE,
+                                  '        return clicked && isHttpUrl(url) ? "external" : "block"\n    if (hostMatches'),
+    "013 line without the own-origin check": (CHAT_SITES_JS, NEW_WINDOW_013_LINE,
+                                              NEW_WINDOW_013_LINE.replace("httpAllowed(site, parsed)", "true")),
+    "013 line private literals for Local": (CHAT_SITES_JS, NEW_WINDOW_013_LINE,
+                                            NEW_WINDOW_013_LINE.replace(" && !isPrivateLiteral(parsed.host)", "")),
+    "private block for added sites only": (CHAT_SITES_JS, NEW_WINDOW_PRIVATE_013, NEW_WINDOW_PRIVATE_005),
+    "private block dropped": (CHAT_SITES_JS, NEW_WINDOW_PRIVATE_013, ""),
+    "private block for Local too": (CHAT_SITES_JS, NEW_WINDOW_PRIVATE_013,
+                                    NEW_WINDOW_PRIVATE_013.replace("!site.local && ", "")),
+    "Local https block dropped": (CHAT_SITES_JS, NEW_WINDOW_LOCAL_HTTPS_013, ""),
+    "Local https block without the own origin": (CHAT_SITES_JS, NEW_WINDOW_LOCAL_HTTPS_013,
+                                                 NEW_WINDOW_LOCAL_HTTPS_013.replace(
+                                                     "\n            && !isLocalHttpsOrigin(site, parsed)", "")),
+    "Local https block skips private literals": (CHAT_SITES_JS, NEW_WINDOW_LOCAL_HTTPS_013,
+                                                 NEW_WINDOW_LOCAL_HTTPS_013.replace(" || isPrivateLiteral(parsed.host)", "")),
+    "Local https own origin any port": (CHAT_SITES_JS, '&& (parsed.port !== "" ? parsed.port : "443") === (own.port !== "" ? own.port : "443")',
+                                        ""),
+    "Local https own origin any host": (CHAT_SITES_JS, "        && normalizeHost(parsed.host) === normalizeHost(own.host)\n", ""),
+    "Local https own origin over http": (CHAT_SITES_JS, '&& parsed !== null && parsed.scheme === "https"', "&& parsed !== null"),
+    "own origin check used elsewhere": (CHAT_SITES_JS, "function classifyHomeNavigation(site, info) {\n",
+                                        "function classifyHomeNavigation(site, info) {\n    if (isLocalHttpsOrigin(site, parseUrl(info.url))) return \"external\"\n"),
+    "013 line and another change": (CHAT_SITES_JS, '    if (hostMatches(parsed.host, site.auth_hosts))\n',
+                                    '    if (isHttpUrl(url))\n        return "external"\n'
+                                    '    if (hostMatches(parsed.host, site.auth_hosts))\n'),
     "wide parse in a view": (CHAT_VIEW, "    readonly property bool localSite:",
                              "    readonly property var wide: ChatSites.parseUserUrl(chatView.siteId)\n    readonly property bool localSite:"),
 }
@@ -11640,8 +11961,10 @@ IS_OWN_ORIGIN_BODY = ('{ return parsed !== null && parsed.host !== "" && typeof 
 CLASSIFY_HOME_NAVIGATION_BODY = (
     '{ var parsed = parseUserUrl(info.url) if (parsed === null || (parsed.scheme !== "http" && parsed.scheme !== "https") '
     '|| parsed.host === "") return "block" if (isOwnOrigin(site, parsed)) return "allow" '
-    'if (isHomeTarget(parsed.host) || parsed.scheme !== "https") return "block" '
-    'if (info.linkClicked && !knownHost(site, parsed.host)) return "external" return "allow" }'
+    # 013 F-A: public http off the site asks for the browser only as a clicked link.
+    'if (isHomeTarget(parsed.host)) return "block" '
+    'if (info.linkClicked && !knownHost(site, parsed.host)) return "external" '
+    'return parsed.scheme === "https" ? "allow" : "block" }'
 )
 CLASSIFY_HOME_SUBFRAME_BODY = (
     '{ var parsed = parseUserUrl(url) if (parsed === null) return /^https?:/i.test(url) ? "block" : "allow" '
@@ -11683,8 +12006,10 @@ EXACT_ORIGIN_MUTATIONS = {
                 '        + (parsed.port !== "" ? parsed.port : parsed.scheme === "https" ? "443" : "80")',
                 '    return parsed.scheme + "://" + parsed.host'),
     "no scheme": ('    return parsed.scheme + "://" + parsed.host + ":"', '    return "//" + parsed.host + ":"'),
-    "any private http": ('    if (isHomeTarget(parsed.host) || parsed.scheme !== "https")\n        return "block"\n',
-                         '    if (parsed.scheme !== "https" && !isPrivateLiteral(parsed.host))\n        return "block"\n'),
+    "any private http": ('    if (isHomeTarget(parsed.host))\n        return "block"\n    if (info.linkClicked',
+                         '    if (!isPrivateLiteral(parsed.host) && parsed.scheme !== "https")\n        return "block"\n'
+                         '    if (info.linkClicked'),
+    "http in view": ('    return parsed.scheme === "https" ? "allow" : "block"\n}', '    return "allow"\n}'),
     "any http frame": ('    return isHomeTarget(parsed.host) || parsed.scheme !== "https" ? "block" : "allow"',
                        '    return isHomeTarget(parsed.host) ? "block" : "allow"'),
     "any home page to the browser": ('        return wide.scheme === "https" && !isHomeTarget(wide.host)', "        return true"),
@@ -11864,7 +12189,7 @@ def test_proof_home_blocking_rule_catches(name):
 
 def test_proof_new_windows_stay_005():
     raw = CHAT_SITES_JS.read_text(encoding="utf-8")
-    old = '    if (site.user === true && parsed !== null && parsed.host !== "" && isPrivateLiteral(parsed.host))\n        return "block"\n'
+    old = NEW_WINDOW_PRIVATE_013
     assert old in raw
     assert _narrow_parser_problems(raw.replace(old, "", 1), _all_code())
 
@@ -13637,3 +13962,107 @@ def test_applet_id_properties_are_doubles(path, name):
 def test_proof_applet_id_type_rule_catches(path, name):
     code = re.sub(rf"(?m)^(\s*property\s+)double(\s+{name}\s*:)", r"\1int\2", _read_code(path))
     assert _applet_id_type_problems(path, name, code)
+
+
+# --- Task 013 F-A: page-asked http reaches the browser prompt -------------------------------------
+#
+# User decision after the P1 VM proof: an http link-type navigation off the site and a
+# clicked (userInitiated) http window get the "Open <host> in your browser?" prompt, with
+# the insecure wording until the origin is acknowledged, instead of being dropped.
+# linkClicked is WebEngine's LinkClickedNavigation, which page script makes too
+# (location.href after load, a.click(), dispatchEvent; audit L-A): only redirects, forms,
+# typed and history navigations are "not linkClicked". ChatWebView shows a page-asked
+# prompt only after the user's own input (rule test_page_asked_prompts_need_real_input).
+# Everything else stays: same-site http is blocked unless it is Local's own origin, script
+# windows and non-link navigations to http are blocked, other schemes and parser tricks
+# are refused (parseUrl). P1-http-2 (user decision on the audit): Local's http links and
+# windows never ask for this computer or a private literal, except its own origin for a
+# window (L-B); no site but Local asks for a private literal over https either (L-C).
+HTTP_NAV_013 = ('if (parsed.scheme === "http") { if (httpAllowed(site, parsed)) return "allow" '
+                'return info.linkClicked && !knownHost(site, parsed.host) && !isLocalAddress(parsed.host) '
+                '&& !isPrivateLiteral(parsed.host) ? "external" : "block" }')
+HTTPS_NAV_013 = ('if (parsed.scheme === "https") { if (info.linkClicked && !knownHost(site, parsed.host)) '
+                 'return !isLocalAddress(parsed.host) && !isPrivateLiteral(parsed.host) ? "external" : "block" '
+                 'return "allow" }')
+HTTP_WINDOW_013 = ('if (!https) return clicked && isHttpUrl(url) && (httpAllowed(site, parsed) '
+                   '|| (!isLocalAddress(parsed.host) && !isPrivateLiteral(parsed.host))) ? "external" : "block"')
+PRIVATE_WINDOW_013 = 'if (!site.local && parsed !== null && parsed.host !== "" && isPrivateLiteral(parsed.host)) return "block"'
+NEW_WINDOW_ASK = r"request\s*\.\s*userInitiated\s*&&\s*ChatSites\s*\.\s*isWebUrl\s*\(\s*url\s*\)"
+
+
+def _http_page_ask_problems(sites, web):
+    problems = []
+    nav = _squashed(_function_body(sites, "classifyNavigation") or "")
+    if nav.count(HTTP_NAV_013) != 1 or nav.count('"external"') != 2:
+        problems.append(f"classifyNavigation: http asks only as a link off the site to a public host, exactly "
+                        f'`{HTTP_NAV_013}`, and "external" only there and for https')
+    if nav.count(HTTPS_NAV_013) != 1:
+        problems.append(f"classifyNavigation: https asks only for a public host (P1-http-2, -2b), exactly `{HTTPS_NAV_013}`")
+    window = _squashed(_function_body(sites, "classifyNewWindow") or "")
+    if window.count(HTTP_WINDOW_013) != 1 or window.count('"external"') != 2 \
+            or window.count("isHttpUrl(") != 1:
+        problems.append(f"classifyNewWindow: a clicked http window asks, exactly `{HTTP_WINDOW_013}`")
+    if window.count(PRIVATE_WINDOW_013) != 1 or window.index(PRIVATE_WINDOW_013) > window.find("var https"):
+        problems.append(f"classifyNewWindow: first `{PRIVATE_WINDOW_013}`, before any answer but the local block")
+    handlers = [body for _, body in _blocks(web, NEW_WINDOW_HANDLER)]
+    if len(handlers) != 1 or len(re.findall(NEW_WINDOW_ASK, handlers[0])) != 1:
+        problems.append("onNewWindowRequested: askExternal still needs request.userInitiated (a click)")
+    navs = [body for _, body in _blocks(web, NAV_HANDLER)]
+    if len(navs) != 1 or not _normalized(navs[0]).startswith(NAV_HEAD):
+        problems.append("onNavigationRequested: linkClicked is exactly LinkClickedNavigation")
+    return problems
+
+
+def test_page_asked_http_reaches_the_prompt_only_from_links_and_clicked_windows():
+    problems = _http_page_ask_problems(_read_code(CHAT_SITES_JS), _read_code(CHAT_WEB_VIEW))
+    assert not problems, problems
+
+
+_HTTP_NAV_LINE = ('        return info.linkClicked && !knownHost(site, parsed.host) && !isLocalAddress(parsed.host)\n'
+                  '            && !isPrivateLiteral(parsed.host) ? "external" : "block"\n    }')
+_HTTP_WINDOW_LINE = ('        return clicked && isHttpUrl(url) && (httpAllowed(site, parsed)\n'
+                     '            || (!isLocalAddress(parsed.host) && !isPrivateLiteral(parsed.host))) ? "external" : "block"')
+HTTP_PAGE_ASK_MUTATIONS = {
+    "http link allowed in the view": (CHAT_SITES_JS, _HTTP_NAV_LINE, _HTTP_NAV_LINE.replace('"external" : "block"', '"external" : "allow"')),
+    "any http navigation asks": (CHAT_SITES_JS, _HTTP_NAV_LINE, _HTTP_NAV_LINE.replace("info.linkClicked && ", "")),
+    "same-site http asks": (CHAT_SITES_JS, _HTTP_NAV_LINE, _HTTP_NAV_LINE.replace(" && !knownHost(site, parsed.host)", "")),
+    "Local http links to this computer ask": (CHAT_SITES_JS, _HTTP_NAV_LINE,
+                                              _HTTP_NAV_LINE.replace(" && !isLocalAddress(parsed.host)", "")),
+    "http links to private literals ask": (CHAT_SITES_JS, _HTTP_NAV_LINE,
+                                           _HTTP_NAV_LINE.replace("\n            && !isPrivateLiteral(parsed.host)", "")),
+    "https links to private literals ask": (CHAT_SITES_JS,
+                                            'return !isLocalAddress(parsed.host) && !isPrivateLiteral(parsed.host) ? "external" : "block"',
+                                            'return "external"'),
+    "Local https links to this computer ask": (CHAT_SITES_JS,
+                                               'return !isLocalAddress(parsed.host) && !isPrivateLiteral(parsed.host) ? "external" : "block"',
+                                               'return !isPrivateLiteral(parsed.host) ? "external" : "block"'),
+    "Local https links to private literals ask (2a)": (CHAT_SITES_JS,
+                                                       'return !isLocalAddress(parsed.host) && !isPrivateLiteral(parsed.host) ? "external" : "block"',
+                                                       'return site.local || !isPrivateLiteral(parsed.host) ? "external" : "block"'),
+    "private window block for added sites only": (CHAT_SITES_JS,
+                                                  '    if (!site.local && parsed !== null && parsed.host !== "" && isPrivateLiteral',
+                                                  '    if (site.user === true && parsed !== null && parsed.host !== "" && isPrivateLiteral'),
+    "Local http windows to any local port": (CHAT_SITES_JS, _HTTP_WINDOW_LINE,
+                                             '        return clicked && isHttpUrl(url) ? "external" : "block"'),
+    "every http allowed": (CHAT_SITES_JS, "        if (httpAllowed(site, parsed))\n            return \"allow\"\n",
+                           "        return \"allow\"\n"),
+    "other schemes ask": (CHAT_SITES_JS, '    if (parsed.scheme === "http") {\n',
+                          '    if (parsed.scheme === "ftp")\n        return "external"\n    if (parsed.scheme === "http") {\n'),
+    "script http window asks": (CHAT_SITES_JS, _HTTP_WINDOW_LINE, _HTTP_WINDOW_LINE.replace("clicked && isHttpUrl", "isHttpUrl")),
+    "any window asks": (CHAT_SITES_JS, _HTTP_WINDOW_LINE, _HTTP_WINDOW_LINE.replace("clicked && isHttpUrl(url) && ", "clicked && ")),
+    "http window allowed in the view": (CHAT_SITES_JS, _HTTP_WINDOW_LINE,
+                                        _HTTP_WINDOW_LINE.replace('? "external" : "block"', '? "overlay" : "block"')),
+    "handler without the click": (CHAT_WEB_VIEW, "                else if (verdict !== \"block\" && request.userInitiated\n",
+                                  "                else if (verdict !== \"block\"\n"),
+    "every navigation a click": (CHAT_WEB_VIEW, "linkClicked: request.navigationType\n"
+                                 "                        === WebEngineNavigationRequest.LinkClickedNavigation,",
+                                 "linkClicked: true,"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(HTTP_PAGE_ASK_MUTATIONS))
+def test_proof_page_asked_http_rule_catches(name):
+    path, old, new = HTTP_PAGE_ASK_MUTATIONS[name]
+    sites = _mutated(path, old, new) if path == CHAT_SITES_JS else _read_code(CHAT_SITES_JS)
+    web = _mutated(path, old, new) if path == CHAT_WEB_VIEW else _read_code(CHAT_WEB_VIEW)
+    assert _http_page_ask_problems(sites, web)
