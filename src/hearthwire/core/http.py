@@ -3,6 +3,8 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import ssl
+import sys
 import threading
 import time
 import urllib.error
@@ -162,10 +164,35 @@ class _WatchedHTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(_WatchedHTTPSConnection, req, context=self._context)
 
 
+def tls_context() -> ssl.SSLContext:
+    """The client TLS context of every HTTPS request: http.client's default, minus the key log.
+
+    ``ssl.create_default_context()`` (which http.client uses when given no
+    context) sets ``keylog_filename`` from ``SSLKEYLOGFILE``. Setting it opens
+    that file at once and then appends every connection's session secrets, so
+    anyone who can set the helper's environment could later decrypt captured
+    provider traffic (tokens, API keys). This context is built without it:
+    the same verification (CERT_REQUIRED, host name check, the system's CA
+    store, and Python 3.13's stricter default flags on 3.13 and later) and
+    http.client's ALPN and post-handshake settings, and ``keylog_filename``
+    stays None.
+    """
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # CERT_REQUIRED, check_hostname.
+    if sys.version_info >= (3, 13):
+        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN | ssl.VERIFY_X509_STRICT
+    context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+    context.set_alpn_protocols(["http/1.1"])
+    if context.post_handshake_auth is not None:
+        context.post_handshake_auth = True
+    context.keylog_filename = None
+    return context
+
+
 # Same handlers as urlopen's default opener (proxies from the environment,
-# https), with the redirect handler replaced and the connections watched by
-# the request deadline.
-_OPENER = urllib.request.build_opener(_RefuseRedirects, _WatchedHTTPHandler, _WatchedHTTPSHandler)
+# https), with the redirect handler replaced, the connections watched by the
+# request deadline, and HTTPS always on tls_context() (never a key log).
+_OPENER = urllib.request.build_opener(_RefuseRedirects, _WatchedHTTPHandler,
+                                      _WatchedHTTPSHandler(context=tls_context()))
 
 
 class HttpError(Exception):

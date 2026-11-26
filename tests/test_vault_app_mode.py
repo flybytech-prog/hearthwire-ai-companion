@@ -3,7 +3,9 @@
 The passphrase dialog is hearthwire-askpass at its one fixed path, and only
 while root alone could have put it there; kdialog is never used in app mode,
 and the Plasma widget's KDE Wallet slot is never used or changed there.
-Plasma mode is unchanged. The stub tools of test_vault.py are the only
+Plasma mode is unchanged. Task 014: in app mode the method ``wallet`` is the
+Secret Service (test_vault_secret_service.py); here no secret-tool is
+installed, so it is missing-tool and status says so. The stub tools of test_vault.py are the only
 programs that run; the askpass stub lives outside PATH and is made to look
 root's only through a fake lstat given to frontend.askpass_path.
 """
@@ -18,12 +20,15 @@ from pathlib import Path
 
 import pytest
 
-from hearthwire.core import frontend, vault, walletkey, webdata
+from hearthwire.core import frontend, secretkey, vault, walletkey, webdata
 from test_frontend import mutant
+from test_secretkey import install_keyring_stubs
 from test_vault import STUB, Stubs, extpass_values, reply, without_extpass
 
 VAULT_PY = Path(vault.__file__)
 REAL_ASKPASS_PATH = frontend.askpass_path
+# Task 014: app-mode status fields when no secret-tool is installed and no keyring file exists.
+NO_KEYRING = {"keyring": "secret-service", "keyringStorage": "unknown", "missing": ["secret-tool"]}
 
 
 def root_owned(program):
@@ -96,7 +101,7 @@ def test_app_create_and_unlock_use_only_the_fixed_askpass(stubs, capsys):
     assert extpass_values(mount["argv"]) == [askpass, "--title", "Hearthwire", "--password", vault.PROMPT_UNLOCK]
     assert [call["tool"] for call in dialog_calls(stubs)] == ["hearthwire-askpass", "hearthwire-askpass"]
     assert stubs.calls("kdialog") == []
-    assert reply("status", capsys) == {"ok": True, "state": "unlocked", "wallet": "unavailable"}
+    assert reply("status", capsys) == {"ok": True, "state": "unlocked", "wallet": "unavailable", **NO_KEYRING}
 
 
 def test_app_change_passphrase_runs_askpass_for_both_dialogs(stubs, capsys):
@@ -168,22 +173,36 @@ def test_plasma_mode_without_kdialog_reports_kdialog(stubs, capsys):
 
 @pytest.mark.parametrize("argv", [("add-key",), ("remove-key",), ("auto-unlock",), ("unlock", "--method", "wallet")])
 def test_app_mode_never_uses_or_changes_the_wallet_slot(stubs, capsys, argv):
+    """The widget's wallet.conf stays and no KDE Wallet tool runs; without secret-tool
+    the Secret Service method is missing-tool (task 014)."""
     stubs.make_locked()
     slot = stubs.wallet_slot()
     before = slot.read_bytes()
     operation, *extra = argv
-    assert reply(operation, capsys, *extra) == {"ok": False, "error": "wallet-disabled"}
+    assert reply(operation, capsys, *extra) == {"ok": False, "error": "missing-tool"}
     assert slot.read_bytes() == before
-    assert [call for call in stubs.calls() if call["tool"] != "gocryptfs"] == []
-    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "unavailable"}
+    assert stubs.calls() == []
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "unavailable", **NO_KEYRING}
     assert [call["tool"] for call in stubs.calls()] == []
 
 
 def test_app_status_runs_no_wallet_tool(stubs, capsys):
     stubs.make_locked()
     stubs.wallet_slot()
-    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "unavailable"}
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "unavailable", **NO_KEYRING}
     assert stubs.calls() == []
+
+
+def test_a_wallet_slot_is_not_a_secret_service_slot(stubs, capsys):
+    """With the Secret Service there, the widget's wallet.conf still reads as no slot."""
+    install_keyring_stubs(stubs.bin)
+    stubs.env(STUB_KEYRING=stubs.root / "keyring.json")
+    stubs.make_locked()
+    stubs.wallet_slot()
+    assert reply("status", capsys) == {"ok": True, "state": "locked", "wallet": "off",
+                                       "keyring": "secret-service", "keyringStorage": "unknown"}
+    assert [call["tool"] for call in stubs.calls()] == ["busctl"]
+    assert reply("unlock", capsys, "--method", "wallet") == {"ok": False, "error": "not-set-up"}
 
 
 def test_app_passphrase_unlock_still_works_with_a_wallet_slot_there(stubs, capsys):
@@ -217,6 +236,15 @@ def module_problems(module, stubs):
     ctx = module.context({**os.environ, "HEARTHWIRE_FRONTEND": "app"})
     if ctx.wallet_tools or ctx.mode != frontend.APP or not ctx.wallet_missing:
         problems.append("app mode looks up KDE Wallet tools")
+    # Task 014: the Secret Service tools are looked up in app mode only.
+    install_keyring_stubs(stubs.bin, openssl=False)
+    if set(module.context({**os.environ, "HEARTHWIRE_FRONTEND": "app"}).keyring_tools) != {
+            "secret-tool", "busctl", "openssl"}:
+        problems.append("app mode does not look up the Secret Service tools")
+    if module.context({**os.environ, "HEARTHWIRE_FRONTEND": "plasma"}).keyring_tools:
+        problems.append("plasma mode looks up the Secret Service tools")
+    for name in ("secret-tool", "busctl"):
+        stubs.remove(name)
     try:
         module._no_app_wallet(ctx)
         problems.append("app mode may use the wallet slot")
@@ -303,7 +331,11 @@ VAULT_MUTATIONS = {
     "wallet tools in app mode": ("    if mode == frontend.APP:\n        # No KDE Wallet", "    if False:\n        # No KDE Wallet"),
     "no wallet refusal": ("    if ctx.mode != frontend.PLASMA:\n        raise HelperError(\"wallet-disabled\")\n",
                           "    if False:\n        raise HelperError(\"wallet-disabled\")\n"),
-    "the mode not kept": ("        mode=mode,\n    )\n", "    )\n"),
+    "the mode not kept": ("        mode=mode,\n        keyring_tools=keyring_tools,\n", "        keyring_tools=keyring_tools,\n"),
+    "keyring tools in Plasma mode": ("    if mode == frontend.APP and find_tools:\n        # Task 014",
+                                     "    if find_tools:\n        # Task 014"),
+    "no keyring tools in app mode": ("        keyring_tools, keyring_missing = secretkey.find_tools()\n",
+                                     "        keyring_tools, keyring_missing = {}, secretkey.TOOLS\n"),
 }
 
 
@@ -312,24 +344,30 @@ def test_proof_the_vault_rule_catches(stubs, name):
     assert module_problems(mutant(vault, *VAULT_MUTATIONS[name]), stubs)
 
 
-# Each wallet operation refuses app mode before it touches anything: the first
-# statement after ``ctx = context(environ)`` (unlock: the first in its wallet branch).
-WALLET_ENTRIES = ("add_key", "remove_key", "auto_unlock")
+# Each wallet operation sends app mode to its Secret Service twin before it touches
+# anything (task 014), and then still refuses app mode itself: the first statements
+# after ``ctx = context(environ)`` (unlock: the first of its wallet branches).
+WALLET_ENTRIES = {"add_key": "_keyring_add_key(ctx, environ)", "remove_key": "_keyring_remove_key(ctx)",
+                  "auto_unlock": "_keyring_auto_unlock(ctx, environ)"}
 
 
 def wallet_guard_problems(source):
     tree = ast.parse(source)
     functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     problems = []
-    for name in WALLET_ENTRIES:
+    for name, twin in WALLET_ENTRIES.items():
         body = [statement for statement in functions[name].body
                 if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant))]
-        if [ast.unparse(statement) for statement in body[:2]] != ["ctx = context(environ)", "_no_app_wallet(ctx)"]:
-            problems.append(f"{name} refuses app mode first")
+        if [ast.unparse(statement) for statement in body[:3]] != [
+                "ctx = context(environ)", f"if ctx.mode == frontend.APP:\n    return {twin}", "_no_app_wallet(ctx)"]:
+            problems.append(f"{name} sends app mode to the Secret Service first, then refuses it")
     unlock = functions["unlock"]
-    branches = [node for node in ast.walk(unlock) if isinstance(node, ast.If) and ast.unparse(node.test) == "method == 'wallet'"]
-    if not branches or ast.unparse(branches[0].body[0]) != "_no_app_wallet(ctx)":
-        problems.append("unlock --method wallet refuses app mode first")
+    branches = [node for node in ast.walk(unlock) if isinstance(node, ast.If) and "'wallet'" in ast.unparse(node.test)]
+    tests = [ast.unparse(node.test) for node in branches]
+    if (tests[:2] != ["method == 'wallet' and ctx.mode == frontend.APP", "method == 'wallet'"]
+            or ast.unparse(branches[0].body[0]) != "return _keyring_unlock(ctx, environ)"
+            or ast.unparse(branches[1].body[0]) != "_no_app_wallet(ctx)"):
+        problems.append("unlock --method wallet sends app mode to the Secret Service, then refuses it")
     # purge (fix round 1, M1): the mode is asked first, before anything is
     # deleted, and app mode returns before any wallet tool is looked up.
     purge = functions["_purge_tree"].body
@@ -341,36 +379,54 @@ def wallet_guard_problems(source):
     if not stop or not wallet or stop[0] > wallet[0] or any(
             "walletkey." in ast.unparse(statement) for statement in purge[:stop[0]]):
         problems.append("purge stops in app mode before any wallet tool")
-    # destroy (task 011b, N2): every wallet call sits under its own Plasma-mode check.
+    if "secretkey." in ast.unparse(functions["_purge_tree"]):
+        problems.append("purge runs a Secret Service tool")
+    # destroy (task 011b, N2; task 014): every wallet call sits under its own
+    # Plasma-mode check, every Secret Service call under its own app-mode check.
     destroy = functions["destroy"]
-    guards = [node for node in ast.walk(destroy) if isinstance(node, ast.If)
-              and ast.unparse(node.test) == "had_slot and ctx.mode == frontend.PLASMA"]
-    guarded = {id(node) for guard in guards for statement in guard.body for node in ast.walk(statement)}
-    calls = [node for node in ast.walk(destroy) if isinstance(node, ast.Call)
-             and ast.unparse(node.func).startswith("walletkey.")]
-    if not guards or not calls or any(id(node) not in guarded for node in calls):
-        problems.append("destroy runs a wallet tool only in Plasma mode")
+    for module, guard_test in (("walletkey.", "had_slot and ctx.mode == frontend.PLASMA"),
+                               ("secretkey.", "had_keyring_slot and ctx.mode == frontend.APP")):
+        guards = [node for node in ast.walk(destroy) if isinstance(node, ast.If) and ast.unparse(node.test) == guard_test]
+        guarded = {id(node) for guard in guards for statement in guard.body for node in ast.walk(statement)}
+        calls = [node for node in ast.walk(destroy) if isinstance(node, ast.Call)
+                 and ast.unparse(node.func).startswith(module)]
+        if not guards or not calls or any(id(node) not in guarded for node in calls):
+            problems.append(f"destroy runs {module[:-1]} only under {guard_test}")
     guard = functions.get("_no_app_wallet")
     if guard is None or "if ctx.mode != frontend.PLASMA: raise HelperError('wallet-disabled')" not in " ".join(
             ast.unparse(guard).split()):
         problems.append("_no_app_wallet refuses every mode but Plasma")
+    # The Secret Service twins and their helpers never reach a KDE Wallet call.
+    for name in [node for node in functions if node.startswith(("_keyring", "_unlock_with_keyring",
+                                                                 "_commit_keyring", "_drop_staged_item"))]:
+        if "walletkey." in ast.unparse(functions[name]).replace("walletkey.GOCRYPTFS_TEMPORARY_SUFFIX", ""):
+            problems.append(f"{name} calls walletkey")
     return problems
 
 
-def test_every_wallet_operation_refuses_app_mode_first():
+def test_every_wallet_operation_sends_app_mode_to_the_secret_service_first():
     assert wallet_guard_problems(VAULT_PY.read_text(encoding="utf-8")) == []
 
 
 @pytest.mark.parametrize(("old", "new"), [
-    ("    ctx = context(environ)\n    _no_app_wallet(ctx)\n    with vault_lock(ctx, wait=True):\n",
-     "    ctx = context(environ)\n    with vault_lock(ctx, wait=True):\n"),
-    ("    ctx = context(environ)\n    _no_app_wallet(ctx)\n    with vault_lock(ctx, wait=True):\n        with _keys_dir(",
-     "    ctx = context(environ)\n    with vault_lock(ctx, wait=True):\n        _no_app_wallet(ctx)\n        with _keys_dir("),
-    ("    ctx = context(environ)\n    _no_app_wallet(ctx)\n    _require_tools(ctx, \"gocryptfs\", \"kdialog\")\n",
-     "    ctx = context(environ)\n    _require_tools(ctx, \"gocryptfs\", \"kdialog\")\n"),
-    ("    ctx = context(environ)\n    _no_app_wallet(ctx)\n    _require_tools(ctx, \"gocryptfs\", \"fusermount3\")\n",
-     "    ctx = context(environ)\n    _require_tools(ctx, \"gocryptfs\", \"fusermount3\")\n"),
+    # remove-key: the Secret Service branch, then the refusal.
+    ("    ctx = context(environ)\n    if ctx.mode == frontend.APP:\n        return _keyring_remove_key(ctx)\n",
+     "    ctx = context(environ)\n"),
+    ("    ctx = context(environ)\n    if ctx.mode == frontend.APP:\n        return _keyring_remove_key(ctx)\n"
+     "    _no_app_wallet(ctx)\n", "    ctx = context(environ)\n    if ctx.mode == frontend.APP:\n"
+     "        return _keyring_remove_key(ctx)\n"),
+    ("    _no_app_wallet(ctx)\n    with vault_lock(ctx, wait=True):\n        with _keys_dir(",
+     "    with vault_lock(ctx, wait=True):\n        _no_app_wallet(ctx)\n        with _keys_dir("),
+    # add-key and auto-unlock.
+    ("        return _keyring_add_key(ctx, environ)\n    _no_app_wallet(ctx)\n",
+     "        return _keyring_add_key(ctx, environ)\n"),
+    ("    if ctx.mode == frontend.APP:\n        return _keyring_add_key(ctx, environ)\n", ""),
+    ("    if ctx.mode == frontend.APP:\n        return _keyring_auto_unlock(ctx, environ)\n", ""),
+    ("        return _keyring_auto_unlock(ctx, environ)\n    _no_app_wallet(ctx)\n",
+     "        return _keyring_auto_unlock(ctx, environ)\n"),
+    # unlock.
     ("    if method == \"wallet\":\n        _no_app_wallet(ctx)\n", "    if method == \"wallet\":\n"),
+    ("    if method == \"wallet\" and ctx.mode == frontend.APP:\n        return _keyring_unlock(ctx, environ)\n", ""),
     ("    if ctx.mode != frontend.PLASMA:\n        raise HelperError(\"wallet-disabled\")\n",
      "    if ctx.mode == 'x':\n        raise HelperError(\"wallet-disabled\")\n"),
     # purge (fix round 1, M1)
@@ -382,12 +438,22 @@ def test_every_wallet_operation_refuses_app_mode_first():
      "    tools, _missing = walletkey.find_tools()\n    if not had_slot:\n        return present\n    if app_mode:\n"),
     ("        return present\n    tools, _missing = walletkey.find_tools()\n",
      "        pass\n    tools, _missing = walletkey.find_tools()\n"),
-    # destroy (task 011b, N2)
+    ("    if not had_slot:\n        return present\n    if app_mode:\n",
+     "    secretkey.find_tools()\n    if not had_slot:\n        return present\n    if app_mode:\n"),
+    # destroy (task 011b, N2; task 014)
     ("        if had_slot and ctx.mode == frontend.PLASMA:\n", "        if had_slot:\n"),
     ("        if had_slot and ctx.mode == frontend.PLASMA:\n", "        if had_slot or ctx.mode == frontend.PLASMA:\n"),
     ("        if had_slot and ctx.mode == frontend.PLASMA:\n", "        if had_slot and ctx.mode == frontend.APP:\n"),
     ("        remove_entry(app, VAULT_DIR)\n        if had_slot and",
      "        remove_entry(app, VAULT_DIR)\n        walletkey.find_tools()\n        if had_slot and"),
+    ("        if had_keyring_slot and ctx.mode == frontend.APP:\n", "        if had_keyring_slot:\n"),
+    ("        if had_keyring_slot and ctx.mode == frontend.APP:\n", "        if ctx.mode == frontend.APP:\n"),
+    ("        remove_entry(app, VAULT_DIR)\n        if had_slot and",
+     "        remove_entry(app, VAULT_DIR)\n        secretkey.find_tools()\n        if had_slot and"),
+    # A twin reaching KDE Wallet.
+    ("        _keyring_preflight(ctx)\n        secretkey.remove_items(ctx.keyring_tools)\n",
+     "        _keyring_preflight(ctx)\n        walletkey.forget(ctx.wallet_tools)\n"
+     "        secretkey.remove_items(ctx.keyring_tools)\n"),
 ])
 def test_proof_the_wallet_guard_rule_catches(old, new):
     source = VAULT_PY.read_text(encoding="utf-8")
@@ -395,18 +461,30 @@ def test_proof_the_wallet_guard_rule_catches(old, new):
     assert wallet_guard_problems(source.replace(old, new, 1))
 
 
+NO_TWIN = ("    ctx = context(environ)\n    if ctx.mode == frontend.APP:\n        return _keyring_remove_key(ctx)\n",
+           "    ctx = context(environ)\n")
+NO_REFUSAL = ("        return _keyring_remove_key(ctx)\n    _no_app_wallet(ctx)\n    with vault_lock(ctx, wait=True):\n",
+              "        return _keyring_remove_key(ctx)\n    with vault_lock(ctx, wait=True):\n")
+NO_REFUSAL_ONLY = ("    _no_app_wallet(ctx)\n    with vault_lock(ctx, wait=True):\n        with _keys_dir(",
+                   "    with vault_lock(ctx, wait=True):\n        with _keys_dir(")
+TWIN_REMOVES_THE_WALLET_SLOT = ("                _remove_slot(keys, KEYRING_SLOT)\n", "                _remove_slot(keys)\n")
+
+
 def test_remove_key_in_app_mode_keeps_the_slot_end_to_end(stubs, capsys):
-    """The guard rule's reason: remove-key deletes the slot before it looks for wallet tools."""
+    """The guard rule's reason: the Plasma remove-key deletes the slot before it looks for
+    wallet tools, and the app's twin must delete only its own slot files."""
     stubs.make_locked()
     slot = stubs.wallet_slot()
-    copy = mutant(vault, "    ctx = context(environ)\n    _no_app_wallet(ctx)\n    with vault_lock(ctx, wait=True):\n",
-                  "    ctx = context(environ)\n    with vault_lock(ctx, wait=True):\n")
-    for name in ("MOUNTINFO", "_same_device", "LOCK_TIMEOUT"):
-        setattr(copy, name, getattr(vault, name))
-    assert vault.run("remove-key", method="wallet") == {"ok": False, "error": "wallet-disabled"}
+    assert vault.run("remove-key", method="wallet") == {"ok": False, "error": "missing-tool"}
     assert slot.exists()
-    copy.run("remove-key", method="wallet")
-    assert not slot.exists()  # Without the guard the Plasma widget's slot is gone.
+    for pairs in ((NO_TWIN,), (NO_REFUSAL,)):
+        _copy(mutants(vault, *pairs)).run("remove-key", method="wallet")
+        assert slot.exists(), pairs  # One of the two checks is still there.
+    _copy(mutants(vault, NO_TWIN, NO_REFUSAL_ONLY)).run("remove-key", method="wallet")
+    assert not slot.exists()  # Without both the Plasma widget's slot is gone.
+    stubs.wallet_slot()
+    _copy(mutants(vault, TWIN_REMOVES_THE_WALLET_SLOT)).run("remove-key", method="wallet")
+    assert not slot.exists()  # A twin using the default slot names would delete it too.
 
 
 # --- every call site passes the mode (fix round 1, I2) ---------------------------------------------------
@@ -529,41 +607,65 @@ def test_plasma_purge_still_forgets_the_entry(stubs, capsys, monkeypatch, tmp_pa
     assert WALLET_KEY not in json.loads(stubs.wallet.read_text())
 
 
-# --- no wallet tool argv in app mode (task 011b, N1) -----------------------------------------------------
+# --- each mode's own tools only (task 011b, N1; task 014) -----------------------------------------------
 
 WALLET = "kdewallet"
+BOTH = (frontend.PLASMA, frontend.APP)
 
 
 def wallet_argv_problems(module, stubs):
-    """_check_argv takes the KDE Wallet tools' argv (and the kwallet-query extpass) in Plasma mode only."""
+    """_check_argv takes the KDE Wallet tools' argv (and the kwallet-query extpass) in Plasma
+    mode only, the Secret Service tools' argv (and the secret-tool extpass) in app mode
+    only, and openssl's one shape in both."""
     gocryptfs = str(stubs.bin / "gocryptfs")
     kwallet_query = "/usr/bin/kwallet-query"
+    secret_tool, busctl = "/usr/bin/secret-tool", "/usr/bin/busctl"
     slot = "/d/hearthwire/vault-keys/wallet.conf"
+    keyring_slot = "/d/hearthwire/vault-keys/secret-service.conf"
+    plasma, app = (frontend.PLASMA,), (frontend.APP,)
     cases = {
-        "openssl rand": (walletkey.keygen_argv("/usr/bin/openssl"), None),
-        "kwallet-query read": (walletkey.read_argv(kwallet_query, WALLET), None),
-        "kwallet-query write": (walletkey.write_argv(kwallet_query, WALLET), None),
-        "qdbus6 isEnabled": (walletkey.kwallet_argv("/usr/bin/qdbus6", "isEnabled"), None),
-        "qdbus-qt6 localWallet": (walletkey.kwallet_argv("/usr/bin/qdbus-qt6", "localWallet"), None),
+        "openssl rand": (walletkey.keygen_argv("/usr/bin/openssl"), None, BOTH),
+        "kwallet-query read": (walletkey.read_argv(kwallet_query, WALLET), None, plasma),
+        "kwallet-query write": (walletkey.write_argv(kwallet_query, WALLET), None, plasma),
+        "qdbus6 isEnabled": (walletkey.kwallet_argv("/usr/bin/qdbus6", "isEnabled"), None, plasma),
+        "qdbus-qt6 localWallet": (walletkey.kwallet_argv("/usr/bin/qdbus-qt6", "localWallet"), None, plasma),
         "qdbus6 Secret Service": (walletkey.secrets_argv("/usr/bin/qdbus6", walletkey.SECRETS_DEFAULT_ALIAS,
-                                                         "Locked"), None),
+                                                         "Locked"), None, plasma),
         "the kwallet-query extpass": (module.wallet_mount_argv(gocryptfs, kwallet_query, WALLET, slot, "/c", "/m"),
-                                      slot),
+                                      slot, plasma),
+        "secret-tool store": (secretkey.store_argv(secret_tool, secretkey.ITEM_NEW), None, app),
+        "secret-tool lookup": (secretkey.lookup_argv(secret_tool), None, app),
+        "secret-tool clear": (secretkey.clear_argv(secret_tool, secretkey.ITEM), None, app),
+        "busctl Locked": (secretkey.locked_argv(busctl), None, app),
+        "busctl SearchItems": (secretkey.search_argv(busctl, secretkey.ITEM), None, app),
+        "the secret-tool extpass": (module.keyring_mount_argv(gocryptfs, secret_tool, keyring_slot, "/c", "/m"),
+                                    keyring_slot, app),
+        # Never, in either mode.
+        "secret-tool search": ([secret_tool, "search", *secretkey.attributes(secretkey.ITEM)], None, ()),
+        "the staging item as extpass": (
+            [gocryptfs, "-q", "-nosyslog", "-config", keyring_slot,
+             *module.extpass_args(*secretkey.lookup_argv(secret_tool, secretkey.ITEM_NEW)), "/c", "/m"],
+            keyring_slot, ()),
+        "a store as extpass": (
+            [gocryptfs, "-q", "-nosyslog", "-config", keyring_slot,
+             *module.extpass_args(*secretkey.store_argv(secret_tool, secretkey.ITEM)), "/c", "/m"], keyring_slot, ()),
+        "the secret-tool extpass with another -config": (
+            module.keyring_mount_argv(gocryptfs, secret_tool, keyring_slot, "/c", "/m"), slot, ()),
     }
     problems = []
-    for current in (frontend.PLASMA, frontend.APP):
-        for name, (argv, config) in cases.items():
+    for current in BOTH:
+        for name, (argv, config, modes) in cases.items():
             try:
                 module._check_argv(argv, config=config, mode=current)
                 accepted = True
             except webdata.HelperError:
                 accepted = False
-            if accepted != (current == frontend.PLASMA):
+            if accepted != (current in modes):
                 problems.append(f"{current} mode {'takes' if accepted else 'refuses'} {name}")
     return problems
 
 
-def test_app_mode_refuses_every_wallet_tool_argv(stubs):
+def test_each_mode_takes_only_its_own_tools_argv(stubs):
     assert wallet_argv_problems(vault, stubs) == []
 
 
@@ -576,6 +678,21 @@ WALLET_ARGV_MUTATIONS = {
                                       "        walletkey.check_argv(argv)\n"),
     "the kwallet-query extpass in any mode": ("        if mode != frontend.PLASMA or not walletkey.is_read_argv(values):\n",
                                               "        if not walletkey.is_read_argv(values):\n"),
+    "keyring tools in any mode": ("        if mode != frontend.APP:\n            raise HelperError(\"os-error\")\n"
+                                  "        secretkey.check_argv(argv)\n", "        secretkey.check_argv(argv)\n"),
+    "keyring tools in Plasma mode only": ("        if mode != frontend.APP:\n            raise HelperError(\"os-error\")\n"
+                                          "        secretkey.check_argv(argv)\n",
+                                          "        if mode == frontend.APP:\n            raise HelperError(\"os-error\")\n"
+                                          "        secretkey.check_argv(argv)\n"),
+    "keyring tools unchecked": ("        secretkey.check_argv(argv)\n    elif tool == walletkey.KEYGEN_TOOL:",
+                                "        pass\n    elif tool == walletkey.KEYGEN_TOOL:"),
+    "the secret-tool extpass in any mode": ("        if mode != frontend.APP or not secretkey.is_lookup_argv(values):\n",
+                                            "        if not secretkey.is_lookup_argv(values):\n"),
+    "any secret-tool extpass in app mode": ("        if mode != frontend.APP or not secretkey.is_lookup_argv(values):\n",
+                                            "        if mode != frontend.APP:\n"),
+    "openssl in Plasma mode only": ("    elif tool == walletkey.KEYGEN_TOOL:\n        walletkey.check_argv(argv)\n",
+                                    "    elif tool == walletkey.KEYGEN_TOOL:\n        if mode != frontend.PLASMA:\n"
+                                    "            raise HelperError(\"os-error\")\n        walletkey.check_argv(argv)\n"),
 }
 
 

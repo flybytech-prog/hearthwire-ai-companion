@@ -181,7 +181,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--method",
         choices=vault.METHODS,
-        help="Unlock method for --vault unlock (default passphrase); add-key and remove-key take wallet.",
+        help="Unlock method for --vault unlock (default passphrase); add-key and remove-key take wallet. "
+             "wallet is KDE Wallet in the Plasma widget and the Secret Service keyring in the app "
+             "(HEARTHWIRE_FRONTEND=app).",
     )
     result.add_argument(
         "--prompts",

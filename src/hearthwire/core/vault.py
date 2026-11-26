@@ -28,9 +28,13 @@ dialog is ``hearthwire-askpass`` instead of kdialog, with the same arguments.
 It is used only at ``frontend.ASKPASS_PATH`` and only while it and every
 folder above it are root's and nobody else may change them; otherwise status
 lists ``hearthwire-askpass`` as missing. kdialog is never used in app mode,
-and the KDE Wallet slot is neither used nor changed there (wallet
-``unavailable``, wallet operations ``wallet-disabled``) until the app's own
-keyring unlock exists.
+and the KDE Wallet slot is neither used nor changed there.
+
+Task 014: in app mode the unlock method ``wallet`` means the Secret Service
+(``secretkey.py``) with its own slot, ``vault-keys/secret-service.conf``,
+built the same way; status adds ``keyring`` and ``keyringStorage``. No KDE
+Wallet tool runs in app mode and no Secret Service tool in Plasma mode, and
+each mode's slot files are its own.
 
 Task 011c: a stop signal (SIGTERM, SIGHUP, SIGINT; ``termination.py``) while a
 step waits for its dialog, the wallet or the vault lock stops that step's
@@ -59,7 +63,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from . import frontend, termination, walletkey
+from . import frontend, secretkey, termination, walletkey
 from .webdata import (
     APP_DIR,
     PRIVATE_MODE,
@@ -155,6 +159,10 @@ PHASE_POSITIONALS = {"init": 1, "mount": 2, "passwd": 1}
 # the slot; 11 is a missing slot file. Re-keying the copy (-passwd -config), 24 is
 # gocryptfs's own "<config>.tmp" being in the way (it writes that, fsyncs and
 # renames over the copy).
+#
+# The Secret Service slot (app mode, task 014 R0b) maps the same way: with
+# secret-tool as extpass, 9 is a failed lookup (missing item, cancelled gcr
+# prompt, no bus: exit 1 with an empty stdout) and 12 a key that does not fit.
 EXIT_CODES = {
     "init": {6: "exists", 9: "cancelled"},
     "mount": {6: "absent", 9: "cancelled", 10: "mount-failed", 11: "absent", 12: "wrong-passphrase",
@@ -247,6 +255,16 @@ def wallet_mount_argv(gocryptfs: str, kwallet_query: str, wallet: str, config: s
     ]
 
 
+def keyring_mount_argv(gocryptfs: str, secret_tool: str, config: str, cipher: str, mountpoint: str) -> list[str]:
+    """Mount with the Secret Service slot (app mode, task 014); gocryptfs runs ``secret-tool
+    lookup`` itself, one ``-extpass`` per word (R0b: mounts with gocryptfs 2.6.1)."""
+    return [
+        gocryptfs, "-q", "-nosyslog", "-config", config,
+        *extpass_args(*secretkey.lookup_argv(secret_tool)),
+        cipher, mountpoint,
+    ]
+
+
 def wallet_passwd_argv(gocryptfs: str, kdialog: str, config: str, cipher: str) -> list[str]:
     """Re-key the slot copy: the old passphrase via kdialog, the new key on stdin (a pipe)."""
     return [
@@ -287,6 +305,10 @@ class Context:
     wallet_missing: tuple[str, ...] = ()
     # frontend.PLASMA or frontend.APP (task 011).
     mode: str = frontend.PLASMA
+    # App mode only (task 014): secret-tool, busctl and openssl when found; the
+    # missing secretkey.TOOLS. Never looked up in Plasma mode.
+    keyring_tools: dict[str, str] = field(default_factory=dict)
+    keyring_missing: tuple[str, ...] = ()
 
     @property
     def slot(self) -> str:
@@ -295,6 +317,27 @@ class Context:
     @property
     def new_slot(self) -> str:
         return os.path.join(self.data_base, APP_DIR, KEYS_DIR, walletkey.SLOT_NEW)
+
+    @property
+    def keyring_slot(self) -> str:
+        return os.path.join(self.data_base, APP_DIR, KEYS_DIR, secretkey.SLOT_FILE)
+
+    @property
+    def keyring_new_slot(self) -> str:
+        return os.path.join(self.data_base, APP_DIR, KEYS_DIR, secretkey.SLOT_NEW)
+
+
+@dataclass(frozen=True)
+class SlotNames:
+    """One unlock method's slot files in vault-keys/: the slot, its staged copy, the previous one."""
+    file: str
+    new: str
+    old: str
+
+
+# Plasma mode's KDE Wallet slot and app mode's Secret Service slot (task 014).
+WALLET_SLOT = SlotNames(walletkey.SLOT_FILE, walletkey.SLOT_NEW, walletkey.SLOT_OLD)
+KEYRING_SLOT = SlotNames(secretkey.SLOT_FILE, secretkey.SLOT_NEW, secretkey.SLOT_OLD)
 
 
 @dataclass(frozen=True)
@@ -327,15 +370,20 @@ def _is_dialog(program: str, mode: str) -> bool:
 
 
 def _check_extpass(values: Sequence[str], mode: str) -> None:
-    """The extpass program is a dialog, the relay running a dialog, or exactly ``kwallet-query -r``.
+    """The extpass program is a dialog, the relay running a dialog, exactly ``kwallet-query -r``
+    or exactly ``secret-tool lookup``.
 
     ``kwallet-query`` in Plasma mode only: app mode runs no wallet tool (task 011b).
+    ``secret-tool`` in app mode only: Plasma mode runs no Secret Service tool (task 014).
     """
     if not values:
         return
     program = os.path.basename(values[0])
     if program == "kwallet-query":
         if mode != frontend.PLASMA or not walletkey.is_read_argv(values):
+            raise HelperError("os-error")
+    elif program == secretkey.TOOL:
+        if mode != frontend.APP or not secretkey.is_lookup_argv(values):
             raise HelperError("os-error")
     elif program in ("kdialog", frontend.ASKPASS_NAME):
         if not _is_dialog(values[0], mode):
@@ -390,8 +438,9 @@ def _check_argv(argv: Sequence[str], *, config: Optional[str] = None, mode: str 
     as ``-extpass`` values). No argument outside an ``-extpass`` value may
     contain ``allow_``, wherever it sits. The dialog is ``mode``'s only (task
     011): kdialog in Plasma mode, the fixed hearthwire-askpass in app mode.
-    The KDE Wallet tools (kwallet-query, qdbus, openssl) run in Plasma mode
-    only (task 011b).
+    The KDE Wallet tools (kwallet-query, qdbus) run in Plasma mode only (task
+    011b), the Secret Service tools (secret-tool, busctl) in app mode only
+    (task 014); openssl, in its one shape, in both.
     """
     if not argv or not os.path.isabs(argv[0]):
         raise HelperError("os-error")
@@ -415,9 +464,15 @@ def _check_argv(argv: Sequence[str], *, config: Optional[str] = None, mode: str 
     elif tool in ("kdialog", frontend.ASKPASS_NAME):
         if not _is_dialog(argv[0], mode) or arguments != new_passphrase_argv(argv[0])[1:]:
             raise HelperError("os-error")
-    elif tool in ("kwallet-query", *walletkey.QDBUS_NAMES, "openssl"):
+    elif tool in ("kwallet-query", *walletkey.QDBUS_NAMES):
         if mode != frontend.PLASMA:
             raise HelperError("os-error")
+        walletkey.check_argv(argv)
+    elif tool in secretkey.TOOLS:
+        if mode != frontend.APP:
+            raise HelperError("os-error")
+        secretkey.check_argv(argv)
+    elif tool == walletkey.KEYGEN_TOOL:
         walletkey.check_argv(argv)
     else:
         raise HelperError("os-error")
@@ -595,6 +650,11 @@ def context(environ: Optional[Mapping[str, str]] = None, *, find_tools: bool = T
         wallet_tools, wallet_missing = {}, walletkey.TOOLS
     else:
         wallet_tools, wallet_missing = walletkey.find_tools() if find_tools else ({}, ())
+    keyring_tools: dict[str, str] = {}
+    keyring_missing: tuple[str, ...] = ()
+    if mode == frontend.APP and find_tools:
+        # Task 014: the Secret Service tools, in app mode only.
+        keyring_tools, keyring_missing = secretkey.find_tools()
     runtime = runtime_dir(environ)
     base = os.path.realpath(data_base(environ))
     return Context(
@@ -607,6 +667,8 @@ def context(environ: Optional[Mapping[str, str]] = None, *, find_tools: bool = T
         wallet_tools=wallet_tools,
         wallet_missing=wallet_missing,
         mode=mode,
+        keyring_tools=keyring_tools,
+        keyring_missing=keyring_missing,
     )
 
 
@@ -913,12 +975,14 @@ def status(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     ctx = context(environ)
     if ctx.missing:
         return {"ok": True, "state": "unavailable", "missing": list(ctx.missing)}
+    names = KEYRING_SLOT if ctx.mode == frontend.APP else WALLET_SLOT
     with vault_lock(ctx) as app:
         state = settle(ctx, app)
-        slot = _slot_present(ctx) if state in ("locked", "unlocked") else False
+        slot = _slot_present(ctx, names.file) if state in ("locked", "unlocked") else False
     reply: dict[str, object] = {"ok": True, "state": state}
     if state in ("locked", "unlocked") and ctx.mode == frontend.APP:
-        reply["wallet"] = "unavailable"  # No KDE Wallet in app mode (task 011).
+        # Task 014: "wallet" is the Secret Service here (never KDE Wallet).
+        _keyring_status(ctx, environ, slot, reply)
     elif state in ("locked", "unlocked"):
         # Outside the lock: a qdbus6 query may take up to its timeout.
         if ctx.wallet_missing:
@@ -962,10 +1026,11 @@ def _keys_dir(ctx: Context, *, create: bool) -> Iterator[Optional[int]]:
         yield keys
 
 
-def _slot_ready(keys: int) -> bool:
-    """wallet.conf is a regular file of ours, mode 0400 (as gocryptfs writes it)."""
+def _slot_ready(keys: int, name: str = walletkey.SLOT_FILE) -> bool:
+    """The slot (wallet.conf, or secret-service.conf in app mode) is a regular file of
+    ours, mode 0400 (as gocryptfs writes it)."""
     try:
-        info = os.stat(walletkey.SLOT_FILE, dir_fd=keys, follow_symlinks=False)
+        info = os.stat(name, dir_fd=keys, follow_symlinks=False)
     except FileNotFoundError:
         return False
     except OSError:
@@ -977,11 +1042,11 @@ def _slot_ready(keys: int) -> bool:
     )
 
 
-def _slot_present(ctx: Context) -> bool:
-    """For status: a usable wallet slot; anything odd in the way counts as none."""
+def _slot_present(ctx: Context, name: str = walletkey.SLOT_FILE) -> bool:
+    """For status: a usable slot; anything odd in the way counts as none."""
     try:
         with _keys_dir(ctx, create=False) as keys:
-            return keys is not None and _slot_ready(keys)
+            return keys is not None and _slot_ready(keys, name)
     except HelperError:
         return False
 
@@ -997,22 +1062,23 @@ def _unlink(keys: int, name: str) -> None:
         raise HelperError("os-error") from None
 
 
-def _clear_new_slot(keys: int) -> None:
-    for name in (walletkey.SLOT_NEW, walletkey.SLOT_NEW + walletkey.GOCRYPTFS_TEMPORARY_SUFFIX):
+def _clear_new_slot(keys: int, new: str = walletkey.SLOT_NEW) -> None:
+    for name in (new, new + walletkey.GOCRYPTFS_TEMPORARY_SUFFIX):
         _unlink(keys, name)
 
 
-def _remove_slot(keys: int) -> None:
-    _clear_new_slot(keys)
-    _unlink(keys, walletkey.SLOT_OLD)
-    _unlink(keys, walletkey.SLOT_FILE)
+def _remove_slot(keys: int, names: SlotNames = WALLET_SLOT) -> None:
+    _clear_new_slot(keys, names.new)
+    _unlink(keys, names.old)
+    _unlink(keys, names.file)
 
 
 _MAX_CONF_SIZE = 65536
 
 
-def _copy_conf(ctx: Context, keys: int) -> None:
-    """Copy ``gocryptfs.conf`` to ``vault-keys/wallet.conf.new`` (O_EXCL, 0600, fsynced).
+def _copy_conf(ctx: Context, keys: int, target_name: str = walletkey.SLOT_NEW) -> None:
+    """Copy ``gocryptfs.conf`` to ``vault-keys/wallet.conf.new`` (O_EXCL, 0600, fsynced);
+    in app mode to ``secret-service.conf.new`` (``target_name``).
 
     The conf holds the master key wrapped by the passphrase (gocryptfs keeps it
     0400 inside the 0700 cipher dir); the copy gets the same protection.
@@ -1048,7 +1114,7 @@ def _copy_conf(ctx: Context, keys: int) -> None:
         if not content or len(content) > _MAX_CONF_SIZE:
             raise HelperError("os-error")
         try:
-            target = os.open(walletkey.SLOT_NEW, write_flags, 0o600, dir_fd=keys)
+            target = os.open(target_name, write_flags, 0o600, dir_fd=keys)
         except OSError:
             raise HelperError("wallet-write-failed") from None
         opened.append(target)
@@ -1059,11 +1125,11 @@ def _copy_conf(ctx: Context, keys: int) -> None:
         os.fsync(target)
 
 
-def _seal_new_slot(keys: int) -> None:
-    """Make the re-keyed copy 0400 and fsync it (it stays wallet.conf.new)."""
+def _seal_new_slot(keys: int, name: str = walletkey.SLOT_NEW) -> None:
+    """Make the re-keyed copy 0400 and fsync it (it stays wallet.conf.new, or ``name``)."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     try:
-        descriptor = os.open(walletkey.SLOT_NEW, flags, dir_fd=keys)
+        descriptor = os.open(name, flags, dir_fd=keys)
     except OSError:
         raise HelperError("wallet-write-failed") from None
     try:
@@ -1079,9 +1145,9 @@ def _seal_new_slot(keys: int) -> None:
         _close(descriptor)
 
 
-def _slot_exists(keys: int) -> bool:
+def _slot_exists(keys: int, name: str = walletkey.SLOT_FILE) -> bool:
     try:
-        os.stat(walletkey.SLOT_FILE, dir_fd=keys, follow_symlinks=False)
+        os.stat(name, dir_fd=keys, follow_symlinks=False)
     except FileNotFoundError:
         return False
     except OSError:
@@ -1169,8 +1235,12 @@ def add_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
        wallet.conf.new``, whose extpass is the current-passphrase dialog.
     4. Every exit status 0: _commit_slot swaps the slot and the entry in.
     5. The staging entry is overwritten and deleted, on success and failure.
+
+    In app mode (task 014) the same steps run with the Secret Service instead.
     """
     ctx = context(environ)
+    if ctx.mode == frontend.APP:
+        return _keyring_add_key(ctx, environ)
     _no_app_wallet(ctx)
     _require_tools(ctx, "gocryptfs", "kdialog")
     _wallet_tools(ctx, keygen=True)
@@ -1224,8 +1294,11 @@ def remove_key(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]
     The slot goes first in every case; an error after that means an entry may
     still be in the wallet (the reply says which: missing-tool, wallet-disabled,
     wallet-failed). openssl is not needed: without it the overwrite is skipped.
+    In app mode (task 014) the Secret Service slot and items instead.
     """
     ctx = context(environ)
+    if ctx.mode == frontend.APP:
+        return _keyring_remove_key(ctx)
     _no_app_wallet(ctx)
     with vault_lock(ctx, wait=True):
         with _keys_dir(ctx, create=False) as keys:
@@ -1261,6 +1334,8 @@ def _unlock_with_wallet(ctx: Context, app: int, *, automatic: bool) -> None:
 
 def auto_unlock(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     ctx = context(environ)
+    if ctx.mode == frontend.APP:
+        return _keyring_auto_unlock(ctx, environ)
     _no_app_wallet(ctx)
     _require_tools(ctx, "gocryptfs", "fusermount3")
     _wallet_tools(ctx, keygen=False)
@@ -1384,25 +1459,41 @@ def _drop_mount(ctx: Context, app: int) -> None:
         pass
 
 
-def _mount(ctx: Context, app: int, wallet: Optional[str] = None) -> None:
-    """Mount with the passphrase dialog, or with the wallet slot when ``wallet`` is given.
+def _mount(ctx: Context, app: int, wallet: Optional[str] = None, *, keyring: bool = False,
+           automatic: bool = False) -> None:
+    """Mount with the passphrase dialog, or with the wallet slot when ``wallet`` is given,
+    or with the Secret Service slot when ``keyring`` (app mode, task 014).
 
     Task 011c: stopped before gocryptfs reported the mount, whatever came up is
     unmounted again (its process group is already stopped by then).
     """
     try:
-        _mount_attempt(ctx, app, wallet)
+        _mount_attempt(ctx, app, wallet, keyring, automatic)
     except termination.Stopped:
         _drop_mount(ctx, app)
         raise
 
 
-def _mount_attempt(ctx: Context, app: int, wallet: Optional[str]) -> None:
+def _mount_attempt(ctx: Context, app: int, wallet: Optional[str], keyring: bool = False,
+                   automatic: bool = False) -> None:
     # A stop that came while -init finished: no gocryptfs is started just to be stopped.
     termination.check()
     # Under the vault lock, right before mounting: 0700 (a sealed 0500 one is reset).
     _prepare_mountpoint(app)
-    if wallet is None:
+    if keyring:
+        phase = "wallet-mount"
+        argv = keyring_mount_argv(ctx.tools["gocryptfs"], ctx.keyring_tools[secretkey.TOOL],
+                                  ctx.keyring_slot, ctx.cipher, ctx.mountpoint)
+        try:
+            # secret-tool may wait for the gcr unlock prompt (an encrypted, locked keyring). At
+            # app start it must not: a short bound, and a timeout means "closed", not failed.
+            code = _run(argv, timeout=secretkey.AUTO_LOOKUP_TIMEOUT if automatic else secretkey.PROMPT_TIMEOUT,
+                        config=ctx.keyring_slot,
+                        timeout_error="wallet-closed" if automatic else "wallet-failed", mode=ctx.mode)
+        except HelperError:
+            _drop_mount(ctx, app)
+            raise
+    elif wallet is None:
         phase = "mount"
         code = _run(mount_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.cipher, ctx.mountpoint),
                     mode=ctx.mode)
@@ -1576,6 +1667,8 @@ def unlock(environ: Optional[Mapping[str, str]] = None, method: str = "passphras
     if method not in METHODS:
         raise ValueError("Unsupported unlock method.")
     ctx = context(environ)
+    if method == "wallet" and ctx.mode == frontend.APP:
+        return _keyring_unlock(ctx, environ)
     if method == "wallet":
         _no_app_wallet(ctx)
         _require_tools(ctx, "gocryptfs", "fusermount3")
@@ -1748,7 +1841,7 @@ def change_passphrase(environ: Optional[Mapping[str, str]] = None) -> dict[str, 
     return {"ok": True}
 
 
-def _holds_wallet_slot(keys: int) -> bool:
+def _holds_wallet_slot(keys: int, names: SlotNames = WALLET_SLOT) -> bool:
     """``keys`` (an opened vault-keys) holds a wallet slot file of ours: wallet.conf,
     or the wallet.conf.old / wallet.conf.new an interrupted set-up leaves.
 
@@ -1757,7 +1850,7 @@ def _holds_wallet_slot(keys: int) -> bool:
     destroy/purge then leave the wallet alone. Symlinks and files of other
     users do not count.
     """
-    for name in (walletkey.SLOT_FILE, walletkey.SLOT_OLD, walletkey.SLOT_NEW):
+    for name in (names.file, names.old, names.new):
         try:
             info = os.stat(name, dir_fd=keys, follow_symlinks=False)
         except OSError:
@@ -1767,8 +1860,8 @@ def _holds_wallet_slot(keys: int) -> bool:
     return False
 
 
-def _app_holds_wallet_slot(data_app: int) -> bool:
-    """For destroy: vault-keys below ``data_app`` holds a slot (anything odd: no)."""
+def _app_holds_wallet_slot(data_app: int, names: SlotNames = WALLET_SLOT) -> bool:
+    """For destroy: vault-keys below ``data_app`` holds a slot of ``names`` (anything odd: no)."""
     try:
         keys = open_child_dir(data_app, KEYS_DIR, create=False)
     except HelperError:
@@ -1776,7 +1869,7 @@ def _app_holds_wallet_slot(data_app: int) -> bool:
     if keys is None:
         return False
     try:
-        return _holds_wallet_slot(keys)
+        return _holds_wallet_slot(keys, names)
     finally:
         _close(keys)
 
@@ -1797,26 +1890,30 @@ def destroy(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
     (checked before anything is deleted). The files go first; wallet-failed
     afterwards means only the wallet entry may remain (remove-key removes it).
     In app mode the entry is the Plasma widget's and stays, as with purge
-    (task 011b): no wallet tool runs.
+    (task 011b): no wallet tool runs. Instead (task 014), when this folder had
+    a Secret Service slot, the app's keyring items are overwritten and cleared.
     """
     ctx = context(environ)
     _require_safe_rmtree()
     with vault_lock(ctx) as app:
         if settle(ctx, app) == "unlocked":
             raise HelperError("not-locked")
-        had_slot = False
+        had_slot = had_keyring_slot = False
         with _descriptors() as opened:
             base = open_base(ctx.data_base, create=False)
             data_app = None if base is None else open_child_dir(base, APP_DIR, create=False)
             opened.extend(fd for fd in (base, data_app) if fd is not None)
             if data_app is not None:
                 had_slot = _app_holds_wallet_slot(data_app)
+                had_keyring_slot = _app_holds_wallet_slot(data_app, KEYRING_SLOT)
                 remove_entry(data_app, VAULT_DIR)
                 remove_entry(data_app, KEYS_DIR)
         # Not mounted (checked above), so this is the bare tmpfs mountpoint.
         remove_entry(app, VAULT_DIR)
         if had_slot and ctx.mode == frontend.PLASMA:
             walletkey.forget(ctx.wallet_tools)
+        if had_keyring_slot and ctx.mode == frontend.APP:
+            secretkey.forget(ctx.keyring_tools)
     return {"ok": True}
 
 
@@ -1947,6 +2044,227 @@ def purge(environ: Optional[Mapping[str, str]] = None) -> dict[str, object]:
         return {"ok": False, "error": error.code}
     except OSError:
         return {"ok": False, "error": "os-error"}
+
+
+# --- Secret Service (app mode, task 014) ------------------------------------------------------------
+#
+# The same slot steps as the KDE Wallet ones above, with secretkey.py's tools
+# and KEYRING_SLOT's files. Only the entry points' app-mode branches come here;
+# nothing below runs in Plasma mode. The key only ever moves between children
+# through pipes (secretkey.py); this module never sees it.
+
+KEYRING = "secret-service"
+
+
+def _keyring_status(ctx: Context, environ: Optional[Mapping[str, str]], slot: bool,
+                    reply: dict[str, object]) -> None:
+    """The app-mode status fields: ``wallet`` (the Secret Service method), ``keyring``,
+    ``keyringStorage`` and ``missing`` (secret-tool, then openssl; never busctl).
+
+    Outside the vault lock: the busctl query may take up to its timeout.
+    """
+    if ctx.keyring_missing:
+        reply["wallet"] = "unavailable"
+    elif secretkey.collection_locked(ctx.keyring_tools[secretkey.BUSCTL]) is None:
+        # No Secret Service, or no default collection (R0 S4: Locked fails).
+        reply["wallet"] = "unavailable"
+    else:
+        reply["wallet"] = "set-up" if slot else "off"
+    reply["keyring"] = KEYRING
+    reply["keyringStorage"] = secretkey.keyring_storage(environ)
+    missing = [name for name in (*secretkey.REPORTED, secretkey.KEYGEN_TOOL) if name not in ctx.keyring_tools]
+    if missing:
+        reply["missing"] = missing
+
+
+def _keyring_tools(ctx: Context, *, keygen: bool) -> None:
+    if ctx.keyring_missing or (keygen and secretkey.KEYGEN_TOOL not in ctx.keyring_tools):
+        raise HelperError("missing-tool")
+
+
+def _keyring_preflight(ctx: Context) -> bool:
+    """The default collection's ``Locked``; wallet-disabled when nothing answers
+    (no Secret Service or no default collection). Never prompts."""
+    locked = secretkey.collection_locked(ctx.keyring_tools[secretkey.BUSCTL])
+    if locked is None:
+        raise HelperError("wallet-disabled")
+    return locked
+
+
+def _drop_staged_item(ctx: Context) -> None:
+    """Overwrite and clear the staging item when it is there (best effort)."""
+    try:
+        if secretkey.item_exists(ctx.keyring_tools[secretkey.BUSCTL], secretkey.ITEM_NEW) is True:
+            secretkey.clear_item(ctx.keyring_tools, secretkey.ITEM_NEW)
+    except HelperError:
+        pass
+
+
+def _commit_keyring_slot(ctx: Context, keys: int) -> None:
+    """``_commit_slot`` for the Secret Service: swap the keyed copy and the staged key in;
+    on failure put the old ones back.
+
+    1. secret-service.conf (if any) becomes .old, .new becomes secret-service.conf.
+    2. The staged key is copied to the real item (lookup into a pipe, then a
+       store from it; never read here). That store is let finish after a stop
+       signal (task 011d), so the slot and the item never disagree.
+    3. Only then .old goes. If step 2 fails or is stopped first, the new slot
+       goes back to .new and .old back to secret-service.conf, so the old slot
+       and item keep working.
+    """
+    names = KEYRING_SLOT
+    _seal_new_slot(keys, names.new)
+    had_old = _slot_exists(keys, names.file)
+    try:
+        if had_old:
+            _rename(keys, names.file, names.old)
+        _rename(keys, names.new, names.file)
+        os.fsync(keys)
+    except OSError:
+        raise HelperError("wallet-write-failed") from None
+    try:
+        secretkey.copy_item(ctx.keyring_tools, secretkey.ITEM_NEW, secretkey.ITEM, settling=True)
+    except (HelperError, termination.Stopped):
+        # Roll back: the old slot and item keep working.
+        try:
+            _rename(keys, names.file, names.new)
+            if had_old:
+                _rename(keys, names.old, names.file)
+            os.fsync(keys)
+        except OSError:
+            pass
+        raise
+    _unlink(keys, names.old)
+    try:
+        os.fsync(keys)
+    except OSError:
+        pass
+
+
+def _keyring_add_key(ctx: Context, environ: Optional[Mapping[str, str]]) -> dict[str, object]:
+    """add-key in app mode: the steps of ``add_key`` with the Secret Service.
+
+    1. Copy gocryptfs.conf to vault-keys/secret-service.conf.new.
+    2. ``openssl rand -hex 32`` -> a pipe; only once openssl exited 0, its 64
+       hex digits (no LF) -> ``secret-tool store ... item encrypted-chat-folder.new``.
+    3. ``secret-tool lookup ... .new`` into a pipe; only after it exited 0 with a
+       key does that pipe become the stdin of ``gocryptfs -passwd -config
+       secret-service.conf.new``, whose extpass is the current-passphrase prompt.
+    4. Every exit status 0: _commit_keyring_slot swaps the slot and the item in.
+    5. The staging item is overwritten and cleared, on success and failure.
+
+    The plain-keyring confirm is the UI's (user decision Q2): no flag here.
+    """
+    _require_tools(ctx, "gocryptfs", "kdialog")
+    _keyring_tools(ctx, keygen=True)
+    _refuse_legacy_data(environ)
+    names = KEYRING_SLOT
+    with vault_lock(ctx, wait=True) as app:
+        state = settle(ctx, app)
+        if state in ("absent", "damaged"):
+            raise HelperError(state)
+        _keyring_preflight(ctx)
+        with _keys_dir(ctx, create=True) as keys:
+            if keys is None:
+                raise HelperError("os-error")
+            _clear_new_slot(keys, names.new)
+            if _slot_exists(keys, names.file):
+                # Left by an interrupted swap: secret-service.conf is the newer one.
+                _unlink(keys, names.old)
+            try:
+                _copy_conf(ctx, keys, names.new)
+            except (HelperError, OSError):
+                _clear_new_slot(keys, names.new)
+                raise
+            try:
+                secretkey.store_new_key(ctx.keyring_tools, secretkey.ITEM_NEW)
+                reader = secretkey.lookup_into_pipe(ctx.keyring_tools[secretkey.TOOL], secretkey.ITEM_NEW)
+                try:
+                    argv = wallet_passwd_argv(ctx.tools["gocryptfs"], ctx.tools["kdialog"], ctx.keyring_new_slot,
+                                              ctx.cipher)
+                    code = _run(argv, stdin=reader, config=ctx.keyring_new_slot, mode=ctx.mode)
+                finally:
+                    _close(reader)
+                if code != 0:
+                    raise HelperError(exit_error("wallet-passwd", code))
+                _commit_keyring_slot(ctx, keys)
+            except (HelperError, OSError, termination.Stopped) as failure:
+                _clear_new_slot(keys, names.new)
+                # A keyring that did not answer a lookup is not asked again (it may
+                # prompt); a leftover staging item is cleared by the next set-up or
+                # removal. After a stop signal it is cleared too, without the overwrite.
+                if not (isinstance(failure, HelperError) and failure.code == "wallet-failed"):
+                    _drop_staged_item(ctx)
+                raise
+            _drop_staged_item(ctx)
+    return {"ok": True}
+
+
+def _keyring_remove_key(ctx: Context) -> dict[str, object]:
+    """remove-key in app mode: the Secret Service slot files go first, then both items
+    are overwritten and cleared. The Plasma widget's wallet.conf is never touched."""
+    with vault_lock(ctx, wait=True):
+        with _keys_dir(ctx, create=False) as keys:
+            if keys is not None:
+                _remove_slot(keys, KEYRING_SLOT)
+        _keyring_tools(ctx, keygen=False)
+        _keyring_preflight(ctx)
+        secretkey.remove_items(ctx.keyring_tools)
+    return {"ok": True}
+
+
+def _unlock_with_keyring(ctx: Context, app: int, environ: Optional[Mapping[str, str]], *,
+                         automatic: bool) -> None:
+    """Pre-flight (non-secret busctl answers only), then mount with the Secret Service slot.
+
+    ``automatic`` (app start): while the default collection is locked, nothing
+    more runs and the reply is wallet-closed, so there is never a prompt at
+    app start. Except for a plain keyring (R0 S5, R0b): a lookup unlocks it
+    silently, with no prompt, and gnome-keyring starts locked after every
+    restart (R0 S4), so the silent unlock at start (user decision Q5) goes on.
+    That shortcut also needs our item to sit in the default collection only
+    (any other collection may be encrypted or another provider's), and its
+    lookup is bounded by AUTO_LOOKUP_TIMEOUT (a timeout is wallet-closed).
+    """
+    locked = _keyring_preflight(ctx)
+    with _keys_dir(ctx, create=False) as keys:
+        if keys is None or not _slot_ready(keys, KEYRING_SLOT.file):
+            raise HelperError("not-set-up")
+    shortcut = automatic and locked is not False
+    name = None
+    if shortcut:
+        name, storage = secretkey.keyring_default(environ)
+        if storage != "plain":
+            raise HelperError("wallet-closed")
+    paths = secretkey.item_paths(ctx.keyring_tools[secretkey.BUSCTL])
+    if paths is None:
+        raise HelperError("wallet-failed")
+    if not paths:
+        raise HelperError("not-set-up")
+    if shortcut:
+        prefix = secretkey.collection_path(name or "") + "/"
+        if not all(path.startswith(prefix) for path in paths):
+            raise HelperError("wallet-closed")
+    _mount(ctx, app, keyring=True, automatic=automatic)
+
+
+def _keyring_unlock(ctx: Context, environ: Optional[Mapping[str, str]], *, automatic: bool = False) -> dict[str, object]:
+    """``unlock --method wallet`` (and auto-unlock) in app mode."""
+    _require_tools(ctx, "gocryptfs", "fusermount3")
+    _keyring_tools(ctx, keygen=False)
+    _refuse_legacy_data(environ)
+    # A manual unlock waits for another one's prompt; auto-unlock never waits long.
+    with vault_lock(ctx, wait=not automatic) as app:
+        state = settle(ctx, app)
+        if state in ("absent", "damaged"):
+            raise HelperError(state)
+        if state == "locked":
+            _unlock_with_keyring(ctx, app, environ, automatic=automatic)
+    return {"ok": True}
+
+
+def _keyring_auto_unlock(ctx: Context, environ: Optional[Mapping[str, str]]) -> dict[str, object]:
+    return _keyring_unlock(ctx, environ, automatic=True)
 
 
 _HANDLERS: dict[str, Callable[[Optional[Mapping[str, str]]], dict[str, object]]] = {
